@@ -356,6 +356,7 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/fetch_network_post.js
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
+	./tests/devices/virtio_gpu.js
 
 acpi-unit-test:
 	./tests/unit/acpi.js
@@ -365,6 +366,12 @@ pci-unit-test:
 
 virtio-gpu-unit-test:
 	./tests/unit/virtio_gpu_protocol.js
+
+virtio-gpu-test: build/v86-debug.wasm acpi-unit-test pci-unit-test virtio-gpu-unit-test
+	./tests/devices/virtio_gpu.js
+
+virtio-gpu-test-release: build/libv86.mjs build/v86.wasm acpi-unit-test pci-unit-test virtio-gpu-unit-test
+	TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
@@ -424,4 +431,4 @@ doc:
 denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
-.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
+.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release

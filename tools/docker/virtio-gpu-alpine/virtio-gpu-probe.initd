@@ -1,0 +1,11 @@
+#!/sbin/openrc-run
+
+name="virtio-gpu probe"
+command="/usr/local/sbin/virtio-gpu-probe"
+command_background="no"
+
+ depend()
+{
+    need hwdrivers
+    after modules
+}

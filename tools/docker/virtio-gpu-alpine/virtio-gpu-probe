@@ -1,0 +1,45 @@
+#!/bin/sh
+
+exec 3>/dev/ttyS0
+
+echo 'V86_GPU_PROBE_BEGIN' >&3
+echo "V86_GPU_PROBE_KERNEL=$(uname -r)" >&3
+
+modprobe virtio_pci 2>&1 >&3 || true
+modprobe virtio_gpu 2>&1 >&3 || true
+mdev -s
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    virtio_device="$(find /sys/bus/virtio/drivers/virtio_gpu -mindepth 1 -maxdepth 1 -name 'virtio*' -print -quit 2>/dev/null)"
+    if [ -n "$virtio_device" ] && [ -e /dev/dri/card0 ]; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+
+lspci_output="$(lspci -nnk -d 1af4:1050 2>&1)"
+echo 'V86_GPU_PROBE_LSPCI_BEGIN' >&3
+echo "$lspci_output" >&3
+echo 'V86_GPU_PROBE_LSPCI_END' >&3
+
+if [ -n "$virtio_device" ]; then
+    echo "V86_GPU_PROBE_DRIVER=$(basename "$virtio_device")" >&3
+else
+    echo 'V86_GPU_PROBE_DRIVER=unbound' >&3
+fi
+
+if [ -e /dev/dri/card0 ]; then
+    echo 'V86_GPU_PROBE_DRM=/dev/dri/card0' >&3
+else
+    echo 'V86_GPU_PROBE_DRM=missing' >&3
+fi
+
+if echo "$lspci_output" | grep -q '1af4:1050' && [ -n "$virtio_device" ] && [ -e /dev/dri/card0 ]; then
+    echo 'V86_GPU_PROBE_STATUS=PASS' >&3
+else
+    echo 'V86_GPU_PROBE_STATUS=FAIL' >&3
+fi
+
+echo 'V86_GPU_PROBE_END' >&3

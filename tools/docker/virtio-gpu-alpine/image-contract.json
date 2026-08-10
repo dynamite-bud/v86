@@ -1,0 +1,27 @@
+{
+  "architecture": "x86",
+  "artifacts": {
+    "filesystem_json": {
+      "path": "images/alpine-virtio-gpu-fs.json",
+      "sha256": "c46483d746b78be77e7d3b120369ab1b9119690fe9a70aec3dbc5f30ccd95259",
+      "size": 356566
+    },
+    "flat_files": {
+      "file_count": 5325,
+      "manifest_sha256": "97c4521d39fb173c2b2819cbe12b9989d34b412960cc72b8f7cbf84e5c64bd5a",
+      "path": "images/alpine-virtio-gpu-rootfs-flat",
+      "size": 178440096
+    },
+    "rootfs_tar": {
+      "path": "images/alpine-virtio-gpu-rootfs.tar",
+      "sha256": "0a04f035968d6a9987b8e52ed405835fcf46e2a1a9d722e3668a723bbd1a3066",
+      "size": 459345920
+    }
+  },
+  "base_image": "docker.io/i386/alpine@sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753",
+  "distribution": "Alpine Linux 3.21",
+  "kernel_release": "6.12.98-0-lts",
+  "packages_lock_sha256": "450db40c6287305de3e6522918c7ddb7aea61e33bdbd857612bfa94b9a5eaa23",
+  "probe_success_marker": "V86_GPU_PROBE_STATUS=PASS",
+  "schema": 1
+}
