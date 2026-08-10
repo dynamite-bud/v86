@@ -246,7 +246,8 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpuid_level = options.cpuid_level;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
-    if(options.virtio_gpu && options.virtio_gpu.backend === "wgpu")
+    if(options.virtio_gpu &&
+       (options.virtio_gpu.backend === "wgpu" || options.virtio_gpu.backend === "webgpu-js"))
     {
         settings.virtio_gpu = Object.assign({}, options.virtio_gpu, {
             screen_container: options.virtio_gpu.screen_container ||

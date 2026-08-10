@@ -347,7 +347,7 @@ export interface VirtioGpuConfig {
      * Renderer backend.
      * @default "memory"
      */
-    backend?: "memory" | "wgpu";
+    backend?: "memory" | "wgpu" | "webgpu-js";
 
     /**
      * Preferred width reported for the single scanout.
@@ -368,8 +368,8 @@ export interface VirtioGpuConfig {
     max_host_memory_bytes?: number;
 
     /**
-     * Dedicated presentation canvas for the wgpu backend. When omitted, v86
-     * creates one in the configured screen container.
+     * Dedicated presentation canvas for either WebGPU backend. When omitted,
+     * v86 creates one in the configured screen container.
      */
     canvas?: HTMLCanvasElement;
 

@@ -1404,7 +1404,7 @@ Provide an optional debug panel or console dump, but keep it disabled by default
 - Performance tuning.
 - Kitty integration image and tests.
 
-Keep direct JS WebGPU as a later backend PR using the same `VirtioGpuBackend` interface.
+The direct JavaScript WebGPU backend was implemented before Phase 5 using the same `VirtioGpuBackend` interface. Keep both browser renderers behind the shared adapter and run the Phase 5 browser matrix against both.
 
 ## 21. Codex kickoff prompt - first assignment
 

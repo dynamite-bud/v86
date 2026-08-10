@@ -103,7 +103,7 @@ Standard VirtIO GPU 2D commands remain the compatibility path. Any virgl-like or
 
 `tests/devices/virtio_gpu.js` boots the generated Alpine i386 filesystem, requires PCI/driver/DRM markers, runs `modetest` at `1024x768`, and asserts the resulting SMPTE pixels directly in `MemoryGpuBackend`. The reproducible image inputs, package/kernel contract, build command, and SHA-256 manifest live under `tools/docker/virtio-gpu-alpine/`.
 
-Browser acceptance uses the same generated Alpine guest with `virtio_gpu.backend: "wgpu"`. The VGA canvas remains visible during boot, the dedicated WebGPU canvas becomes visible only after the first successful resource flush, and the locked SMPTE samples must match the decoded `MemoryGpuBackend` pixels. Reset, renderer reinitialization, surface reconfiguration, and controlled device destruction must restore or preserve the VGA fallback without console or WebGPU validation errors.
+Browser acceptance uses the same generated Alpine guest with each browser renderer. The VGA canvas remains visible during boot, the dedicated WebGPU canvas becomes visible only after the first successful resource flush, and the locked SMPTE samples must match the decoded `MemoryGpuBackend` pixels. Reset, renderer reinitialization, surface reconfiguration, and controlled device destruction must restore or preserve the VGA fallback without console or WebGPU validation errors.
 
 ## Linux Bring-up Workflow
 
@@ -161,16 +161,27 @@ make rustfmt
 
 The device tests require the generated Alpine artifacts described in `tools/docker/virtio-gpu-alpine/Readme.md`. The release target exercises `build/libv86.mjs`; the non-release target imports source modules directly. The `virtio-gpu-wgpu` target additionally requires `wasm-bindgen` and the `wasm32-unknown-unknown` Rust target.
 
-## Browser wgpu Backend
+## Browser WebGPU Backends
 
-Build the optional renderer after the normal browser artifacts:
+Both browser renderers implement the same `VirtioGpuBackend` contract and use the
+same standard VirtIO GPU 2D device:
 
-```sh
-make all-debug
-make virtio-gpu-wgpu
+- `webgpu-js`: direct JavaScript `navigator.gpu` renderer. It is part of the
+  normal browser bundle and needs no renderer-specific Wasm artifact.
+- `wgpu`: independent Rust/wasm-bindgen renderer under
+  `tools/virtio-gpu-wgpu/`. Build it with `make virtio-gpu-wgpu`.
+
+Select the direct renderer:
+
+```js
+virtio_gpu: {
+    backend: "webgpu-js",
+    width: 1024,
+    height: 768,
+}
 ```
 
-Select it through the existing public configuration:
+Or select the Rust/Wasm renderer:
 
 ```js
 virtio_gpu: {
@@ -181,8 +192,102 @@ virtio_gpu: {
 }
 ```
 
-`WgpuBackend` creates a presentation canvas in the configured screen container unless `virtio_gpu.canvas` supplies one. Resource uploads are repacked to WebGPU's row alignment, the fullscreen conversion pass handles all four standard 32-bit formats and forces opaque alpha for X formats, and presentation occurs only on `RESOURCE_FLUSH`. Fenced commands additionally wait for submitted GPU work; unfenced commands return after ordered submission.
+The shared browser adapter creates a presentation canvas in the configured
+screen container unless `virtio_gpu.canvas` supplies one. Both renderers enforce
+the host-memory budget, repack resource uploads to WebGPU's 256-byte row
+alignment, convert all four standard 32-bit scanout formats, force opaque alpha
+for X formats, and present only on `RESOURCE_FLUSH`. Fenced commands wait for
+submitted GPU work; unfenced commands return after ordered submission.
 
-Reset and fatal renderer failures hide the WebGPU canvas and restore the prior VGA text/graphics state. Recoverable surface loss is reconfigured in place. Device loss and uncaptured validation errors become JavaScript errors and trigger the same VGA fallback.
+Reset and fatal renderer failures hide the WebGPU canvas and restore the prior
+VGA text/graphics state. Recoverable surface loss is reconfigured in place.
+Device loss and uncaptured validation errors become JavaScript errors and
+trigger the same VGA fallback.
 
-EDID, blobs, UUIDs, virgl, custom capsets, cursor commands, and 3D commands must not be advertised before their complete paths exist.
+`examples/virtio_gpu_desktop.html` exposes renderer and Xorg/Wayland selectors.
+It defaults to `webgpu-js`; use `?renderer=wgpu` for the Rust/Wasm path. The
+desktop VM uses 1 GiB guest RAM while the GPU host-resource budget remains
+256 MiB unless configured otherwise.
+
+EDID, blobs, UUIDs, virgl, custom capsets, cursor commands, and 3D commands must
+not be advertised before their complete paths exist.
+
+## Roadmap After the Direct JavaScript Backend
+
+Phases 0-4 of the implementation plan are complete: backend abstraction, PCI
+device, standard 2D commands, memory and Rust/Wasm WebGPU renderers, Linux KMS
+proof, and reproducible Xorg/Wayland desktop guests. The direct JavaScript
+renderer is also complete as an alternate Phase 4 presentation target.
+
+### Phase 5: Standard 2D hardening
+
+Complete these in order:
+
+1. **Automated browser acceptance.** Cover the KMS pattern, VGA-to-WebGPU
+   transition, reset, snapshot restore, surface reconfiguration, controlled
+   device loss/VGA fallback, Xorg, Wayland, and both WebGPU renderers. Fail on
+   validation errors or uncaught exceptions. Manual browser proof is not a
+   replacement for this gate.
+2. **Cursor queue.** Implement `VIRTIO_GPU_CMD_UPDATE_CURSOR` and
+   `VIRTIO_GPU_CMD_MOVE_CURSOR`, cursor resource validation, cursor state in
+   snapshots, and a separate WebGPU quad or browser overlay. Cursor movement
+   must not upload the full scanout.
+3. **EDID, display events, and resize.** Implement `GET_EDID`, advertise
+   `VIRTIO_GPU_F_EDID` only then, maintain `events_read`/`events_clear`, raise
+   display-change config interrupts, and add a controlled configured-mode
+   change with canvas and scanout resize tests.
+4. **Snapshot completion.** Keep resource metadata, guest backing, scanout,
+   cursor, config, and event state serializable. On restore, recreate renderer
+   resources, reread guest backing, upload pixels, restore scanout, and present
+   one frame after renderer initialization. The existing 2D resource
+   rehydration and asynchronous generation guards are the baseline, not the
+   final browser acceptance proof.
+5. **Limits and fuzzing.** Retain checked arithmetic and the total host-memory
+   budget; add configurable resource count/dimension, command payload,
+   backing-entry, and queued-work limits. Fuzz parser properties, partial
+   uploads, invalid snapshot state, and reset interleavings.
+6. **Instrumentation.** Measure guest reads, repacking/copy time, GPU upload,
+   GPU completion, present rate, bytes per frame, command counts, invalid
+   commands, queue depth, fence latency, surface recovery, and device loss.
+
+Phase 5 exits only when those tests protect the current 2D desktop path and a
+malformed guest cannot crash or indefinitely stall the browser.
+
+### Phase 6: Experimental 3D transport
+
+Start only after Phase 5. First verify that the pinned Linux `virtio_gpu` driver
+passes an unknown private capset through to userspace. Then specify a versioned,
+bounded custom capset and add truthful WebGPU limits, isolated
+context/resource lifetimes, ordered fences, and a bounded `SUBMIT_3D` decoder.
+Reuse standard context and 3D resource commands where possible. The first proof
+is a guest utility rendering one hardcoded WGSL triangle through the existing
+2D scanout; do not start with Mesa.
+
+### Phase 7: Mesa winsys and Gallium skeleton
+
+Add an out-of-tree `webgpuvirt` DRM winsys and Gallium driver selected initially
+with `MESA_LOADER_DRIVER_OVERRIDE=webgpuvirt`. Bring up resource mapping,
+fences, clear, then non-indexed/indexed draws, textures, uniforms, viewport,
+scissor, and required blits. Advertise only capabilities backed by the capset
+and host device. Exit with Mesa identifying the driver and rendering a clear
+and triangle without leaked host objects.
+
+### Phase 8: Shader translation
+
+Progress from host-fixed WGSL to a restricted generated shader subset, then
+spike NIR-to-SPIR-V in Mesa and SPIR-V-to-WebGPU validation through Naga/wgpu.
+Resolve clip depth, Y orientation, combined samplers, binding layouts,
+alignment, unsupported formats, line/point behavior, and robust access.
+Every rejection must preserve the guest and capture the guest shader/NIR,
+SPIR-V when used, host validation message, pipeline descriptor, and
+reproduction command.
+
+### Phase 9: OpenGL and terminal validation
+
+Validate Gallium tests, surfaceless EGL clear, DRM/GBM triangle, a minimal X11
+GL program, `glmark2-es2`, and a focused Piglit subset before compositors or
+applications. Grow truthfully from GLES 2-class behavior to desktop OpenGL 2.1
+and finally OpenGL 3.3 core. Kitty is the first terminal target; it must render
+glyph atlases, textured quads, alpha blending, scrolling, and resize without
+llvmpipe fallback. Ghostty is later because it adds unrelated platform and
+packaging variables.

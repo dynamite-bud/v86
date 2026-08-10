@@ -90,6 +90,10 @@
         <a id="xorg-link" href="?desktop=xorg">Xorg</a>
         <a id="wayland-link" href="?desktop=wayland">Wayland</a>
     </nav>
+    <nav aria-label="GPU renderer">
+        <a id="webgpu-js-link" href="?renderer=webgpu-js">Direct JavaScript</a>
+        <a id="wgpu-link" href="?renderer=wgpu">Rust/Wasm wgpu</a>
+    </nav>
 </header>
 <main>
     <p id="status">Preparing emulator…</p>
@@ -107,13 +111,20 @@ import { V86 } from "../build/libv86.mjs";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("desktop") === "wayland" ? "wayland" : "xorg";
+const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
+const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
 document.getElementById(`${mode}-link`).setAttribute("aria-current", "page");
+document.getElementById(`${renderer}-link`).setAttribute("aria-current", "page");
+document.getElementById("xorg-link").href = `?desktop=xorg&renderer=${renderer}`;
+document.getElementById("wayland-link").href = `?desktop=wayland&renderer=${renderer}`;
+document.getElementById("webgpu-js-link").href = `?desktop=${mode}&renderer=webgpu-js`;
+document.getElementById("wgpu-link").href = `?desktop=${mode}&renderer=wgpu`;
 
 const emulator = new V86({
     wasm_path: "../build/v86.wasm",
-    memory_size: 768 * 1024 * 1024,
+    memory_size: 1024 * 1024 * 1024,
     vga_memory_size: 8 * 1024 * 1024,
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
@@ -126,16 +137,19 @@ const emulator = new V86({
     bzimage_initrd_from_filesystem: true,
     cmdline: `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86.desktop=${mode}`,
     virtio_gpu: {
-        backend: "wgpu",
+        backend: renderer,
         width: 1024,
         height: 768,
-        wasm_module_url: "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+        ...(renderer === "wgpu" ? {
+            wasm_module_url: "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+        } : {}),
     },
 });
 
 window.emulator = emulator;
 window.desktopMode = mode;
-status.textContent = `Booting Alpine XFCE (${mode})…`;
+window.webgpuBackend = renderer;
+status.textContent = `Booting Alpine XFCE (${mode}, ${renderer_label})…`;
 let serial_text = "";
 let serial_render_pending = false;
 let guest_ready = false;

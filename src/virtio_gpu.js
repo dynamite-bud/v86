@@ -3,6 +3,7 @@ import { dbg_log } from "./log.js";
 import { VirtIO, VIRTIO_F_VERSION_1 } from "./virtio.js";
 import { MemoryGpuBackend } from "./browser/virtio_gpu_backend.js";
 import { WgpuBackend } from "./browser/virtio_gpu_wgpu_backend.js";
+import { JsWebGpuBackend } from "./browser/virtio_gpu_webgpu_backend.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -104,13 +105,16 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.max_host_memory_bytes = validate_host_memory_limit(options.max_host_memory_bytes);
     this.events_read = 0;
 
-    if(options.backend !== undefined && options.backend !== "memory" && options.backend !== "wgpu")
+    if(options.backend !== undefined && options.backend !== "memory" &&
+       options.backend !== "wgpu" && options.backend !== "webgpu-js")
     {
         throw new Error("Unsupported virtio-gpu backend: " + options.backend);
     }
 
-    this.backend = backend || (options.backend === "wgpu" ?
-        new WgpuBackend(options) : new MemoryGpuBackend());
+    this.backend = backend ||
+        (options.backend === "wgpu" ? new WgpuBackend(options) :
+        options.backend === "webgpu-js" ? new JsWebGpuBackend(options) :
+        new MemoryGpuBackend());
     this.backend_options = {
         width: this.width,
         height: this.height,

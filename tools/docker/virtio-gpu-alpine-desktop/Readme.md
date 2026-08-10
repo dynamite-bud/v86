@@ -1,6 +1,6 @@
 # Alpine i386 VirtIO GPU Desktop
 
-This directory defines the reproducible full-desktop guest used to exercise v86's standard VirtIO GPU 2D path through the browser WebGPU presenter. It builds Alpine Linux 3.24.1 for i386 with Linux 6.18 LTS, XFCE, Xorg, labwc, `xfce4-terminal`, and Thunar.
+This directory defines the reproducible full-desktop guest used to exercise v86's standard VirtIO GPU 2D path through either browser WebGPU renderer. It builds Alpine Linux 3.24.1 for i386 with Linux 6.18 LTS, XFCE, Xorg, labwc, `xfce4-terminal`, and Thunar.
 
 The image is for local development and browser acceptance only. It has a blank root password and automatic root login on the VGA and serial consoles. Do not deploy it or expose it to an untrusted network.
 
@@ -13,7 +13,7 @@ XFCE application
   -> software-rendered guest window contents
   -> Linux virtio_gpu DRM/KMS scanout
   -> v86 standard VirtIO GPU 2D commands
-  -> browser WgpuBackend
+  -> selected browser WebGPU backend (`webgpu-js` or Rust/Wasm `wgpu`)
   -> host WebGPU canvas
 ```
 
@@ -36,7 +36,7 @@ Docker only assembles and exports the root filesystem. Docker is not part of the
 
 - Docker with `linux/386` support. Docker Desktop provides architecture emulation on Apple silicon.
 - Python 3 with the `zstandard` module used by the repository image tools.
-- Rust stable with `wasm32-unknown-unknown` and `wasm-bindgen` for the WebGPU renderer.
+- Rust stable with `wasm32-unknown-unknown` and `wasm-bindgen` only when building the optional Rust/Wasm `wgpu` renderer.
 - Enough space for Docker layers, a roughly 800 MiB rootfs tar, and the content-addressed flat filesystem.
 
 Install the Python dependency if needed:
@@ -51,7 +51,8 @@ From the repository root:
 
 ```sh
 make virtio-gpu-desktop-image
-make all-debug virtio-gpu-wgpu
+make all-debug
+make virtio-gpu-wgpu  # Optional Rust/Wasm renderer
 ```
 
 The image build:
@@ -89,12 +90,15 @@ Serve the repository root after building:
 python3 -m http.server 8000
 ```
 
-Open one of these URLs:
+Open one of these URLs for the direct JavaScript renderer:
 
-- Xorg: `http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=xorg`
-- Wayland: `http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=wayland`
+- Xorg: `http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=xorg&renderer=webgpu-js`
+- Wayland: `http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=wayland&renderer=webgpu-js`
 
-The page also exposes Xorg and Wayland selectors. It boots the generated filesystem with the VirtIO GPU WebGPU backend at `1024x768` and switches from VGA to the dedicated WebGPU canvas after the guest establishes its first KMS scanout.
+Use `renderer=wgpu` for the Rust/Wasm renderer. The page exposes both desktop
+and renderer selectors. It boots the generated filesystem with 1 GiB guest RAM
+at `1024x768` and switches from VGA to the dedicated WebGPU canvas after the
+guest establishes its first KMS scanout.
 
 ## Session Comparison
 
@@ -131,9 +135,10 @@ make virtio-gpu-unit-test
 make virtio-gpu-test
 ```
 
-Browser acceptance for both selectors must verify:
+Browser acceptance for both desktop sessions and both renderer selectors must verify:
 
 - `V86_DESKTOP_READY=PASS` and `/dev/dri/card0` in the serial contract.
+- The selected backend initialized without fatal errors.
 - A visible `1024x768` WebGPU canvas and active scanout.
 - Terminal keyboard input.
 - Thunar browsing the generated filesystem.

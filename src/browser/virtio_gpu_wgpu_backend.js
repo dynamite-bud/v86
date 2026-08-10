@@ -16,6 +16,7 @@ export class WgpuBackend extends VirtioGpuBackend
     {
         super();
         this.options = options;
+        this.backend_name = "wgpu";
         this.module_promise = null;
         this.renderer = null;
         this.initialized = false;
@@ -76,7 +77,7 @@ export class WgpuBackend extends VirtioGpuBackend
             }
             if(!this.canvas)
             {
-                throw new Error("The wgpu backend requires a screen container or dedicated canvas");
+                throw new Error("The WebGPU backend requires a screen container or dedicated canvas");
             }
 
             const module = await this.load_module();
@@ -254,7 +255,7 @@ export class WgpuBackend extends VirtioGpuBackend
         {
             return this.fatal_error;
         }
-        this.fatal_error = normalize_error(error, operation);
+        this.fatal_error = normalize_error(error, this.backend_name, operation);
         this.restore_vga();
         this.stop_device_monitor();
         this.dispose_renderer();
@@ -356,7 +357,7 @@ function validate_nonnegative_integer(value, name)
     return value;
 }
 
-function normalize_error(error, operation)
+function normalize_error(error, backend_name, operation)
 {
     let message;
     if(error && typeof error.message === "string")
@@ -367,5 +368,5 @@ function normalize_error(error, operation)
     {
         message = String(error);
     }
-    return new Error("virtio-gpu wgpu " + operation + " failed: " + message);
+    return new Error("virtio-gpu " + backend_name + " " + operation + " failed: " + message);
 }

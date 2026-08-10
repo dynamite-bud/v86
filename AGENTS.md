@@ -81,9 +81,9 @@ Integration images are external and ignored. Use the image download command in `
 - `Cargo.toml`, `.cargo/config.toml`, `eslint.config.mjs`, `.rustfmt.toml`: compiler and style settings.
 - `.github/workflows/ci.yml`: definitive CI toolchain and suite list.
 - `Readme.md`, `docs/how-it-works.md`, `tests/Readme.md`: setup, architecture, and test controls.
-- `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`, `src/browser/virtio_gpu_wgpu_backend.js`: VirtIO GPU protocol device, renderer-independent contract, and browser WebGPU adapter.
+- `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`, `src/browser/virtio_gpu_wgpu_backend.js`, `src/browser/virtio_gpu_webgpu_backend.js`: VirtIO GPU protocol device, renderer-independent contract, shared browser WebGPU adapter, and direct JavaScript WebGPU renderer.
 - `tools/virtio-gpu-wgpu/`: independent Rust/Wasm `wgpu` renderer with its own manifest and committed lockfile.
-- `docs/virtio-gpu-webgpu.md`: implemented 2D protocol, memory/WebGPU backends, state and failure invariants, Linux KMS proof, and browser setup.
+- `docs/virtio-gpu-webgpu.md`: implemented 2D protocol, both browser renderers, state and failure invariants, Linux KMS proof, browser setup, 2D hardening, and the gated 3D/Mesa roadmap.
 - `tools/docker/virtio-gpu-alpine/`: reproducible i386 guest inputs, package locks, probe, build pipeline, and reviewed checksum contract.
 
 ## Runtime/Tooling Preferences
@@ -105,4 +105,4 @@ JavaScript tests are standalone Node ESM scripts using `node:assert/strict` and 
 - `tests/full/`, `tests/devices/`, `tests/jit-paging/`, `tests/kvm-unit-tests/`: boot, device, paging/JIT, and bare-metal integration.
 - `tests/unit/`: standalone protocol and PCI shared-interrupt tests.
 
-Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NAME="..."`; full tests also support `RUN_SLOW_TESTS`, `TIMEOUT_EXTRA_FACTOR`, `LOG_LEVEL`, `DISABLE_JIT`, and `TEST_ACPI`. Select the narrow suite for the changed contract, then match CI coverage for cross-cutting changes. CI runs device tests separately even though `make all-tests` omits them due to hangs. For browser GPU work, run `make virtio-gpu-wgpu`, serve the repository over localhost, boot the reproducible Alpine guest with `virtio_gpu.backend: "wgpu"`, and inspect the WebGPU canvas plus console validation errors. No coverage tool, threshold, or report is configured; correctness is enforced through targeted behavioral, differential, and golden assertions.
+Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NAME="..."`; full tests also support `RUN_SLOW_TESTS`, `TIMEOUT_EXTRA_FACTOR`, `LOG_LEVEL`, `DISABLE_JIT`, and `TEST_ACPI`. Select the narrow suite for the changed contract, then match CI coverage for cross-cutting changes. CI runs device tests separately even though `make all-tests` omits them due to hangs. For browser GPU work, run `make virtio-gpu-unit-test`, serve the repository over localhost, and boot the reproducible Alpine guest with `virtio_gpu.backend: "webgpu-js"`; also run `make virtio-gpu-wgpu` and repeat with `"wgpu"` when shared adapter or protocol behavior changes. Inspect the WebGPU canvas and console validation errors. No coverage tool, threshold, or report is configured; correctness is enforced through targeted behavioral, differential, and golden assertions.
