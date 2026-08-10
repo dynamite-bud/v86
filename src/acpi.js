@@ -114,15 +114,18 @@ export function ACPI(cpu)
         return this.gpe[3];
     });
 
+    // GPE0_STS occupies the first half of the block and is write-one-to-clear.
+    // GPE0_EN occupies the second half and stores the enable mask directly.
+
     io.register_write(0xAFE0, this, function(value)
     {
         dbg_log("Write gpe#0: " + h(value), LOG_ACPI);
-        this.gpe[0] = value;
+        this.gpe[0] &= ~value;
     });
     io.register_write(0xAFE1, this, function(value)
     {
         dbg_log("Write gpe#1: " + h(value), LOG_ACPI);
-        this.gpe[1] = value;
+        this.gpe[1] &= ~value;
     });
     io.register_write(0xAFE2, this, function(value)
     {

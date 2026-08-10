@@ -357,6 +357,9 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
 
+acpi-unit-test:
+	./tests/unit/acpi.js
+
 pci-unit-test:
 	./tests/unit/pci.js
 
@@ -382,7 +385,7 @@ api-tests: build/v86-debug.wasm
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests pci-unit-test virtio-gpu-unit-test
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	# Skipping:
 	# - devices-test (hangs)
 
@@ -421,4 +424,4 @@ doc:
 denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
-.PHONY: tests pci-unit-test virtio-gpu-unit-test
+.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
