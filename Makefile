@@ -18,6 +18,14 @@ STRIP_DEBUG_FLAG=--v86-strip-debug
 endif
 
 WASM_OPT ?= false
+WASM_BINDGEN ?= wasm-bindgen
+VIRTIO_GPU_WGPU_DIR=tools/virtio-gpu-wgpu
+VIRTIO_GPU_WGPU_OUT=build/virtio-gpu-wgpu
+VIRTIO_GPU_WGPU_JS=$(VIRTIO_GPU_WGPU_OUT)/virtio_gpu_wgpu.js
+VIRTIO_GPU_WGPU_WASM=$(VIRTIO_GPU_WGPU_OUT)/virtio_gpu_wgpu_bg.wasm
+VIRTIO_GPU_WGPU_FILES=$(VIRTIO_GPU_WGPU_DIR)/Cargo.toml $(VIRTIO_GPU_WGPU_DIR)/Cargo.lock \
+	$(wildcard $(VIRTIO_GPU_WGPU_DIR)/src/*)
+
 
 default: build/v86-debug.wasm
 all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm
@@ -88,7 +96,7 @@ LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
-          print_stats.js filestorage.js modem.js virtio_gpu_backend.js
+	      print_stats.js filestorage.js modem.js virtio_gpu_backend.js virtio_gpu_wgpu_backend.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
@@ -206,6 +214,19 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
+.PHONY: virtio-gpu-wgpu
+.NOTPARALLEL: virtio-gpu-wgpu
+virtio-gpu-wgpu: $(VIRTIO_GPU_WGPU_JS) $(VIRTIO_GPU_WGPU_WASM)
+
+$(VIRTIO_GPU_WGPU_JS) $(VIRTIO_GPU_WGPU_WASM): $(VIRTIO_GPU_WGPU_FILES)
+	mkdir -p $(VIRTIO_GPU_WGPU_OUT)
+	CARGO_TARGET_DIR=$(VIRTIO_GPU_WGPU_DIR)/target cargo build \
+		--manifest-path $(VIRTIO_GPU_WGPU_DIR)/Cargo.toml \
+		--target wasm32-unknown-unknown --release --locked
+	$(WASM_BINDGEN) --target web --no-typescript --out-name virtio_gpu_wgpu \
+		--out-dir $(VIRTIO_GPU_WGPU_OUT) \
+		$(VIRTIO_GPU_WGPU_DIR)/target/wasm32-unknown-unknown/release/virtio_gpu_wgpu.wasm
+
 build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	-BLOCK_SIZE=K ls -l build/v86.wasm
@@ -263,6 +284,7 @@ clean:
 	-rm build/v86_all.js
 	-rm build/v86.wasm
 	-rm build/v86-debug.wasm
+	-rm -rf $(VIRTIO_GPU_WGPU_OUT)
 	-rm $(INSTRUCTION_TABLES)
 	-rm build/*.map
 	-rm build/*.wast
@@ -418,6 +440,12 @@ build/xterm.js:
 	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js.map > build/xterm.js.map
 	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/css/xterm.css > build/xterm.css
 
+virtio-gpu-kms-image:
+	tools/docker/virtio-gpu-alpine/build.sh
+
+virtio-gpu-desktop-image:
+	tools/docker/virtio-gpu-alpine-desktop/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -431,4 +459,5 @@ doc:
 denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
-.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release
+.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
+	virtio-gpu-kms-image virtio-gpu-desktop-image

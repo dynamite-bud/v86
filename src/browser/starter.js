@@ -246,7 +246,17 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.cpuid_level = options.cpuid_level;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
-    settings.virtio_gpu = options.virtio_gpu;
+    if(options.virtio_gpu && options.virtio_gpu.backend === "wgpu")
+    {
+        settings.virtio_gpu = Object.assign({}, options.virtio_gpu, {
+            screen_container: options.virtio_gpu.screen_container ||
+                options.screen && options.screen.container || options.screen_container,
+        });
+    }
+    else
+    {
+        settings.virtio_gpu = options.virtio_gpu;
+    }
 
     const relay_url = options.network_relay_url || options.net_device && options.net_device.relay_url;
     if(relay_url)
@@ -827,6 +837,11 @@ V86.prototype.destroy = async function()
 {
     await this.stop();
 
+    const virtio_gpu = this.v86.cpu.devices.virtio_gpu;
+    if(virtio_gpu)
+    {
+        await virtio_gpu.dispose();
+    }
     this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();

@@ -1,0 +1,27 @@
+{
+  "architecture": "x86",
+  "artifacts": {
+    "filesystem_json": {
+      "path": "images/alpine-virtio-gpu-desktop-fs.json",
+      "sha256": "6ca227587f5ee01c668d76a39a1e129a1b42f826b2cfd46a4b19b527db8eb339",
+      "size": 695333
+    },
+    "flat_files": {
+      "file_count": 9174,
+      "manifest_sha256": "bb3f071923676268e620ca4b0e7bbf31fb839283ddb33bfaa49e29be20c8a4ec",
+      "path": "images/alpine-virtio-gpu-desktop-rootfs-flat",
+      "size": 295225431
+    },
+    "rootfs_tar": {
+      "path": "images/alpine-virtio-gpu-desktop-rootfs.tar",
+      "sha256": "2f7567c0872424932416dd8fd082eb568b871759caacb2044d400a3ee65b46b2",
+      "size": 794818560
+    }
+  },
+  "base_image": "docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8",
+  "distribution": "Alpine Linux 3.24.1",
+  "kernel_release": "6.18.44-0-lts",
+  "packages_lock_sha256": "94aae253e26d69d059f5b38d37ed6050618c8a8515f0be46d0da4d5347bb925f",
+  "probe_success_marker": "V86_DESKTOP_READY=PASS",
+  "schema": 1
+}

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 Alpine XFCE on virtio-gpu WebGPU</title>
+<style>
+    :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+    }
+    body {
+        margin: 0;
+        background: #17191d;
+        color: #f1f3f5;
+    }
+    header {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        background: #25282e;
+        border-bottom: 1px solid #3b3f47;
+    }
+    h1 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 600;
+    }
+    nav {
+        display: flex;
+        gap: 8px;
+    }
+    nav a {
+        padding: 6px 10px;
+        border: 1px solid #676e7a;
+        border-radius: 4px;
+        color: inherit;
+        text-decoration: none;
+    }
+    nav a[aria-current="page"] {
+        background: #3f6eb3;
+        border-color: #74a4eb;
+    }
+    main {
+        width: min(1024px, 100%);
+        margin: 16px auto;
+    }
+    #status {
+        margin: 0 0 8px;
+        color: #cbd1da;
+        font: 13px ui-monospace, monospace;
+    }
+    #screen_container {
+        position: relative;
+        width: 1024px;
+        height: 768px;
+        max-width: 100%;
+        overflow: hidden;
+        background: #000;
+        box-shadow: 0 8px 32px #0009;
+    }
+    #screen_container > div {
+        white-space: pre;
+        font: 14px monospace;
+        line-height: 14px;
+    }
+    #screen_container > canvas.legacy-vga {
+        display: none;
+    }
+    #screen_container canvas {
+        max-width: 100%;
+        height: auto;
+        image-rendering: pixelated;
+    }
+    details {
+        margin-top: 10px;
+        color: #aeb5c0;
+    }
+    pre {
+        max-height: 240px;
+        overflow: auto;
+        padding: 8px;
+        background: #101216;
+        white-space: pre-wrap;
+    }
+</style>
+<header>
+    <h1>Alpine XFCE on virtio-gpu WebGPU</h1>
+    <nav aria-label="Desktop session">
+        <a id="xorg-link" href="?desktop=xorg">Xorg</a>
+        <a id="wayland-link" href="?desktop=wayland">Wayland</a>
+    </nav>
+</header>
+<main>
+    <p id="status">Preparing emulator…</p>
+    <div id="screen_container">
+        <div></div>
+        <canvas class="legacy-vga"></canvas>
+    </div>
+    <details>
+        <summary>Serial console</summary>
+        <pre id="serial"></pre>
+    </details>
+</main>
+<script type="module">
+import { V86 } from "../build/libv86.mjs";
+
+const params = new URLSearchParams(location.search);
+const mode = params.get("desktop") === "wayland" ? "wayland" : "xorg";
+const status = document.getElementById("status");
+const serial = document.getElementById("serial");
+document.getElementById(`${mode}-link`).setAttribute("aria-current", "page");
+
+const emulator = new V86({
+    wasm_path: "../build/v86.wasm",
+    memory_size: 768 * 1024 * 1024,
+    vga_memory_size: 8 * 1024 * 1024,
+    bios: { url: "../bios/seabios.bin" },
+    vga_bios: { url: "../bios/vgabios.bin" },
+    filesystem: {
+        baseurl: "../images/alpine-virtio-gpu-desktop-rootfs-flat",
+        basefs: "../images/alpine-virtio-gpu-desktop-fs.json",
+    },
+    screen_container: document.getElementById("screen_container"),
+    autostart: true,
+    bzimage_initrd_from_filesystem: true,
+    cmdline: `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86.desktop=${mode}`,
+    virtio_gpu: {
+        backend: "wgpu",
+        width: 1024,
+        height: 768,
+        wasm_module_url: "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+    },
+});
+
+window.emulator = emulator;
+window.desktopMode = mode;
+status.textContent = `Booting Alpine XFCE (${mode})…`;
+let serial_text = "";
+let serial_render_pending = false;
+let guest_ready = false;
+let readiness_timer;
+function update_readiness()
+{
+    if(document.body.dataset.result)
+    {
+        clearInterval(readiness_timer);
+        return;
+    }
+    if(serial_text.includes("V86_DESKTOP_READY=FAIL"))
+    {
+        status.textContent = `Alpine XFCE (${mode}) failed to start. Open the serial console for details.`;
+        document.body.dataset.result = "fail";
+        clearInterval(readiness_timer);
+        return;
+    }
+    if(!guest_ready)
+    {
+        return;
+    }
+    const canvas = document.querySelector(".v86-virtio-gpu-canvas");
+    if(canvas && !canvas.hidden && getComputedStyle(canvas).display !== "none")
+    {
+        status.textContent = `Alpine XFCE (${mode}) is ready. Click the desktop to interact.`;
+        document.body.dataset.result = "pass";
+        clearInterval(readiness_timer);
+    }
+    else
+    {
+        status.textContent = `Alpine XFCE (${mode}) started; waiting for its WebGPU scanout…`;
+    }
+}
+readiness_timer = setInterval(update_readiness, 250);
+emulator.add_listener("serial0-output-byte", byte => {
+    serial_text += String.fromCharCode(byte);
+    if(serial_text.length > 20000)
+    {
+        serial_text = serial_text.slice(-16000);
+    }
+    if(!serial_render_pending)
+    {
+        serial_render_pending = true;
+        requestAnimationFrame(() => {
+            serial.textContent = serial_text;
+            serial_render_pending = false;
+        });
+    }
+    if(!guest_ready && serial_text.includes("V86_DESKTOP_READY=PASS"))
+    {
+        guest_ready = true;
+        update_readiness();
+    }
+    else if(serial_text.includes("V86_DESKTOP_READY=FAIL"))
+    {
+        update_readiness();
+    }
+});
+</script>

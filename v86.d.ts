@@ -340,15 +340,14 @@ type V86NetworkDevice =
     };
 
 /**
- * Initial virtio-gpu configuration. The memory backend is deterministic and
- * intended for protocol bring-up; resource and scanout commands are deferred.
+ * Initial virtio-gpu configuration.
  */
 export interface VirtioGpuConfig {
     /**
      * Renderer backend.
      * @default "memory"
      */
-    backend?: "memory";
+    backend?: "memory" | "wgpu";
 
     /**
      * Preferred width reported for the single scanout.
@@ -367,6 +366,24 @@ export interface VirtioGpuConfig {
      * @default 268435456
      */
     max_host_memory_bytes?: number;
+
+    /**
+     * Dedicated presentation canvas for the wgpu backend. When omitted, v86
+     * creates one in the configured screen container.
+     */
+    canvas?: HTMLCanvasElement;
+
+    /**
+     * URL of the generated wasm-bindgen JavaScript module.
+     * @default "build/virtio-gpu-wgpu/virtio_gpu_wgpu.js"
+     */
+    wasm_module_url?: string;
+
+    /**
+     * Optional URL override for the generated renderer Wasm binary.
+     * By default it is resolved next to the wasm-bindgen JavaScript module.
+     */
+    wasm_url?: string;
 }
 
 /**

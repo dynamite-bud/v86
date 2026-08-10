@@ -11,7 +11,9 @@
     "build/libv86*.js",
     "build/libv86*.js.map",
     "build/*.mjs",
-    "build/v86*.wasm"
+    "build/v86*.wasm",
+    "build/virtio-gpu-wgpu/*.js",
+    "build/virtio-gpu-wgpu/*.wasm"
   ],
   "main": "build/libv86.mjs",
   "types": "v86.d.ts",

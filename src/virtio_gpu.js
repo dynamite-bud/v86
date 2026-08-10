@@ -2,6 +2,7 @@ import { LOG_VIRTIO } from "./const.js";
 import { dbg_log } from "./log.js";
 import { VirtIO, VIRTIO_F_VERSION_1 } from "./virtio.js";
 import { MemoryGpuBackend } from "./browser/virtio_gpu_backend.js";
+import { WgpuBackend } from "./browser/virtio_gpu_wgpu_backend.js";
 
 // For Types Only
 import { CPU } from "./cpu.js";
@@ -89,7 +90,9 @@ var VirtioGpuCtrlHeader;
  * @param {CPU} cpu
  * @param {BusConnector} bus
  * @param {{backend: (string|undefined), width: (number|undefined), height: (number|undefined),
- *         max_host_memory_bytes: (number|undefined)}=} options
+ *         max_host_memory_bytes: (number|undefined), screen_container: (HTMLElement|undefined),
+ *         canvas: (HTMLCanvasElement|undefined), wasm_module_url: (string|undefined),
+ *         wasm_url: (string|undefined)}=} options
  * @param {VirtioGpuBackend=} backend
  */
 export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
@@ -101,12 +104,13 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.max_host_memory_bytes = validate_host_memory_limit(options.max_host_memory_bytes);
     this.events_read = 0;
 
-    if(options.backend !== undefined && options.backend !== "memory")
+    if(options.backend !== undefined && options.backend !== "memory" && options.backend !== "wgpu")
     {
         throw new Error("Unsupported virtio-gpu backend: " + options.backend);
     }
 
-    this.backend = backend || new MemoryGpuBackend();
+    this.backend = backend || (options.backend === "wgpu" ?
+        new WgpuBackend(options) : new MemoryGpuBackend());
     this.backend_options = {
         width: this.width,
         height: this.height,
@@ -795,6 +799,15 @@ VirtioGpu.prototype.schedule_backend_reset = function(generation, restore_resour
     });
     this.backend_work = reset_work.catch(() => {});
     this.backend_ready = reset_work;
+};
+
+VirtioGpu.prototype.dispose = function()
+{
+    this.work_generation++;
+    this.queue_active.fill(false);
+    const dispose_work = this.backend_work.catch(() => {}).then(() => this.backend.dispose());
+    this.backend_work = dispose_work.catch(() => {});
+    return dispose_work;
 };
 
 /**

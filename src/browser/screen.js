@@ -531,13 +531,13 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
         if(mode === MODE_TEXT)
         {
-            text_screen.style.display = "block";
+            text_screen.style.display = text_screen.hidden ? "none" : "block";
             graphic_screen.style.display = "none";
         }
         else
         {
             text_screen.style.display = "none";
-            graphic_screen.style.display = "block";
+            graphic_screen.style.display = graphic_screen.hidden ? "none" : "block";
 
             if(mode === MODE_GRAPHICAL_TEXT && changed_rows)
             {
@@ -679,7 +679,7 @@ export function ScreenAdapter(options, screen_fill_buffer)
             height = buffer_height;
         }
 
-        graphic_screen.style.display = "block";
+        graphic_screen.style.display = graphic_screen.hidden ? "none" : "block";
 
         graphic_screen.width = width;
         graphic_screen.height = height;

@@ -81,17 +81,18 @@ Integration images are external and ignored. Use the image download command in `
 - `Cargo.toml`, `.cargo/config.toml`, `eslint.config.mjs`, `.rustfmt.toml`: compiler and style settings.
 - `.github/workflows/ci.yml`: definitive CI toolchain and suite list.
 - `Readme.md`, `docs/how-it-works.md`, `tests/Readme.md`: setup, architecture, and test controls.
-- `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`: VirtIO GPU protocol device and renderer-independent backend boundary.
-- `docs/virtio-gpu-webgpu.md`: implemented 2D scope, protocol/state invariants, Linux KMS proof, interrupt fixes, and PR 3 handoff.
+- `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`, `src/browser/virtio_gpu_wgpu_backend.js`: VirtIO GPU protocol device, renderer-independent contract, and browser WebGPU adapter.
+- `tools/virtio-gpu-wgpu/`: independent Rust/Wasm `wgpu` renderer with its own manifest and committed lockfile.
+- `docs/virtio-gpu-webgpu.md`: implemented 2D protocol, memory/WebGPU backends, state and failure invariants, Linux KMS proof, and browser setup.
 - `tools/docker/virtio-gpu-alpine/`: reproducible i386 guest inputs, package locks, probe, build pipeline, and reviewed checksum contract.
 
 ## Runtime/Tooling Preferences
 
 - Use GNU Make as the task runner and Node.js as the JavaScript runtime; do not substitute Bun. CI pins Node `24.17.0`; the README identifies recent Node (`24.16` known working). The repository has no JS dependency lockfile or pinned package manager.
-- Rust stable with `wasm32-unknown-unknown`, Cargo, Clang, and `tools/rust-lld-wrapper` builds the core. Java is required for optimized Closure builds; Python 3 serves files and powers utilities.
+- Rust stable with `wasm32-unknown-unknown`, Cargo, Clang, and `tools/rust-lld-wrapper` builds the core. The optional `tools/virtio-gpu-wgpu/` renderer also requires `wasm-bindgen`; keep it outside the root crate. Java is required for optimized Closure builds; Python 3 serves files and powers utilities.
 - Full QA additionally needs NASM, GDB, QEMU, 32-bit GCC/libc, rustfmt, and downloaded guest images. The dev container provides an amd64 Linux toolchain.
 - The virtio-gpu Linux fixture additionally needs Docker with `linux/386` emulation and Python `zstandard`. Generated files under `images/` remain ignored; commit only reviewed fixture inputs and `image-contract.json`.
-- `build/`, `images/`, generated Rust dispatch files, Wasm, maps, objects, and `Cargo.lock` are ignored. Do not commit generated artifacts unless a release workflow explicitly requires them.
+- `build/`, `images/`, generated Rust dispatch files, Wasm, maps, objects, and the root `Cargo.lock` are ignored. `tools/virtio-gpu-wgpu/Cargo.lock` is intentionally committed for deterministic renderer builds. Do not commit generated artifacts unless a release workflow explicitly requires them.
 
 ## Testing & QA
 
@@ -104,4 +105,4 @@ JavaScript tests are standalone Node ESM scripts using `node:assert/strict` and 
 - `tests/full/`, `tests/devices/`, `tests/jit-paging/`, `tests/kvm-unit-tests/`: boot, device, paging/JIT, and bare-metal integration.
 - `tests/unit/`: standalone protocol and PCI shared-interrupt tests.
 
-Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NAME="..."`; full tests also support `RUN_SLOW_TESTS`, `TIMEOUT_EXTRA_FACTOR`, `LOG_LEVEL`, `DISABLE_JIT`, and `TEST_ACPI`. Select the narrow suite for the changed contract, then match CI coverage for cross-cutting changes. CI runs device tests separately even though `make all-tests` omits them due to hangs. No coverage tool, threshold, or report is configured; correctness is enforced through targeted behavioral, differential, and golden assertions.
+Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NAME="..."`; full tests also support `RUN_SLOW_TESTS`, `TIMEOUT_EXTRA_FACTOR`, `LOG_LEVEL`, `DISABLE_JIT`, and `TEST_ACPI`. Select the narrow suite for the changed contract, then match CI coverage for cross-cutting changes. CI runs device tests separately even though `make all-tests` omits them due to hangs. For browser GPU work, run `make virtio-gpu-wgpu`, serve the repository over localhost, boot the reproducible Alpine guest with `virtio_gpu.backend: "wgpu"`, and inspect the WebGPU canvas plus console validation errors. No coverage tool, threshold, or report is configured; correctness is enforced through targeted behavioral, differential, and golden assertions.

@@ -1,0 +1,83 @@
+#!/bin/sh
+
+exec 3>/dev/ttyS0
+
+mode=xorg
+case " $(cat /proc/cmdline) " in
+    *" v86.desktop=wayland "*) mode=wayland ;;
+esac
+
+printf 'V86_DESKTOP_BEGIN\n' >&3
+printf 'V86_DESKTOP_MODE=%s\n' "$mode" >&3
+printf 'V86_DESKTOP_KERNEL=%s\n' "$(uname -r)" >&3
+
+modprobe virtio_pci >&3 2>&1 || true
+modprobe virtio_gpu >&3 2>&1 || true
+udevadm trigger
+udevadm settle
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    if [ -e /dev/dri/card0 ]; then
+        break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+if [ ! -e /dev/dri/card0 ]; then
+    printf 'V86_DESKTOP_DRM=missing\nV86_DESKTOP_READY=FAIL\nV86_DESKTOP_END\n' >&3
+    exit 1
+fi
+printf 'V86_DESKTOP_DRM=/dev/dri/card0\n' >&3
+
+mkdir -p /run/user/0
+chmod 700 /run/user/0
+export HOME=/root
+export USER=root
+export XDG_RUNTIME_DIR=/run/user/0
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_DESKTOP=xfce
+
+if [ "$mode" = wayland ]; then
+    export XDG_SESSION_TYPE=wayland
+    export GDK_BACKEND=wayland
+    export WLR_RENDERER=gles2
+    export WLR_RENDERER_ALLOW_SOFTWARE=1
+    export WLR_DRM_NO_MODIFIERS=1
+    export WLR_DRM_DEVICES=/dev/dri/card0
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export WLR_NO_HARDWARE_CURSORS=1
+    export LIBSEAT_BACKEND=seatd
+    dbus-run-session -- startxfce4 --wayland >/tmp/v86-desktop.log 2>&1 &
+else
+    export XDG_SESSION_TYPE=x11
+    startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-desktop.log 2>&1 &
+fi
+session_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 900 ]; do
+    if ! kill -0 "$session_pid" 2>/dev/null; then
+        break
+    fi
+    if [ "$mode" = wayland ]; then
+        display_ready=false
+        [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && display_ready=true
+    else
+        display_ready=false
+        [ -S /tmp/.X11-unix/X0 ] && display_ready=true
+    fi
+    if [ "$display_ready" = true ] && pidof xfce4-panel >/dev/null && pidof xfdesktop >/dev/null; then
+        printf 'V86_DESKTOP_READY=PASS\nV86_DESKTOP_END\n' >&3
+        wait "$session_pid"
+        exit $?
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+cat /tmp/v86-desktop.log >&3
+printf 'V86_DESKTOP_READY=FAIL\nV86_DESKTOP_END\n' >&3
+wait "$session_pid" 2>/dev/null || true
+exit 1

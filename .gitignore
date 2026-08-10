@@ -18,6 +18,8 @@ images/
 *.DS_Store
 node_modules/
 Cargo.lock
+!tools/virtio-gpu-wgpu/Cargo.lock
+tools/virtio-gpu-wgpu/target/
 build-head
 src/rust/gen/interpreter.rs
 src/rust/gen/interpreter0f.rs

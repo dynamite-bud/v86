@@ -52,33 +52,43 @@ def main():
     parser.add_argument("--fs-json", required=True, type=pathlib.Path)
     parser.add_argument("--flat", required=True, type=pathlib.Path)
     parser.add_argument("--packages", required=True, type=pathlib.Path)
+    parser.add_argument("--distribution", default="Alpine Linux 3.21")
+    parser.add_argument(
+        "--base-image",
+        default="docker.io/i386/alpine@sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753",
+    )
+    parser.add_argument("--artifact-prefix", default="alpine-virtio-gpu")
+    parser.add_argument(
+        "--probe-success-marker",
+        default="V86_GPU_PROBE_STATUS=PASS",
+    )
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
     contract = {
         "schema": 1,
         "architecture": "x86",
-        "distribution": "Alpine Linux 3.21",
-        "base_image": "docker.io/i386/alpine@sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753",
+        "distribution": args.distribution,
+        "base_image": args.base_image,
         "kernel_release": kernel_release(args.rootfs),
         "packages_lock_sha256": sha256(args.packages),
         "artifacts": {
             "rootfs_tar": {
-                "path": "images/alpine-virtio-gpu-rootfs.tar",
+                "path": f"images/{args.artifact_prefix}-rootfs.tar",
                 "size": args.rootfs.stat().st_size,
                 "sha256": sha256(args.rootfs),
             },
             "filesystem_json": {
-                "path": "images/alpine-virtio-gpu-fs.json",
+                "path": f"images/{args.artifact_prefix}-fs.json",
                 "size": args.fs_json.stat().st_size,
                 "sha256": sha256(args.fs_json),
             },
             "flat_files": {
-                "path": "images/alpine-virtio-gpu-rootfs-flat",
+                "path": f"images/{args.artifact_prefix}-rootfs-flat",
                 **flat_contract(args.flat),
             },
         },
-        "probe_success_marker": "V86_GPU_PROBE_STATUS=PASS",
+        "probe_success_marker": args.probe_success_marker,
     }
     args.output.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
 

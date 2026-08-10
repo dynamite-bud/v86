@@ -2,7 +2,7 @@
 
 ## Scope
 
-PR 1 and PR 2 provide a modern VirtIO GPU PCI function and the complete standard 2D path into a renderer-independent memory backend:
+PR 1 through PR 3 provide a modern VirtIO GPU PCI function, the complete standard 2D path, a deterministic memory backend, and optional browser WebGPU presentation:
 
 - PCI identity `1af4:1050`, subsystem ID `16`, class `0380` (display controller, other).
 - VirtIO 1 modern transport only (`VIRTIO_F_VERSION_1`).
@@ -12,8 +12,9 @@ PR 1 and PR 2 provide a modern VirtIO GPU PCI function and the complete standard
 - Bounded fragmented guest-backing reads and ordered asynchronous backend submission.
 - Fence-aware replies, reset/restore generation guards, and serializable resource metadata.
 - A Linux 6.12 KMS test that transfers the locked `modetest` SMPTE pattern into `MemoryGpuBackend`.
+- A separately built Rust/Wasm `wgpu` renderer that presents the same 2D scanout on a dedicated browser canvas.
 
-Browser presentation, EDID, blobs, UUIDs, virgl, cursor commands, accelerated WebGPU, and experimental 3D command streams remain deferred.
+EDID, blobs, UUIDs, virgl, cursor commands, custom capsets, and experimental 3D command streams remain deferred.
 
 ## Data Flow
 
@@ -22,7 +23,8 @@ Linux virtio_gpu driver
   -> modern VirtIO PCI transport (src/virtio.js)
   -> VirtioGpu queue/parser (src/virtio_gpu.js)
   -> VirtioGpuBackend promise boundary
-  -> MemoryGpuBackend now; wgpu/WebGPU backends later
+  -> MemoryGpuBackend (deterministic tests)
+     or WgpuBackend -> Rust/Wasm wgpu renderer -> browser WebGPU canvas
 ```
 
 `VirtioGpu` owns guest-visible PCI/config/queue state. A backend owns host renderer resources only. Protocol parsing never depends on browser APIs. Malformed guest data produces a VirtIO GPU response header rather than an assertion or exception.
@@ -38,10 +40,9 @@ initialize, createResource2D, destroyResource, uploadResource2D,
 setScanout, flush, waitIdle, reset, dispose
 ```
 
-The interface contains no WebGPU dependency. `MemoryGpuBackend` stores deterministic raw 32-bit resource bytes with their VirtIO GPU format, enforces rectangle and memory bounds, tracks scanout and flush state, and is suitable for Node and Linux integration tests. Future implementations may be:
+The interface contains no WebGPU dependency. `MemoryGpuBackend` stores deterministic raw 32-bit resource bytes with their VirtIO GPU format, enforces rectangle and memory bounds, tracks scanout and flush state, and is suitable for Node and Linux integration tests.
 
-- Rust/Wasm `wgpu`, dynamically imported as a separate module.
-- Direct browser WebGPU in JavaScript.
+`src/browser/virtio_gpu_wgpu_backend.js` implements the same contract for browsers. It dynamically imports the wasm-bindgen module from `build/virtio-gpu-wgpu/`, while the independent `tools/virtio-gpu-wgpu/` crate owns WebGPU textures, upload alignment, format conversion, scanout rendering, queue completion, surface recovery, and device-loss reporting.
 
 Fenced renderer commands wait for `waitIdle()` before publishing their used-ring response. Unfenced commands reply after ordered validation and backend submission. Display-info and deterministic error responses require no renderer work.
 
@@ -102,6 +103,8 @@ Standard VirtIO GPU 2D commands remain the compatibility path. Any virgl-like or
 
 `tests/devices/virtio_gpu.js` boots the generated Alpine i386 filesystem, requires PCI/driver/DRM markers, runs `modetest` at `1024x768`, and asserts the resulting SMPTE pixels directly in `MemoryGpuBackend`. The reproducible image inputs, package/kernel contract, build command, and SHA-256 manifest live under `tools/docker/virtio-gpu-alpine/`.
 
+Browser acceptance uses the same generated Alpine guest with `virtio_gpu.backend: "wgpu"`. The VGA canvas remains visible during boot, the dedicated WebGPU canvas becomes visible only after the first successful resource flush, and the locked SMPTE samples must match the decoded `MemoryGpuBackend` pixels. Reset, renderer reinitialization, surface reconfiguration, and controlled device destruction must restore or preserve the VGA fallback without console or WebGPU validation errors.
+
 ## Linux Bring-up Workflow
 
 `tools/docker/virtio-gpu-alpine/` contains the reviewed inputs for the canonical i386 guest. Docker is used only to assemble and export the Linux root filesystem; v86 does not depend on Docker at runtime. `build.sh` normalizes the exported tar, converts it to v86's JSON/content-addressed filesystem layout, and writes a checksum contract. Generated files stay ignored under `images/`; source inputs, package locks, probe scripts, and the reviewed `image-contract.json` are committed.
@@ -110,12 +113,35 @@ The guest enables normal DRM framebuffer behavior and then starts locked `libdrm
 
 `lspci -nnk` reports `Kernel driver in use: virtio-pci` because that is the PCI transport driver. The actual GPU driver binding is the `virtioN` link under `/sys/bus/virtio/drivers/virtio_gpu`; the serial contract reports both facts separately.
 
+## Reproducible Alpine Desktop Profiles
+
+`tools/docker/virtio-gpu-alpine-desktop/` builds a pinned Alpine 3.24.1 i386 XFCE guest on Linux 6.18 LTS. It includes Xorg, labwc, seatd, D-Bus, `xfce4-terminal`, and Thunar. Reviewed direct and transitive package locks, a normalized root filesystem, a flat-file manifest, and the committed `image-contract.json` make the guest reproducible. See its [build and runtime guide](../tools/docker/virtio-gpu-alpine-desktop/Readme.md) for the input inventory, artifact contract, dependency-update procedure, and troubleshooting.
+
+Build the guest and browser renderer, then serve the repository root:
+
+```sh
+make virtio-gpu-desktop-image
+make all-debug virtio-gpu-wgpu
+python3 -m http.server 8000
+```
+
+Open `examples/virtio_gpu_desktop.html?desktop=xorg` or `examples/virtio_gpu_desktop.html?desktop=wayland`. The page also provides selectors for both profiles.
+
+| Profile | Guest display stack | Recommended use |
+| --- | --- | --- |
+| Xorg | Xorg modesetting, XFCE, xfwm4 | Compatibility default and daily desktop |
+| Wayland | libinput, seatd, labwc, native XFCE Wayland | New display-stack and compatibility testing |
+
+Both profiles share the root filesystem, terminal, Thunar, applications, and files. They require `/dev/dri/card0`, publish `V86_DESKTOP_READY=PASS` only after the session, panel, and desktop are live, and use the dedicated `1024x768` WebGPU canvas after KMS establishes a scanout. Browser acceptance exercises terminal keyboard input and filesystem browsing in both sessions.
+
+This is a complete desktop over the standard VirtIO GPU 2D path, not guest virgl, OpenGL, or Vulkan acceleration. Guest windows are software-rendered, scanned out through Linux `virtio_gpu`, and presented by the host WebGPU backend. Wayland changes the guest display stack but does not alter that acceleration boundary. Alpine XFCE remains the preferred target because heavier shells would increase CPU and memory costs without gaining guest 3D acceleration.
+
 ## Diagnostics and Failure Modes
 
 - Use `log_level: 0` and the kernel `quiet` argument for routine device tests. A debug source build can otherwise emit megabytes of CPU/IRQ tracing and materially slow the guest.
 - `tests/devices/virtio_gpu.js` treats `Mounting root: failed` and the initramfs recovery shell as immediate infrastructure failures. Do not wait for the GPU probe timeout when the 9p root never mounted.
 - The local probe timeout is 90 seconds multiplied by `TIMEOUT_EXTRA_FACTOR`. Slow CI can scale the timeout without weakening local feedback.
-- `V86_GPU_PROBE_STATUS=PASS` means PCI enumeration, `virtio_gpu` binding, DRM discovery, a connected KMS connector, and a live `1024x768` `modetest` modeset all succeeded. Browser presentation is still outside the memory backend's scope.
+- `V86_GPU_PROBE_STATUS=PASS` means PCI enumeration, `virtio_gpu` binding, DRM discovery, a connected KMS connector, and a live `1024x768` `modetest` modeset all succeeded. The Node device test proves the memory path; browser verification must additionally observe the SMPTE frame on the dedicated WebGPU canvas.
 - A response to an unsupported complete command is expected to be `VIRTIO_GPU_RESP_ERR_UNSPEC`. A malformed header or insufficient response buffer receives `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER` when a response header fits.
 
 ## Verification Commands
@@ -123,6 +149,7 @@ The guest enables normal DRM framebuffer behavior and then starts locked `libdrm
 ```sh
 make acpi-unit-test
 make all-debug all
+make virtio-gpu-wgpu
 make pci-unit-test
 make virtio-gpu-unit-test
 make virtio-gpu-test
@@ -132,15 +159,30 @@ make eslint
 make rustfmt
 ```
 
-The device tests require the generated Alpine artifacts described in `tools/docker/virtio-gpu-alpine/Readme.md`. The release target exercises `build/libv86.mjs`; the non-release target imports source modules directly.
+The device tests require the generated Alpine artifacts described in `tools/docker/virtio-gpu-alpine/Readme.md`. The release target exercises `build/libv86.mjs`; the non-release target imports source modules directly. The `virtio-gpu-wgpu` target additionally requires `wasm-bindgen` and the `wasm32-unknown-unknown` Rust target.
 
-## PR 3 Handoff
+## Browser wgpu Backend
 
-The next slice should add browser presentation behind the existing `VirtioGpuBackend` boundary without changing the negotiated guest feature set or standard 2D protocol:
+Build the optional renderer after the normal browser artifacts:
 
-1. Add a dedicated browser canvas and a WebGPU or wgpu backend implementing the existing resource, upload, scanout, flush, fence, reset, and disposal operations.
-2. Convert the four supported guest formats correctly, forcing opaque alpha for X formats.
-3. Present only on `RESOURCE_FLUSH`, preserve ordered fence completion, and handle device/surface loss without stale work crossing reset.
-4. Keep `MemoryGpuBackend` as the protocol oracle and compare browser output against the locked SMPTE pattern.
+```sh
+make all-debug
+make virtio-gpu-wgpu
+```
+
+Select it through the existing public configuration:
+
+```js
+virtio_gpu: {
+    backend: "wgpu",
+    width: 1024,
+    height: 768,
+    wasm_module_url: "/build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+}
+```
+
+`WgpuBackend` creates a presentation canvas in the configured screen container unless `virtio_gpu.canvas` supplies one. Resource uploads are repacked to WebGPU's row alignment, the fullscreen conversion pass handles all four standard 32-bit formats and forces opaque alpha for X formats, and presentation occurs only on `RESOURCE_FLUSH`. Fenced commands additionally wait for submitted GPU work; unfenced commands return after ordered submission.
+
+Reset and fatal renderer failures hide the WebGPU canvas and restore the prior VGA text/graphics state. Recoverable surface loss is reconfigured in place. Device loss and uncaptured validation errors become JavaScript errors and trigger the same VGA fallback.
 
 EDID, blobs, UUIDs, virgl, custom capsets, cursor commands, and 3D commands must not be advertised before their complete paths exist.
