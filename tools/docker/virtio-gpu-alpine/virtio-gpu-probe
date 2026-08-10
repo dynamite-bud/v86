@@ -36,7 +36,32 @@ else
     echo 'V86_GPU_PROBE_DRM=missing' >&3
 fi
 
-if echo "$lspci_output" | grep -q '1af4:1050' && [ -n "$virtio_device" ] && [ -e /dev/dri/card0 ]; then
+kms_status=FAIL
+kms_connector=
+if [ -e /dev/dri/card0 ]; then
+    connector_output="$(modetest -M virtio_gpu -c 2>&1)"
+    kms_connector="$(printf '%s\n' "$connector_output" | awk '$3 == "connected" { print $1; exit }')"
+    if [ -n "$kms_connector" ]; then
+        tail -f /dev/null | modetest -M virtio_gpu -s "${kms_connector}:1024x768" \
+            >/tmp/v86-gpu-modetest.log 2>&1 &
+        modetest_pid=$!
+        sleep 1
+        if kill -0 "$modetest_pid" 2>/dev/null; then
+            kms_status=PASS
+        else
+            cat /tmp/v86-gpu-modetest.log >&3
+        fi
+    else
+        echo "$connector_output" >&3
+    fi
+fi
+echo "V86_GPU_PROBE_KMS_CONNECTOR=${kms_connector:-missing}" >&3
+echo "V86_GPU_PROBE_KMS=$kms_status" >&3
+
+if echo "$lspci_output" | grep -q '1af4:1050' &&
+   [ -n "$virtio_device" ] &&
+   [ -e /dev/dri/card0 ] &&
+   [ "$kms_status" = PASS ]; then
     echo 'V86_GPU_PROBE_STATUS=PASS' >&3
 else
     echo 'V86_GPU_PROBE_STATUS=FAIL' >&3

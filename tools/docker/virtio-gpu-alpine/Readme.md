@@ -91,10 +91,10 @@ Boot with `bzimage_initrd_from_filesystem: true`, the generated filesystem, and:
 
 ```text
 rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose
-console=ttyS0,115200 modules=virtio_pci,9p,9pnet,9pnet_virtio,virtio_gpu tsc=reliable drm_kms_helper.fbdev_emulation=0
+console=ttyS0,115200 modules=virtio_pci,9p,9pnet,9pnet_virtio,virtio_gpu tsc=reliable
 ```
 
-`drm_kms_helper.fbdev_emulation=0` is required for the PR 1 device. Linux may enumerate DRM, but framebuffer creation needs the PR 2 resource and scanout commands.
+Normal DRM framebuffer emulation is enabled. The PR 2 device implements the standard resource, backing, transfer, scanout, and flush commands required by Linux KMS.
 
 `virtio-gpu-probe` emits delimited serial records:
 
@@ -106,11 +106,13 @@ V86_GPU_PROBE_LSPCI_BEGIN
 V86_GPU_PROBE_LSPCI_END
 V86_GPU_PROBE_DRIVER=virtioN
 V86_GPU_PROBE_DRM=/dev/dri/card0
+V86_GPU_PROBE_KMS_CONNECTOR=<id>
+V86_GPU_PROBE_KMS=PASS
 V86_GPU_PROBE_STATUS=PASS
 V86_GPU_PROBE_END
 ```
 
-Success requires PCI ID `1af4:1050`, a device bound under `/sys/bus/virtio/drivers/virtio_gpu`, and `/dev/dri/card0`. `lspci` showing `Kernel driver in use: virtio-pci` is expected: `virtio-pci` owns the PCI transport while `virtio_gpu` owns the child VirtIO device.
+Success requires PCI ID `1af4:1050`, a device bound under `/sys/bus/virtio/drivers/virtio_gpu`, `/dev/dri/card0`, a connected KMS connector, and a live `modetest` modeset at `1024x768`. `lspci` showing `Kernel driver in use: virtio-pci` is expected: `virtio-pci` owns the PCI transport while `virtio_gpu` owns the child VirtIO device.
 
 ## Running the Tests
 
@@ -121,9 +123,9 @@ make virtio-gpu-test
 make virtio-gpu-test-release
 ```
 
-Both targets first run the ACPI GPE, PCI shared-IRQ, and virtio-gpu protocol unit tests. The source target imports `src/main.js`; the release target imports `build/libv86.mjs`.
+Both targets first run the ACPI GPE, PCI shared-IRQ, and exhaustive virtio-gpu protocol unit tests. The source target imports `src/main.js`; the release target imports `build/libv86.mjs`. The guest probe starts the locked `modetest` SMPTE pattern, and the host harness checks scanout dimensions, resource size, flush completion, and known B8G8R8X8 pixels in `MemoryGpuBackend`.
 
-The harness uses a quiet kernel and `log_level: 0` so debug tracing does not dominate runtime. It fails immediately if the 9p root mount enters initramfs recovery, and otherwise waits up to 90 seconds multiplied by `TIMEOUT_EXTRA_FACTOR` for the probe contract.
+The harness uses a quiet kernel and `log_level: 0` so debug tracing does not dominate runtime. It fails immediately if the 9p root mount enters initramfs recovery or any PCI/DRM/KMS marker fails, and otherwise waits up to 90 seconds multiplied by `TIMEOUT_EXTRA_FACTOR`.
 
 ## Troubleshooting
 
@@ -166,4 +168,6 @@ Keep kernel `quiet` and emulator `log_level: 0` for routine probes. Debug loggin
 
 The rootfs includes `lspci`, `modetest`, `drm_info`, `kmscube`, Mesa utilities, Xorg's modesetting driver, libinput, Fluxbox, and `xinit`. `/etc/X11/xorg.conf.d/20-virtio-gpu.conf` disables acceleration for the first software-rendered desktop path.
 
-Run `startx` only after the standard 2D resource, transfer, scanout, and flush commands are implemented. The current probe validates enumeration, driver binding, and DRM discovery—not rendered output.
+The probe runs `modetest` against the connected virtio-gpu output and keeps it alive through a non-producing pipe so the scanout remains available for host-side pixel assertions. This proves the guest's standard KMS path through `MemoryGpuBackend`; it does not yet put those pixels on a browser canvas.
+
+`startx` can now exercise the same software 2D resource path, but visible browser presentation belongs to the next renderer-backend slice.

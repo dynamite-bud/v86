@@ -26,7 +26,6 @@ const emulator = new V86({
         "modules=virtio_pci,9p,9pnet,9pnet_virtio,virtio_gpu",
         "tsc=reliable",
         "audit=0",
-        "drm_kms_helper.fbdev_emulation=0",
         "quiet",
     ].join(" "),
     filesystem: {
@@ -81,7 +80,20 @@ emulator.add_listener("serial0-output-byte", function(byte)
         assert.match(serial, /1af4:1050/);
         assert.match(serial, /V86_GPU_PROBE_DRIVER=virtio\d+/);
         assert.match(serial, /V86_GPU_PROBE_STATUS=PASS/);
+        assert.match(serial, /V86_GPU_PROBE_KMS=PASS/);
+        const backend = emulator.v86.cpu.devices.virtio_gpu.backend;
+        assert(backend.scanout, "Linux did not configure a virtio-gpu scanout");
+        const scanout_resource = backend.resources.get(backend.scanout.resource_id);
+        assert(scanout_resource, "Linux scanout resource is missing from the backend");
+        assert.equal(backend.scanout.width, 1024);
+        assert.equal(backend.scanout.height, 768);
+        assert.equal(scanout_resource.data.byteLength, 1024 * 768 * 4);
+        assert.deepEqual(scanout_resource.data.slice(0, 4),
+            Uint8Array.from([192, 192, 192, 0]), "unexpected SMPTE top-left pixel");
+        assert.deepEqual(scanout_resource.data.slice(200 * 4, 200 * 4 + 4),
+            Uint8Array.from([0, 192, 192, 0]), "unexpected SMPTE yellow-bar pixel");
+        assert(backend.flush_count > 0, "Linux did not flush the virtio-gpu scanout");
         emulator.destroy();
-        console.log("\nvirtio-gpu Linux probe passed");
+        console.log("\nvirtio-gpu Linux framebuffer probe passed");
     }
 });

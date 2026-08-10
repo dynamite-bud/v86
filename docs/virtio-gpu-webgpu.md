@@ -2,16 +2,18 @@
 
 ## Scope
 
-The first two slices provide a modern VirtIO GPU PCI function and its renderer boundary. They intentionally stop before framebuffer resources or browser presentation:
+PR 1 and PR 2 provide a modern VirtIO GPU PCI function and the complete standard 2D path into a renderer-independent memory backend:
 
 - PCI identity `1af4:1050`, subsystem ID `16`, class `0380` (display controller, other).
 - VirtIO 1 modern transport only (`VIRTIO_F_VERSION_1`).
-- One configurable scanout, defaulting to `1024x768`.
-- Control and cursor virtqueues.
-- `VIRTIO_GPU_CMD_GET_DISPLAY_INFO` plus deterministic protocol errors.
-- Promise-based renderer API and a deterministic `MemoryGpuBackend`.
+- One configurable scanout, defaulting to `1024x768`, with control and cursor virtqueues.
+- Display info, 2D resource create/unref, attach/detach backing, transfer, set-scanout, and flush commands.
+- Four common 32-bit scanout formats: B8G8R8A8, B8G8R8X8, R8G8B8A8, and R8G8B8X8.
+- Bounded fragmented guest-backing reads and ordered asynchronous backend submission.
+- Fence-aware replies, reset/restore generation guards, and serializable resource metadata.
+- A Linux 6.12 KMS test that transfers the locked `modetest` SMPTE pattern into `MemoryGpuBackend`.
 
-2D resource commands, EDID, blobs, UUIDs, virgl, accelerated WebGPU presentation, and experimental 3D command streams are deferred.
+Browser presentation, EDID, blobs, UUIDs, virgl, cursor commands, accelerated WebGPU, and experimental 3D command streams remain deferred.
 
 ## Data Flow
 
@@ -25,7 +27,7 @@ Linux virtio_gpu driver
 
 `VirtioGpu` owns guest-visible PCI/config/queue state. A backend owns host renderer resources only. Protocol parsing never depends on browser APIs. Malformed guest data produces a VirtIO GPU response header rather than an assertion or exception.
 
-Queue notifications and the current renderer-independent commands complete synchronously, preserving queue order and serving guests that busy-wait within an emulator tick. Backend-dependent commands must use a private promise chain per queue and a reset generation guard when they are introduced; guest-memory views must not survive an `await`.
+Queue notifications remain synchronous, but backend work runs through an ordered promise chain. Only one request is popped per queue at a time; reset and restore generations invalidate stale completions. Guest-memory bytes are copied before any backend `await`, so no view survives Wasm memory growth.
 
 ## Backend Contract
 
@@ -36,12 +38,12 @@ initialize, createResource2D, destroyResource, uploadResource2D,
 setScanout, flush, waitIdle, reset, dispose
 ```
 
-The interface contains no WebGPU dependency. `MemoryGpuBackend` stores deterministic RGBA8 byte arrays, enforces rectangle and memory bounds, and is suitable for Node tests. Future implementations may be:
+The interface contains no WebGPU dependency. `MemoryGpuBackend` stores deterministic raw 32-bit resource bytes with their VirtIO GPU format, enforces rectangle and memory bounds, tracks scanout and flush state, and is suitable for Node and Linux integration tests. Future implementations may be:
 
 - Rust/Wasm `wgpu`, dynamically imported as a separate module.
 - Direct browser WebGPU in JavaScript.
 
-The device must await backend completion for fenced renderer commands. Unfenced renderer commands may reply after ordered validation and submission. The current display-info and error responses do no renderer work and complete inline.
+Fenced renderer commands wait for `waitIdle()` before publishing their used-ring response. Unfenced commands reply after ordered validation and backend submission. Display-info and deterministic error responses require no renderer work.
 
 ## Protocol Invariants
 
@@ -52,6 +54,11 @@ The device must await backend completion for fenced renderer commands. Unfenced 
 - A fenced response copies the fence flag, 64-bit fence ID, and context ID.
 - `GET_DISPLAY_INFO` returns the required 408-byte structure: scanout 0 enabled at `(0,0)` with the configured mode; scanouts 1-15 are zeroed.
 - Writable buffers shorter than the command response receive an invalid-parameter header when capacity permits; writes are otherwise safely truncated by the VirtIO buffer-chain helper.
+- Resource IDs must be nonzero and unique; total host resource storage is bounded before allocation.
+- Backing lists are capped at 16,384 entries, reject nonzero high addresses and non-RAM ranges, and must cover the resource without exceeding its page-rounded size.
+- Transfers validate rectangle, offset, row pitch, and fragmented backing bounds before allocating or copying.
+- `SET_SCANOUT` accepts only scanout 0; resource ID 0 disables it. Flush submits backend work only for a scanned-out resource.
+- Supported 2D commands return `VIRTIO_GPU_RESP_OK_NODATA`; invalid resource, scanout, parameter, and memory conditions use their specific protocol errors.
 
 ## PCI and Device Configuration
 
@@ -79,9 +86,9 @@ Writes to `0xAFE0` and `0xAFE1` now clear only the selected status bits; writes 
 
 ## State and Resource Limits
 
-CPU snapshot slot 92 stores serializable device metadata and nested VirtIO queue state. Browser GPU handles are never serialized. Reset and restore clear events and reset the backend. Future asynchronous resource work must be invalidated across reset or restore. The initial slice has no guest-created resources, so snapshots contain no renderer data.
+CPU snapshot slot 92 stores serializable device metadata, resource/backing records, scanout state, and nested VirtIO queue state. Browser GPU handles are never serialized. Restore recreates backend resources, reloads their bytes from snapshotted guest backing, restores the scanout, and flushes it. Reset and restore increment a generation so stale asynchronous work cannot mutate restored state or publish replies into reset queues.
 
-`max_host_memory_bytes` defaults to 256 MiB and bounds `MemoryGpuBackend` allocations. Dimensions and rectangle arithmetic are validated before allocation or copy. Later 2D work must add explicit guest backing-entry and total-resource limits rather than relying only on this host limit.
+`max_host_memory_bytes` defaults to 256 MiB and bounds both device accounting and `MemoryGpuBackend` allocations. Resource dimensions, rectangles, row arithmetic, guest addresses, backing-entry count, total backing length, and copy ranges are checked before allocation or access.
 
 ## Browser Thread Model
 
@@ -91,15 +98,15 @@ Standard VirtIO GPU 2D commands remain the compatibility path. Any virgl-like or
 
 ## Test and Guest Contract
 
-`make virtio-gpu-unit-test` covers parsing, malformed buffers, display information, unsupported commands, fence metadata, PCI identity/features, reset/state metadata, class defaults, and the memory backend.
+`make virtio-gpu-unit-test` covers parsing, malformed buffers, all standard 2D commands, fragmented backing, format and resource limits, rectangle arithmetic, queue ordering, fenced completion, reset invalidation, snapshot restore, PCI identity/features, and the memory backend.
 
-`tests/devices/virtio_gpu.js` boots the generated Alpine i386 filesystem and requires serial probe markers for kernel version, `1af4:1050`, `virtio_gpu` binding, and DRM device discovery. The reproducible image inputs, package/kernel contract, build command, and SHA-256 manifest live under `tools/docker/virtio-gpu-alpine/`.
+`tests/devices/virtio_gpu.js` boots the generated Alpine i386 filesystem, requires PCI/driver/DRM markers, runs `modetest` at `1024x768`, and asserts the resulting SMPTE pixels directly in `MemoryGpuBackend`. The reproducible image inputs, package/kernel contract, build command, and SHA-256 manifest live under `tools/docker/virtio-gpu-alpine/`.
 
 ## Linux Bring-up Workflow
 
 `tools/docker/virtio-gpu-alpine/` contains the reviewed inputs for the canonical i386 guest. Docker is used only to assemble and export the Linux root filesystem; v86 does not depend on Docker at runtime. `build.sh` normalizes the exported tar, converts it to v86's JSON/content-addressed filesystem layout, and writes a checksum contract. Generated files stay ignored under `images/`; source inputs, package locks, probe scripts, and the reviewed `image-contract.json` are committed.
 
-The guest deliberately uses `drm_kms_helper.fbdev_emulation=0`. PR 1 implements enumeration and display information but not framebuffer resource commands, so allowing fbdev emulation would make Linux immediately issue deferred PR 2 commands. The probe verifies PCI identity, the virtio-gpu sysfs binding, and `/dev/dri/card0` without claiming that scanout presentation works.
+The guest enables normal DRM framebuffer behavior and then starts locked `libdrm` `modetest` against the connected virtio-gpu connector. The process remains alive for the test lifetime so its scanout resource is not torn down before the host assertions inspect dimensions, flushes, and known SMPTE pixels.
 
 `lspci -nnk` reports `Kernel driver in use: virtio-pci` because that is the PCI transport driver. The actual GPU driver binding is the `virtioN` link under `/sys/bus/virtio/drivers/virtio_gpu`; the serial contract reports both facts separately.
 
@@ -108,7 +115,7 @@ The guest deliberately uses `drm_kms_helper.fbdev_emulation=0`. PR 1 implements 
 - Use `log_level: 0` and the kernel `quiet` argument for routine device tests. A debug source build can otherwise emit megabytes of CPU/IRQ tracing and materially slow the guest.
 - `tests/devices/virtio_gpu.js` treats `Mounting root: failed` and the initramfs recovery shell as immediate infrastructure failures. Do not wait for the GPU probe timeout when the 9p root never mounted.
 - The local probe timeout is 90 seconds multiplied by `TIMEOUT_EXTRA_FACTOR`. Slow CI can scale the timeout without weakening local feedback.
-- `V86_GPU_PROBE_STATUS=PASS` means the PCI function enumerated, Linux bound virtio-gpu, and the DRM card appeared. It does not mean that 2D resources, modesetting, or browser presentation are implemented.
+- `V86_GPU_PROBE_STATUS=PASS` means PCI enumeration, `virtio_gpu` binding, DRM discovery, a connected KMS connector, and a live `1024x768` `modetest` modeset all succeeded. Browser presentation is still outside the memory backend's scope.
 - A response to an unsupported complete command is expected to be `VIRTIO_GPU_RESP_ERR_UNSPEC`. A malformed header or insufficient response buffer receives `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER` when a response header fits.
 
 ## Verification Commands
@@ -127,14 +134,13 @@ make rustfmt
 
 The device tests require the generated Alpine artifacts described in `tools/docker/virtio-gpu-alpine/Readme.md`. The release target exercises `build/libv86.mjs`; the non-release target imports source modules directly.
 
-## PR 2 Handoff
+## PR 3 Handoff
 
-The next slice should implement standard VirtIO GPU 2D resources without changing the negotiated feature set:
+The next slice should add browser presentation behind the existing `VirtioGpuBackend` boundary without changing the negotiated guest feature set or standard 2D protocol:
 
-1. Resource create/unref and attach/detach backing.
-2. Bounded scatter/gather reads from guest backing storage.
-3. `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`, and `RESOURCE_FLUSH`.
-4. Ordered asynchronous backend submission with reset/restore generation guards.
-5. Tests for fragmented backing entries, rectangle arithmetic, resource limits, queue ordering, and fenced completion.
+1. Add a dedicated browser canvas and a WebGPU or wgpu backend implementing the existing resource, upload, scanout, flush, fence, reset, and disposal operations.
+2. Convert the four supported guest formats correctly, forcing opaque alpha for X formats.
+3. Present only on `RESOURCE_FLUSH`, preserve ordered fence completion, and handle device/surface loss without stale work crossing reset.
+4. Keep `MemoryGpuBackend` as the protocol oracle and compare browser output against the locked SMPTE pattern.
 
-WebGPU presentation remains a later backend. EDID, blobs, UUIDs, virgl, custom capsets, and 3D commands must not be advertised before their complete command paths exist.
+EDID, blobs, UUIDs, virgl, custom capsets, cursor commands, and 3D commands must not be advertised before their complete paths exist.

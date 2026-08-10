@@ -82,7 +82,7 @@ Integration images are external and ignored. Use the image download command in `
 - `.github/workflows/ci.yml`: definitive CI toolchain and suite list.
 - `Readme.md`, `docs/how-it-works.md`, `tests/Readme.md`: setup, architecture, and test controls.
 - `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`: VirtIO GPU protocol device and renderer-independent backend boundary.
-- `docs/virtio-gpu-webgpu.md`: implemented scope, invariants, shared-IRQ fix, Linux bring-up, and PR 2 handoff.
+- `docs/virtio-gpu-webgpu.md`: implemented 2D scope, protocol/state invariants, Linux KMS proof, interrupt fixes, and PR 3 handoff.
 - `tools/docker/virtio-gpu-alpine/`: reproducible i386 guest inputs, package locks, probe, build pipeline, and reviewed checksum contract.
 
 ## Runtime/Tooling Preferences

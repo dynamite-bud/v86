@@ -12,7 +12,7 @@ export class VirtioGpuBackend
         return Promise.reject(new Error("VirtioGpuBackend.initialize is not implemented"));
     }
 
-    /** @param {{resource_id: number, width: number, height: number}} desc */
+    /** @param {{resource_id: number, format: number, width: number, height: number}} desc */
     createResource2D(desc)
     {
         return Promise.reject(new Error("VirtioGpuBackend.createResource2D is not implemented"));
@@ -74,9 +74,11 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         this.height = 0;
         this.max_host_memory_bytes = 0;
         this.host_memory_bytes = 0;
-        /** @type {Map<number, {width: number, height: number, data: Uint8Array}>} */
+        /** @type {Map<number, {format: number, width: number, height: number, data: Uint8Array}>} */
         this.resources = new Map();
         this.scanout = null;
+        this.flush_count = 0;
+        this.last_flush = null;
     }
 
     async initialize(options)
@@ -99,6 +101,7 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         const resource_id = validate_resource_id(desc.resource_id);
         const width = validate_dimension(desc.width, "width");
         const height = validate_dimension(desc.height, "height");
+        const format = validate_nonnegative_integer(desc.format, "format");
         if(this.resources.has(resource_id))
         {
             return Promise.reject(new Error("Duplicate resource " + resource_id));
@@ -110,7 +113,7 @@ export class MemoryGpuBackend extends VirtioGpuBackend
             return Promise.reject(new Error("GPU host memory limit exceeded"));
         }
 
-        this.resources.set(resource_id, { width, height, data: new Uint8Array(byte_length) });
+        this.resources.set(resource_id, { format, width, height, data: new Uint8Array(byte_length) });
         this.host_memory_bytes += byte_length;
         return Promise.resolve();
     }
@@ -145,7 +148,8 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         {
             return Promise.reject(new Error("Upload stride is smaller than a row"));
         }
-        if(upload.data.byteLength < stride * rect.height)
+        const upload_size = checked_multiply(stride, rect.height, "Upload dimensions overflow");
+        if(upload.data.byteLength < upload_size)
         {
             return Promise.reject(new Error("Upload data is truncated"));
         }
@@ -184,7 +188,15 @@ export class MemoryGpuBackend extends VirtioGpuBackend
     {
         this.assert_initialized();
         const resource = this.get_resource(flush.resource_id);
-        validate_rect(flush, resource.width, resource.height);
+        const rect = validate_rect(flush, resource.width, resource.height);
+        this.last_flush = {
+            resource_id: flush.resource_id,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        this.flush_count++;
         return Promise.resolve();
     }
 
@@ -198,6 +210,8 @@ export class MemoryGpuBackend extends VirtioGpuBackend
     {
         this.resources.clear();
         this.scanout = null;
+        this.flush_count = 0;
+        this.last_flush = null;
         this.host_memory_bytes = 0;
         return Promise.resolve();
     }
@@ -266,6 +280,16 @@ function checked_rgba_size(width, height)
         throw new Error("Resource dimensions overflow host addressing");
     }
     return size;
+}
+
+function checked_multiply(left, right, message)
+{
+    const result = left * right;
+    if(!Number.isSafeInteger(result))
+    {
+        throw new Error(message);
+    }
+    return result;
 }
 
 function validate_rect(rect, resource_width, resource_height)
