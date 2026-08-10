@@ -82,13 +82,13 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
-	   bus.js log.js cpu.js \
+	   virtio_gpu.js bus.js log.js cpu.js \
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
 BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
-          print_stats.js filestorage.js modem.js
+          print_stats.js filestorage.js modem.js virtio_gpu_backend.js
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
@@ -357,6 +357,9 @@ devices-test: build/v86-debug.wasm
 	./tests/devices/wisp_network.js
 	./tests/devices/virtio_balloon.js
 
+virtio-gpu-unit-test:
+	./tests/unit/virtio_gpu_protocol.js
+
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
@@ -376,7 +379,7 @@ api-tests: build/v86-debug.wasm
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests virtio-gpu-unit-test
 	# Skipping:
 	# - devices-test (hangs)
 
@@ -415,4 +418,4 @@ doc:
 denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
-.PHONY: tests
+.PHONY: tests virtio-gpu-unit-test

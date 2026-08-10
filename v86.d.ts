@@ -340,6 +340,36 @@ type V86NetworkDevice =
     };
 
 /**
+ * Initial virtio-gpu configuration. The memory backend is deterministic and
+ * intended for protocol bring-up; resource and scanout commands are deferred.
+ */
+export interface VirtioGpuConfig {
+    /**
+     * Renderer backend.
+     * @default "memory"
+     */
+    backend?: "memory";
+
+    /**
+     * Preferred width reported for the single scanout.
+     * @default 1024
+     */
+    width?: number;
+
+    /**
+     * Preferred height reported for the single scanout.
+     * @default 768
+     */
+    height?: number;
+
+    /**
+     * Maximum bytes the backend may allocate for host resources.
+     * @default 268435456
+     */
+    max_host_memory_bytes?: number;
+}
+
+/**
  * Emulator instance constructor options.
  */
 export interface V86Options {
@@ -568,6 +598,12 @@ export interface V86Options {
      * @default false
      */
     virtio_balloon?: boolean;
+
+    /**
+     * Create a modern virtio-gpu PCI device.
+     * @default false
+     */
+    virtio_gpu?: false | VirtioGpuConfig;
 
     /**
      * Override the maximum supported cpuid level

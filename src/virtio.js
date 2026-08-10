@@ -146,6 +146,9 @@ var VirtIO_DeviceSpecificCapabilityOptions;
  *     pci_id: number,
  *     device_id: number,
  *     subsystem_device_id: number,
+ *     pci_class: (number|undefined),
+ *     pci_subclass: (number|undefined),
+ *     pci_progif: (number|undefined),
  *     common: VirtIO_CommonCapabilityOptions,
  *     notification: VirtIO_NotificationCapabilityOptions,
  *     isr_status: VirtIO_ISRCapabilityOptions,
@@ -184,7 +187,9 @@ export function VirtIO(cpu, options)
         // Revision ID
         0x01,
         // Prof IF, Subclass, Class code
-        0x00, 0x02, 0x00,
+        options.pci_progif === undefined ? 0x00 : options.pci_progif,
+        options.pci_subclass === undefined ? 0x02 : options.pci_subclass,
+        options.pci_class === undefined ? 0x00 : options.pci_class,
         // Cache line size
         0x00,
         // Latency Timer
