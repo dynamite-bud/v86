@@ -28,6 +28,10 @@ export function PCI(cpu)
 
     this.device_spaces = [];
     this.devices = [];
+    // Active INTx assertion per device (IRQ + 1, with zero meaning inactive)
+    // and assertion counts per shared legacy IRQ line.
+    this.irq_device_state = new Uint8Array(256);
+    this.irq_line_state = new Uint16Array(16);
 
     /** @const @type {CPU} */
     this.cpu = cpu;
@@ -215,6 +219,7 @@ PCI.prototype.get_state = function()
     state[257] = this.pci_value;
     state[258] = this.pci_response;
     state[259] = this.pci_status;
+    state[260] = this.irq_device_state;
 
     return state;
 };
@@ -265,6 +270,21 @@ PCI.prototype.set_state = function(state)
     this.pci_value.set(state[257]);
     this.pci_response.set(state[258]);
     this.pci_status.set(state[259]);
+
+    this.irq_device_state.fill(0);
+    this.irq_line_state.fill(0);
+    if(state[260])
+    {
+        this.irq_device_state.set(state[260]);
+        for(var i = 0; i < this.irq_device_state.length; i++)
+        {
+            var irq_state = this.irq_device_state[i];
+            if(irq_state)
+            {
+                this.irq_line_state[irq_state - 1]++;
+            }
+        }
+    }
 };
 
 PCI.prototype.pci_query = function()
@@ -572,32 +592,61 @@ PCI.prototype.set_io_bars = function(bar, from, to)
     }
 };
 
-PCI.prototype.raise_irq = function(pci_id)
+/**
+ * @param {PCI} pci
+ * @param {number} pci_id
+ * @return {number}
+ */
+function get_irq(pci, pci_id)
 {
-    var space = this.device_spaces[pci_id];
+    var space = pci.device_spaces[pci_id];
     dbg_assert(space);
 
     var pin = (space[0x3C >>> 2] >> 8 & 0xFF) - 1;
     var device = (pci_id >> 3) - 1 & 0xFF;
     var parent_pin = pin + device & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    var irq = pci.isa_bridge_space8[0x60 + parent_pin];
+    dbg_assert(irq < pci.irq_line_state.length);
+    return irq;
+}
 
-    //dbg_log("PCI raise irq " + h(irq) + " dev=" + h(device, 2) +
+PCI.prototype.raise_irq = function(pci_id)
+{
+    var irq = get_irq(this, pci_id);
+    var irq_state = this.irq_device_state[pci_id];
+
+    if(irq_state)
+    {
+        dbg_assert(irq_state === irq + 1);
+        return;
+    }
+
+    this.irq_device_state[pci_id] = irq + 1;
+
+    //dbg_log("PCI raise irq " + h(irq) + " dev=" + h(pci_id >> 3, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_raise_irq(irq);
+    if(this.irq_line_state[irq]++ === 0)
+    {
+        this.cpu.device_raise_irq(irq);
+    }
 };
 
 PCI.prototype.lower_irq = function(pci_id)
 {
-    var space = this.device_spaces[pci_id];
-    dbg_assert(space);
+    var irq_state = this.irq_device_state[pci_id];
+    if(!irq_state)
+    {
+        return;
+    }
 
-    var pin = space[0x3C >>> 2] >> 8 & 0xFF;
-    var device = pci_id >> 3 & 0xFF;
-    var parent_pin = pin + device - 2 & 3;
-    var irq = this.isa_bridge_space8[0x60 + parent_pin];
+    var irq = irq_state - 1;
+    this.irq_device_state[pci_id] = 0;
+    dbg_assert(this.irq_line_state[irq] > 0);
 
-    //dbg_log("PCI lower irq " + h(irq) + " dev=" + h(device, 2) +
+    //dbg_log("PCI lower irq " + h(irq) + " dev=" + h(pci_id >> 3, 2) +
     //        " (" + this.devices[pci_id].name + ")", LOG_PCI);
-    this.cpu.device_lower_irq(irq);
+    if(--this.irq_line_state[irq] === 0)
+    {
+        this.cpu.device_lower_irq(irq);
+    }
 };
