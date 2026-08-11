@@ -96,9 +96,32 @@ Open one of these URLs for the direct JavaScript renderer:
 - Wayland: `http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=wayland&renderer=webgpu-js`
 
 Use `renderer=wgpu` for the Rust/Wasm renderer. The page exposes both desktop
-and renderer selectors. It boots the generated filesystem with 1 GiB guest RAM
-at `1024x768` and switches from VGA to the dedicated WebGPU canvas after the
-guest establishes its first KMS scanout.
+and renderer selectors. It requests 2 GiB guest RAM; v86 maps its supported
+32-bit maximum of 2 GiB minus 128 KiB. At `1024x768`, the page switches from
+VGA to the dedicated WebGPU canvas after the guest establishes its first KMS scanout.
+
+### Ready-state snapshots
+
+After the desktop reports ready, **Save ready snapshot** pauses the emulator,
+captures CPU, device, VirtIO GPU, and writable 9p filesystem state, compresses
+it with gzip, stores it in origin-scoped IndexedDB, and resumes the VM. Reloading
+the same desktop and renderer automatically restores that state before guest
+boot. **Delete saved snapshot** returns later reloads to a cold boot.
+
+The record is keyed by desktop and renderer. A SHA-256 compatibility fingerprint
+covers the emulator JavaScript and Wasm, BIOS images, guest filesystem manifest,
+renderer artifacts, memory and storage sizes, display mode, and kernel command
+line. Incompatible or corrupt records are deleted instead of restored.
+`snapshot=off` bypasses automatic restore while leaving the saved record
+available for deletion or replacement. Benchmarks always disable snapshots.
+
+On the Apple M4 development machine, one 2 GiB Xorg `webgpu-js` run captured a
+223.2 MiB state, stored it as 75.4 MiB, and restored the ready desktop in 1.5
+seconds versus a 73.5-second cold boot. Run the focused contract with:
+
+```sh
+make virtio-gpu-ready-snapshot-test
+```
 
 ## Session Comparison
 

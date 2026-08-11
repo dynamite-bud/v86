@@ -50,6 +50,22 @@
         color: #cbd1da;
         font: 13px ui-monospace, monospace;
     }
+    #snapshot-controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin: 0 0 10px;
+    }
+    #snapshot-controls button {
+        padding: 6px 10px;
+    }
+    #snapshot-controls button:disabled {
+        opacity: 0.55;
+    }
+    #snapshot-status {
+        color: #aeb5c0;
+        font: 12px ui-monospace, monospace;
+    }
     #screen_container {
         position: relative;
         width: 1024px;
@@ -97,6 +113,11 @@
 </header>
 <main>
     <p id="status">Preparing emulator…</p>
+    <div id="snapshot-controls">
+        <button id="save-snapshot" type="button" disabled>Save ready snapshot</button>
+        <button id="clear-snapshot" type="button" disabled>Delete saved snapshot</button>
+        <span id="snapshot-status" role="status">Checking snapshot support…</span>
+    </div>
     <div id="screen_container">
         <div></div>
         <canvas class="legacy-vga"></canvas>
@@ -108,6 +129,11 @@
 </main>
 <script type="module">
 import { V86 } from "../build/libv86.mjs";
+import {
+    READY_STATE_SNAPSHOT_SCHEMA,
+    ReadyStateSnapshotStore,
+    create_ready_state_fingerprint,
+} from "../src/browser/ready_state_snapshot.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("desktop") === "wayland" ? "wayland" : "xorg";
@@ -126,6 +152,9 @@ const benchmark = params.has("benchmark") ?
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
+const snapshot_status = document.getElementById("snapshot-status");
+const save_snapshot_button = document.getElementById("save-snapshot");
+const clear_snapshot_button = document.getElementById("clear-snapshot");
 document.getElementById(`${mode}-link`).setAttribute("aria-current", "page");
 document.getElementById(`${renderer}-link`).setAttribute("aria-current", "page");
 document.getElementById("xorg-link").href = `?desktop=xorg&renderer=${renderer}`;
@@ -133,25 +162,108 @@ document.getElementById("wayland-link").href = `?desktop=wayland&renderer=${rend
 document.getElementById("webgpu-js-link").href = `?desktop=${mode}&renderer=webgpu-js`;
 document.getElementById("wgpu-link").href = `?desktop=${mode}&renderer=wgpu`;
 
+const memory_size = 2 * 1024 * 1024 * 1024;
+const vga_memory_size = 8 * 1024 * 1024;
+const filesystem_size = 2 * 1024 * 1024 * 1024;
+const width = 1024;
+const height = 768;
+const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86.desktop=${mode}`;
+const snapshots_available = !benchmark;
+const snapshot_restore_enabled = snapshots_available && params.get("snapshot") !== "off";
+const snapshot_key = `alpine-xfce-ready-v${READY_STATE_SNAPSHOT_SCHEMA}:${mode}:${renderer}`;
+const snapshot_configuration = {
+    mode,
+    renderer,
+    memory_size,
+    vga_memory_size,
+    filesystem_size,
+    width,
+    height,
+    cmdline,
+};
+const snapshot_assets = [
+    "../build/libv86.mjs",
+    "../build/v86.wasm",
+    "../bios/seabios.bin",
+    "../bios/vgabios.bin",
+    "../images/alpine-virtio-gpu-desktop-fs.json",
+    ...(renderer === "wgpu" ? [
+        "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+        "../build/virtio-gpu-wgpu/virtio_gpu_wgpu_bg.wasm",
+    ] : []),
+];
+let snapshot_store = null;
+let snapshot_fingerprint = null;
+let snapshot_metadata = null;
+let restored_snapshot = null;
+if(snapshots_available)
+{
+    status.textContent = snapshot_restore_enabled ?
+        "Checking for a compatible ready-state snapshot…" :
+        "Snapshot restore skipped; starting a cold boot…";
+    snapshot_store = new ReadyStateSnapshotStore(snapshot_key);
+    try
+    {
+        snapshot_fingerprint = await create_ready_state_fingerprint(
+            snapshot_configuration, snapshot_assets);
+        if(snapshot_restore_enabled)
+        {
+            try
+            {
+                restored_snapshot = await snapshot_store.load(snapshot_fingerprint);
+                snapshot_metadata = restored_snapshot && restored_snapshot.metadata;
+                snapshot_status.textContent = restored_snapshot ?
+                    `Loading snapshot saved ${new Date(snapshot_metadata.created_at).toLocaleString()}…` :
+                    "No compatible snapshot saved. Boot once, then save it here.";
+            }
+            catch(error)
+            {
+                await snapshot_store.delete().catch(() => {});
+                snapshot_status.textContent =
+                    `Discarded an invalid snapshot: ${error_message(error)}`;
+            }
+        }
+        else
+        {
+            snapshot_metadata = await snapshot_store.get_metadata();
+            snapshot_status.textContent = snapshot_metadata ?
+                "Saved snapshot bypassed. Delete it here or reload without snapshot=off." :
+                "Snapshot restore disabled by snapshot=off.";
+        }
+        clear_snapshot_button.disabled = !snapshot_metadata;
+    }
+    catch(error)
+    {
+        snapshot_store = null;
+        snapshot_status.textContent = `Snapshots unavailable: ${error_message(error)}`;
+    }
+}
+else
+{
+    snapshot_status.textContent = "Snapshots are disabled during benchmarks.";
+}
+
+const initial_state = restored_snapshot ? { buffer: restored_snapshot.state } : null;
 const emulator = new V86({
     wasm_path: "../build/v86.wasm",
-    memory_size: 1024 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
+    memory_size,
+    vga_memory_size,
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {
         baseurl: "../images/alpine-virtio-gpu-desktop-rootfs-flat",
         basefs: "../images/alpine-virtio-gpu-desktop-fs.json",
-        total_size: 2 * 1024 * 1024 * 1024,
+        total_size: filesystem_size,
     },
     screen_container: document.getElementById("screen_container"),
     autostart: true,
     bzimage_initrd_from_filesystem: true,
-    cmdline: `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86.desktop=${mode}`,
+    cmdline,
+    ...(initial_state ? { initial_state } : {}),
     virtio_gpu: {
         backend: renderer,
-        width: 1024,
-        height: 768,
+        width,
+        height,
         ...(renderer === "wgpu" ? {
             wasm_module_url: "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
         } : {}),
@@ -166,10 +278,12 @@ if(benchmark)
     window.virtioGpuBenchmark = benchmark;
     benchmark.run(emulator);
 }
-status.textContent = `Booting Alpine XFCE (${mode}, ${renderer_label})…`;
+status.textContent = restored_snapshot ?
+    `Restoring Alpine XFCE (${mode}, ${renderer_label}) from its saved ready state…` :
+    `Booting Alpine XFCE (${mode}, ${renderer_label})…`;
 let serial_text = "";
 let serial_render_pending = false;
-let guest_ready = false;
+let guest_ready = !!restored_snapshot;
 let readiness_timer;
 function update_readiness()
 {
@@ -192,13 +306,28 @@ function update_readiness()
     const canvas = document.querySelector(".v86-virtio-gpu-canvas");
     if(canvas && !canvas.hidden && getComputedStyle(canvas).display !== "none")
     {
-        status.textContent = `Alpine XFCE (${mode}) is ready. Click the desktop to interact.`;
+        status.textContent = restored_snapshot ?
+            `Alpine XFCE (${mode}) restored from its ready snapshot. Click the desktop to interact.` :
+            `Alpine XFCE (${mode}) is ready. Click the desktop to interact.`;
         document.body.dataset.result = "pass";
+        document.body.dataset.snapshotRestore = restored_snapshot ? "pass" : "none";
+        save_snapshot_button.disabled = !snapshot_store;
+        clear_snapshot_button.disabled = !snapshot_metadata;
+        if(restored_snapshot)
+        {
+            snapshot_status.textContent =
+                `Restored ${format_bytes(snapshot_metadata.stored_bytes)} snapshot from ` +
+                new Date(snapshot_metadata.created_at).toLocaleString() + ".";
+            restored_snapshot.state = null;
+            initial_state.buffer = null;
+        }
         clearInterval(readiness_timer);
     }
     else
     {
-        status.textContent = `Alpine XFCE (${mode}) started; waiting for its WebGPU scanout…`;
+        status.textContent = restored_snapshot ?
+            `Snapshot loaded; waiting for its WebGPU scanout…` :
+            `Alpine XFCE (${mode}) started; waiting for its WebGPU scanout…`;
     }
 }
 readiness_timer = setInterval(update_readiness, 250);
@@ -226,4 +355,114 @@ emulator.add_listener("serial0-output-byte", byte => {
         update_readiness();
     }
 });
+
+function error_message(error)
+{
+    return error instanceof Error ? error.message : String(error);
+}
+
+function format_bytes(bytes)
+{
+    if(!Number.isFinite(bytes))
+    {
+        return "unknown-size";
+    }
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let value = bytes;
+    let unit = 0;
+    while(value >= 1024 && unit < units.length - 1)
+    {
+        value /= 1024;
+        unit++;
+    }
+    return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+async function save_ready_snapshot()
+{
+    if(!snapshot_store || !snapshot_fingerprint)
+    {
+        throw new Error("Persistent snapshots are unavailable");
+    }
+    if(document.body.dataset.result !== "pass")
+    {
+        throw new Error("The desktop must be ready before it can be saved");
+    }
+    save_snapshot_button.disabled = true;
+    clear_snapshot_button.disabled = true;
+    const was_running = emulator.is_running();
+    let state = null;
+    try
+    {
+        snapshot_status.textContent = "Pausing and capturing the ready desktop…";
+        if(was_running)
+        {
+            await emulator.stop();
+        }
+        state = await emulator.save_state();
+        snapshot_status.textContent =
+            `Compressing and storing ${format_bytes(state.byteLength)}…`;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        snapshot_metadata = await snapshot_store.save(snapshot_fingerprint, state);
+        snapshot_status.textContent =
+            `Saved ${format_bytes(snapshot_metadata.stored_bytes)} snapshot at ` +
+            new Date(snapshot_metadata.created_at).toLocaleString() + ".";
+        clear_snapshot_button.disabled = false;
+        return snapshot_metadata;
+    }
+    catch(error)
+    {
+        snapshot_status.textContent = `Snapshot save failed: ${error_message(error)}`;
+        throw error;
+    }
+    finally
+    {
+        state = null;
+        if(was_running)
+        {
+            await emulator.run();
+        }
+        save_snapshot_button.disabled = false;
+        clear_snapshot_button.disabled = !snapshot_metadata;
+    }
+}
+
+async function clear_ready_snapshot()
+{
+    if(!snapshot_store)
+    {
+        return;
+    }
+    save_snapshot_button.disabled = true;
+    clear_snapshot_button.disabled = true;
+    try
+    {
+        await snapshot_store.delete();
+        snapshot_metadata = null;
+        snapshot_status.textContent =
+            "Saved snapshot deleted. The next reload will perform a cold boot.";
+    }
+    catch(error)
+    {
+        snapshot_status.textContent = `Snapshot deletion failed: ${error_message(error)}`;
+        throw error;
+    }
+    finally
+    {
+        save_snapshot_button.disabled = document.body.dataset.result !== "pass";
+        clear_snapshot_button.disabled = !snapshot_metadata;
+    }
+}
+
+save_snapshot_button.addEventListener("click", () => {
+    save_ready_snapshot().catch(error => console.error(error));
+});
+clear_snapshot_button.addEventListener("click", () => {
+    clear_ready_snapshot().catch(error => console.error(error));
+});
+window.readyStateSnapshot = {
+    save: save_ready_snapshot,
+    clear: clear_ready_snapshot,
+    metadata: () => snapshot_metadata,
+};
 </script>

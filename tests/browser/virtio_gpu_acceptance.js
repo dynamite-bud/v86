@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const READY_TIMEOUT_MS = Number(process.env.V86_GPU_BROWSER_TIMEOUT_MS || 300000);
+const TEST_READY_SNAPSHOT = process.env.V86_GPU_BROWSER_SNAPSHOT === "1";
 const DEFAULT_MATRIX = ["webgpu-js:xorg", "webgpu-js:wayland", "wgpu:xorg", "wgpu:wayland"];
 const matrix = (process.env.V86_GPU_BROWSER_MATRIX || DEFAULT_MATRIX.join(","))
     .split(",")
@@ -80,6 +81,24 @@ async function main()
     const address = server.address();
     const base_url = `http://127.0.0.1:${address.port}`;
 
+    try
+    {
+        const results = [];
+        for(const scenario of matrix)
+        {
+            results.push(await run_scenario_in_chrome(base_url, scenario));
+        }
+        console.log(JSON.stringify({ result: "pass", scenarios: results }, null, 2));
+    }
+    finally
+    {
+        await new Promise(resolve => server.close(resolve));
+    }
+}
+
+async function run_scenario_in_chrome(base_url, scenario)
+{
+    // A fresh process releases each 2 GiB Wasm memory before the next matrix entry.
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), "v86-gpu-browser-"));
     const chrome = spawn(find_chrome(), [
         "--headless=new",
@@ -98,13 +117,7 @@ async function main()
         const browser_ws = await read_devtools_url(chrome);
         browser = new Cdp(browser_ws);
         await browser.ready;
-
-        const results = [];
-        for(const scenario of matrix)
-        {
-            results.push(await run_scenario(browser_ws, base_url, scenario));
-        }
-        console.log(JSON.stringify({ result: "pass", scenarios: results }, null, 2));
+        return await run_scenario(browser_ws, base_url, scenario);
     }
     finally
     {
@@ -117,7 +130,6 @@ async function main()
                 new Promise(resolve => setTimeout(resolve, 5000)),
             ]);
         }
-        await new Promise(resolve => server.close(resolve));
         fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
 }
@@ -159,9 +171,24 @@ async function run_scenario(browser_ws, base_url, scenario)
         return state.result === "pass";
     }, READY_TIMEOUT_MS, `${scenario.renderer}:${scenario.desktop} desktop readiness`);
     const ready_ms = performance.now() - scenario_started;
+    if(TEST_READY_SNAPSHOT)
+    {
+        const snapshot_acceptance = await ready_snapshot_acceptance(
+            cdp, url, ready_ms, failures, scenario);
+        const result = {
+            ...scenario,
+            ...snapshot_acceptance,
+            ready_ms: Math.round(ready_ms),
+            total_ms: Math.round(performance.now() - scenario_started),
+        };
+        await fetch(`http://${browser_url.host}/json/close/${target.id}`);
+        cdp.close();
+        return result;
+    }
     const acceptance_started = performance.now();
 
     const acceptance = await evaluate(cdp, `(${browser_acceptance.toString()})(${JSON.stringify(scenario)})`, true);
+    assert.equal(acceptance.memory_size, 2 * 1024 * 1024 * 1024 - 128 * 1024);
     assert.equal(acceptance.reset_fallback, true);
     assert.equal(acceptance.restore_presented, true);
     assert.equal(acceptance.storage_capacity, true);
@@ -190,6 +217,55 @@ async function run_scenario(browser_ws, base_url, scenario)
     return result;
 }
 
+async function ready_snapshot_acceptance(cdp, url, cold_ready_ms, failures, scenario)
+{
+    const metadata = await evaluate(cdp, "window.readyStateSnapshot.save()", true);
+    assert.ok(metadata.state_bytes > 1024 * 1024);
+    assert.ok(metadata.stored_bytes > 0);
+    assert.ok(metadata.stored_bytes < metadata.state_bytes);
+    assert.equal(metadata.compression, "gzip");
+
+    const restore_started = performance.now();
+    await cdp.call("Page.navigate", { url: `${url}&snapshot_reload=${Date.now()}` });
+    await wait_for(async() => {
+        const state = await evaluate(cdp,
+            `({ result: document.body?.dataset?.result || null, ` +
+            `snapshot: document.body?.dataset?.snapshotRestore || null })`);
+        if(state.result === "fail") throw new Error("Restored desktop readiness failed");
+        return state.result === "pass" && state.snapshot === "pass";
+    }, READY_TIMEOUT_MS, `${scenario.renderer}:${scenario.desktop} ready snapshot restore`);
+    const restore_ms = performance.now() - restore_started;
+    const restored = await evaluate(cdp, `({
+        memory_size: window.emulator?.v86?.cpu?.memory_size?.[0] ?? null,
+        storage_size: window.emulator?.fs9p?.total_size ?? null,
+        storage_used: window.emulator?.fs9p?.used_size ?? null,
+        scanout_presented: !!window.emulator?.v86?.cpu?.devices?.virtio_gpu?.scanouts?.[0] &&
+            !window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.canvas?.hidden,
+        snapshot_status: document.getElementById("snapshot-status")?.textContent || "",
+    })`);
+    assert.equal(restored.memory_size, 2 * 1024 * 1024 * 1024 - 128 * 1024,
+        `Restored guest memory state: ${JSON.stringify(restored)}`);
+    assert.equal(restored.storage_size, 2 * 1024 * 1024 * 1024,
+        `Restored filesystem state: ${JSON.stringify(restored)}`);
+    assert.equal(restored.scanout_presented, true);
+    assert.match(restored.snapshot_status, /^Restored /);
+    assert.ok(restore_ms < cold_ready_ms,
+        `Snapshot restore ${restore_ms.toFixed(0)}ms was not faster than cold boot ${cold_ready_ms.toFixed(0)}ms`);
+    if(failures.length)
+    {
+        throw new Error(`${scenario.renderer}:${scenario.desktop} browser errors: ${failures.join(" | ")}`);
+    }
+    await evaluate(cdp, "window.readyStateSnapshot.clear()", true);
+    assert.equal(await evaluate(cdp, "window.readyStateSnapshot.metadata()"), null);
+    return {
+        snapshot: metadata,
+        snapshot_restore_ms: Math.round(restore_ms),
+        memory_size: restored.memory_size,
+        storage_capacity: restored.storage_size === 2 * 1024 * 1024 * 1024,
+        scanout_presented: restored.scanout_presented,
+    };
+}
+
 async function browser_acceptance(scenario)
 {
     const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -203,6 +279,7 @@ async function browser_acceptance(scenario)
         throw new Error(`Timed out waiting for ${label}`);
     };
     const emulator = window.emulator;
+    const memory_size = emulator.v86.cpu.memory_size[0];
     const storage_capacity = emulator.fs9p?.total_size === 2 * 1024 * 1024 * 1024;
     const device = emulator.v86.cpu.devices.virtio_gpu;
     const backend = device.backend;
@@ -296,6 +373,7 @@ async function browser_acceptance(scenario)
         device.scanouts[0]?.width === initial.width &&
         device.scanouts[0]?.height === initial.height;
     return {
+        memory_size,
         storage_capacity,
         reset_fallback,
         restore_presented,

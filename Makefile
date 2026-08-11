@@ -389,10 +389,12 @@ pci-unit-test:
 
 filesystem-unit-test:
 	./tests/unit/filesystem_capacity.js
+	./tests/unit/filestorage.js
 
 virtio-gpu-unit-test:
 	./tests/unit/virtio_gpu_protocol.js
 	./tests/unit/virtio_gpu_webgpu_backend.js
+	./tests/unit/ready_state_snapshot.js
 
 virtio-gpu-test: build/v86-debug.wasm acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	./tests/devices/virtio_gpu.js
@@ -402,6 +404,9 @@ virtio-gpu-test-release: build/libv86.mjs build/v86.wasm acpi-unit-test pci-unit
 
 virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_acceptance.js
+
+virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
+	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture

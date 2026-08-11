@@ -84,7 +84,7 @@ MemoryFileStorage.prototype.uncache = function(sha256sum)
  * @implements {FileStorageInterface}
  * @param {FileStorageInterface} file_storage
  * @param {string} baseurl
- * @param {function(number,Uint8Array):ArrayBuffer} zstd_decompress
+ * @param {function(number,!Uint8Array):(!ArrayBuffer|!Promise<!ArrayBuffer>)} zstd_decompress
  */
 export function ServerFileStorageWrapper(file_storage, baseurl, zstd_decompress)
 {
@@ -115,7 +115,7 @@ ServerFileStorageWrapper.prototype.load_from_server = function(sha256sum, file_s
             if(sha256sum.endsWith(".zst"))
             {
                 data = new Uint8Array(
-                    this.zstd_decompress(file_size, data)
+                    await this.zstd_decompress(file_size, data)
                 );
             }
             await this.cache(sha256sum, data);
