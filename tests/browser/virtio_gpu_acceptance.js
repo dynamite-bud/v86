@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const READY_TIMEOUT_MS = Number(process.env.V86_GPU_BROWSER_TIMEOUT_MS || 300000);
+const TEST_READY_SNAPSHOT = process.env.V86_GPU_BROWSER_SNAPSHOT === "1";
 const DEFAULT_MATRIX = ["webgpu-js:xorg", "webgpu-js:wayland", "wgpu:xorg", "wgpu:wayland"];
 const matrix = (process.env.V86_GPU_BROWSER_MATRIX || DEFAULT_MATRIX.join(","))
     .split(",")
@@ -159,6 +160,20 @@ async function run_scenario(browser_ws, base_url, scenario)
         return state.result === "pass";
     }, READY_TIMEOUT_MS, `${scenario.renderer}:${scenario.desktop} desktop readiness`);
     const ready_ms = performance.now() - scenario_started;
+    if(TEST_READY_SNAPSHOT)
+    {
+        const snapshot_acceptance = await ready_snapshot_acceptance(
+            cdp, url, ready_ms, failures, scenario);
+        const result = {
+            ...scenario,
+            ...snapshot_acceptance,
+            ready_ms: Math.round(ready_ms),
+            total_ms: Math.round(performance.now() - scenario_started),
+        };
+        await fetch(`http://${browser_url.host}/json/close/${target.id}`);
+        cdp.close();
+        return result;
+    }
     const acceptance_started = performance.now();
 
     const acceptance = await evaluate(cdp, `(${browser_acceptance.toString()})(${JSON.stringify(scenario)})`, true);
@@ -188,6 +203,51 @@ async function run_scenario(browser_ws, base_url, scenario)
     await fetch(`http://${browser_url.host}/json/close/${target.id}`);
     cdp.close();
     return result;
+}
+
+async function ready_snapshot_acceptance(cdp, url, cold_ready_ms, failures, scenario)
+{
+    const metadata = await evaluate(cdp, "window.readyStateSnapshot.save()", true);
+    assert.ok(metadata.state_bytes > 1024 * 1024);
+    assert.ok(metadata.stored_bytes > 0);
+    assert.ok(metadata.stored_bytes < metadata.state_bytes);
+    assert.equal(metadata.compression, "gzip");
+
+    const restore_started = performance.now();
+    await cdp.call("Page.navigate", { url: `${url}&snapshot_reload=${Date.now()}` });
+    await wait_for(async() => {
+        const state = await evaluate(cdp,
+            `({ result: document.body?.dataset?.result || null, ` +
+            `snapshot: document.body?.dataset?.snapshotRestore || null })`);
+        if(state.result === "fail") throw new Error("Restored desktop readiness failed");
+        return state.result === "pass" && state.snapshot === "pass";
+    }, READY_TIMEOUT_MS, `${scenario.renderer}:${scenario.desktop} ready snapshot restore`);
+    const restore_ms = performance.now() - restore_started;
+    const restored = await evaluate(cdp, `({
+        storage_size: window.emulator?.fs9p?.total_size ?? null,
+        storage_used: window.emulator?.fs9p?.used_size ?? null,
+        scanout_presented: !!window.emulator?.v86?.cpu?.devices?.virtio_gpu?.scanouts?.[0] &&
+            !window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.canvas?.hidden,
+        snapshot_status: document.getElementById("snapshot-status")?.textContent || "",
+    })`);
+    assert.equal(restored.storage_size, 2 * 1024 * 1024 * 1024,
+        `Restored filesystem state: ${JSON.stringify(restored)}`);
+    assert.equal(restored.scanout_presented, true);
+    assert.match(restored.snapshot_status, /^Restored /);
+    assert.ok(restore_ms < cold_ready_ms,
+        `Snapshot restore ${restore_ms.toFixed(0)}ms was not faster than cold boot ${cold_ready_ms.toFixed(0)}ms`);
+    if(failures.length)
+    {
+        throw new Error(`${scenario.renderer}:${scenario.desktop} browser errors: ${failures.join(" | ")}`);
+    }
+    await evaluate(cdp, "window.readyStateSnapshot.clear()", true);
+    assert.equal(await evaluate(cdp, "window.readyStateSnapshot.metadata()"), null);
+    return {
+        snapshot: metadata,
+        snapshot_restore_ms: Math.round(restore_ms),
+        storage_capacity: restored.storage_size === 2 * 1024 * 1024 * 1024,
+        scanout_presented: restored.scanout_presented,
+    };
 }
 
 async function browser_acceptance(scenario)
