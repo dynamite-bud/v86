@@ -3,18 +3,18 @@
   "artifacts": {
     "filesystem_json": {
       "path": "images/alpine-virtio-gpu-desktop-fs.json",
-      "sha256": "6ca227587f5ee01c668d76a39a1e129a1b42f826b2cfd46a4b19b527db8eb339",
-      "size": 695333
+      "sha256": "e54db665f24c6d540d850c855df5a2be5c9b1db9e45993ef02db56f7572479d2",
+      "size": 695517
     },
     "flat_files": {
-      "file_count": 9174,
-      "manifest_sha256": "bb3f071923676268e620ca4b0e7bbf31fb839283ddb33bfaa49e29be20c8a4ec",
+      "file_count": 9175,
+      "manifest_sha256": "81400727be69c5ff0c2b040f86fadb0b0e905fcae3877a9722fd8b98ede0cece",
       "path": "images/alpine-virtio-gpu-desktop-rootfs-flat",
-      "size": 295225431
+      "size": 295224610
     },
     "rootfs_tar": {
       "path": "images/alpine-virtio-gpu-desktop-rootfs.tar",
-      "sha256": "2f7567c0872424932416dd8fd082eb568b871759caacb2044d400a3ee65b46b2",
+      "sha256": "f508365f06c4e4a9897a20bb5c1dfd6e62195627fa759ae397c36d9d93866e8a",
       "size": 794818560
     }
   },

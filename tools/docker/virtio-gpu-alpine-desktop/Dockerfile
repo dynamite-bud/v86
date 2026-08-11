@@ -10,6 +10,7 @@ COPY desktop-session /usr/local/sbin/v86-desktop-session
 COPY profile /root/.profile
 COPY xinitrc /root/.xinitrc
 COPY 20-virtio-gpu.conf /etc/X11/xorg.conf.d/20-virtio-gpu.conf
+COPY xfce4-power-manager.xml /root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml
 
 RUN chmod +x /usr/local/sbin/v86-desktop-session /root/.xinitrc && \
     sed -i 's/getty 38400 tty1/agetty --autologin root tty1 linux/' /etc/inittab && \

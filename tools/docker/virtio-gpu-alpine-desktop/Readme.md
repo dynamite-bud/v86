@@ -28,6 +28,7 @@ This proves a complete desktop over VirtIO GPU 2D and host WebGPU presentation. 
 - `profile`: selects Xorg or Wayland from the kernel command line.
 - `xinitrc`: Xorg XFCE startup.
 - `20-virtio-gpu.conf`: Xorg modesetting configuration for the VirtIO GPU.
+- `xfce4-power-manager.xml`: disables guest display blanking and DPMS for stable browser and snapshot sessions.
 - `image-contract.json`: reviewed package and generated-artifact checksums.
 
 Docker only assembles and exports the root filesystem. Docker is not part of the v86 browser runtime.
@@ -59,7 +60,7 @@ The image build:
 
 1. Builds the pinned Alpine base for `linux/386`.
 2. Installs `world.lock` and rejects any installed closure that differs from `packages.lock`.
-3. Configures automatic root login, OpenRC, D-Bus, seatd, Xorg, labwc, and XFCE.
+3. Configures automatic root login, OpenRC, D-Bus, seatd, Xorg, labwc, XFCE, and a continuously active virtual display.
 4. Generates an initramfs with the `base`, `virtio`, and `9p` features.
 5. Normalizes the exported rootfs tar.
 6. Produces v86 filesystem JSON and content-addressed zstd chunks.
@@ -114,6 +115,10 @@ renderer artifacts, memory and storage sizes, display mode, and kernel command
 line. Incompatible or corrupt records are deleted instead of restored.
 `snapshot=off` bypasses automatic restore while leaving the saved record
 available for deletion or replacement. Benchmarks always disable snapshots.
+The guest image disables XFCE display blanking and DPMS, so an idle restored
+desktop remains visible instead of becoming a black screen. Existing saved
+snapshots retain their original guest settings; click the black display to wake
+one, then delete it and save a replacement after rebuilding the image.
 
 On the Apple M4 development machine, one 2 GiB Xorg `webgpu-js` run captured a
 223.2 MiB state, stored it as 75.4 MiB, and restored the ready desktop in 1.5

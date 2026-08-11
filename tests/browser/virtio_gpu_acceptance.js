@@ -249,6 +249,58 @@ async function ready_snapshot_acceptance(cdp, url, cold_ready_ms, failures, scen
         `Restored filesystem state: ${JSON.stringify(restored)}`);
     assert.equal(restored.scanout_presented, true);
     assert.match(restored.snapshot_status, /^Restored /);
+    const scanout_lifecycle = await evaluate(cdp, `(async() => {
+        const device = window.emulator.v86.cpu.devices.virtio_gpu;
+        const backend = device.backend;
+        const scanout = device.scanouts[0];
+        await backend.setScanout(null);
+        const blanked_without_vga = !backend.canvas.hidden &&
+            backend.canvas.style.visibility === "hidden" &&
+            (!backend.vga_canvas || backend.vga_canvas.hidden) &&
+            (!backend.vga_text || backend.vga_text.hidden);
+        await backend.setScanout(scanout);
+        await backend.flush({
+            resource_id: scanout.resource_id,
+            x: scanout.x,
+            y: scanout.y,
+            width: scanout.width,
+            height: scanout.height,
+        });
+        return {
+            blanked_without_vga,
+            presentation_restored: !backend.canvas.hidden &&
+                backend.canvas.style.visibility === "",
+        };
+    })()`, true);
+    assert.equal(scanout_lifecycle.blanked_without_vga, true);
+    assert.equal(scanout_lifecycle.presentation_restored, true);
+
+    const display_policy_end = "V86_DISPLAY_POLICY_END";
+    const display_policy_command =
+        "export $(xargs -0 -n1 </proc/$(pidof xfce4-session)/environ | " +
+        "sed -n '/^DBUS_SESSION_BUS_ADDRESS=/p'); " +
+        "printf 'V86_DISPLAY_POLICY_''BEGIN\\nblank='; " +
+        "xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac; " +
+        "printf 'dpms='; " +
+        "xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled; " +
+        "printf 'V86_DISPLAY_POLICY_''END\\n'\n";
+    await evaluate(cdp,
+        `window.emulator.serial0_send(${JSON.stringify(display_policy_command)})`, true);
+    await wait_for(async() => await evaluate(cdp,
+        `document.getElementById("serial")?.textContent.includes("${display_policy_end}")`),
+        30000, `${scenario.renderer}:${scenario.desktop} display power policy`);
+    const display_policy = await evaluate(cdp, `(() => {
+        const text = document.getElementById("serial")?.textContent || "";
+        return text.slice(text.lastIndexOf("V86_DISPLAY_POLICY_BEGIN"),
+            text.lastIndexOf("V86_DISPLAY_POLICY_END") + "V86_DISPLAY_POLICY_END".length);
+    })()`);
+    assert.match(display_policy,
+        /^V86_DISPLAY_POLICY_BEGIN\r?\nblank=0\r?\ndpms=false\r?\nV86_DISPLAY_POLICY_END$/);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const delayed_scanout_presented = await evaluate(cdp,
+        `!!window.emulator?.v86?.cpu?.devices?.virtio_gpu?.scanouts?.[0] &&
+            !window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.canvas?.hidden`);
+    assert.equal(delayed_scanout_presented, true);
     assert.ok(restore_ms < cold_ready_ms,
         `Snapshot restore ${restore_ms.toFixed(0)}ms was not faster than cold boot ${cold_ready_ms.toFixed(0)}ms`);
     if(failures.length)
@@ -263,6 +315,9 @@ async function ready_snapshot_acceptance(cdp, url, cold_ready_ms, failures, scen
         memory_size: restored.memory_size,
         storage_capacity: restored.storage_size === 2 * 1024 * 1024 * 1024,
         scanout_presented: restored.scanout_presented,
+        blanked_without_vga: scanout_lifecycle.blanked_without_vga,
+        display_sleep_disabled: display_policy.includes("blank=0") &&
+            display_policy.includes("dpms=false"),
     };
 }
 

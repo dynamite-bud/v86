@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { JsWebGpuRenderer } from "../../src/browser/virtio_gpu_webgpu_backend.js";
+import { JsWebGpuBackend, JsWebGpuRenderer } from "../../src/browser/virtio_gpu_webgpu_backend.js";
 
 globalThis.GPUTextureUsage = {
     COPY_DST: 1,
@@ -242,6 +242,54 @@ assert.equal(state.device_destroyed, true);
     assert.equal(aligned_renderer.upload_scratch.byteLength, 0);
     assert.equal(aligned_webgpu.state.texture_writes[0].layout.bytesPerRow, 256);
     aligned_renderer.dispose();
+}
+
+{
+    const gpu_canvas = { hidden: true, style: { visibility: "" } };
+    const vga_canvas = { hidden: false, style: { display: "block" } };
+    const vga_text = { hidden: false, style: { display: "block" } };
+    const container = {
+        getElementsByTagName(name)
+        {
+            return name === "canvas" ? [vga_canvas, gpu_canvas] : [vga_text];
+        },
+    };
+    const backend = new JsWebGpuBackend({
+        canvas: gpu_canvas,
+        screen_container: container,
+    });
+    let clear_scanout_count = 0;
+    backend.initialized = true;
+    backend.renderer = {
+        clear_scanout()
+        {
+            clear_scanout_count++;
+        },
+        dispose() {},
+        free() {},
+    };
+
+    backend.activate_webgpu();
+    assert.equal(gpu_canvas.hidden, false);
+    assert.equal(vga_canvas.hidden, true);
+    assert.equal(vga_text.hidden, true);
+
+    await backend.setScanout(null);
+    assert.equal(clear_scanout_count, 1);
+    assert.equal(gpu_canvas.hidden, false);
+    assert.equal(gpu_canvas.style.visibility, "hidden");
+    assert.equal(vga_canvas.hidden, true);
+    assert.equal(vga_text.hidden, true);
+
+    backend.activate_webgpu();
+    assert.equal(gpu_canvas.style.visibility, "");
+    assert.equal(vga_canvas.hidden, true);
+
+    await backend.reset();
+    assert.equal(gpu_canvas.hidden, true);
+    assert.equal(gpu_canvas.style.visibility, "");
+    assert.equal(vga_canvas.hidden, false);
+    assert.equal(vga_text.hidden, false);
 }
 
 console.log("virtio-gpu direct WebGPU backend tests passed");

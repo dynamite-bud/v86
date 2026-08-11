@@ -121,7 +121,7 @@ Standard VirtIO GPU 2D commands remain the compatibility path. Any virgl-like or
 
 `tests/devices/virtio_gpu.js` boots the generated Alpine i386 filesystem, requires PCI/driver/DRM markers, runs `modetest` at `1024x768`, and asserts the resulting SMPTE pixels directly in `MemoryGpuBackend`. The reproducible image inputs, package/kernel contract, build command, and SHA-256 manifest live under `tools/docker/virtio-gpu-alpine/`.
 
-Browser acceptance uses the same generated Alpine guest with each browser renderer. The VGA canvas remains visible during boot, the dedicated WebGPU canvas becomes visible only after the first successful resource flush, and the locked SMPTE samples must match the decoded `MemoryGpuBackend` pixels. Reset, renderer reinitialization, surface reconfiguration, and controlled device destruction must restore or preserve the VGA fallback without console or WebGPU validation errors.
+Browser acceptance uses the same generated Alpine guest with each browser renderer. The VGA canvas remains visible during boot, the dedicated WebGPU canvas becomes visible only after the first successful resource flush, and the locked SMPTE samples must match the decoded `MemoryGpuBackend` pixels. Disabling an established scanout keeps the VGA state hidden; only reset, renderer reinitialization, or device loss restores the fallback. Surface reconfiguration and controlled device destruction must complete without console or WebGPU validation errors.
 
 ## Linux Bring-up Workflow
 
@@ -220,15 +220,17 @@ for X formats, and present only on `RESOURCE_FLUSH`. Fenced commands wait for
 submitted GPU work; unfenced commands return after ordered submission.
 
 Reset and fatal renderer failures hide the WebGPU canvas and restore the prior
-VGA text/graphics state. Recoverable surface loss is reconfigured in place.
-Device loss and uncaptured validation errors become JavaScript errors and
-trigger the same VGA fallback.
+VGA text/graphics state. A guest-requested scanout disable after WebGPU takeover
+instead blanks the dedicated canvas, keeping stale boot-console pixels hidden;
+the next presented flush makes it visible again. Recoverable surface loss is
+reconfigured in place. Device loss and uncaptured validation errors become
+JavaScript errors and trigger the VGA fallback.
 
 `examples/virtio_gpu_desktop.html` exposes renderer and Xorg/Wayland selectors.
 It defaults to `webgpu-js`; use `?renderer=wgpu` for the Rust/Wasm path. The
-desktop requests 1 GiB guest RAM and reports a 2 GiB writable 9p filesystem
-capacity. The GPU host-resource budget remains 256 MiB unless configured
-otherwise.
+desktop requests v86's supported 32-bit maximum of 2 GiB minus 128 KiB guest
+RAM and provides a 2 GiB writable 9p filesystem. The GPU host-resource budget
+remains 256 MiB unless configured otherwise.
 
 Blobs, UUIDs, virgl, custom capsets, and 3D commands must not be advertised
 before their complete paths exist.

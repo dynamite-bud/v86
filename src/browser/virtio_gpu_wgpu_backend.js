@@ -142,7 +142,7 @@ export class WgpuBackend extends VirtioGpuBackend
         if(scanout === null)
         {
             await this.invoke("clear_scanout");
-            this.restore_vga();
+            this.blank_webgpu();
             return;
         }
         return this.invoke("set_scanout", scanout.resource_id, scanout.x, scanout.y,
@@ -342,7 +342,12 @@ export class WgpuBackend extends VirtioGpuBackend
 
     activate_webgpu()
     {
-        if(!this.canvas || !this.canvas.hidden)
+        if(!this.canvas)
+        {
+            return;
+        }
+        this.canvas.style.visibility = "";
+        if(!this.canvas.hidden)
         {
             return;
         }
@@ -365,11 +370,26 @@ export class WgpuBackend extends VirtioGpuBackend
         this.canvas.hidden = false;
     }
 
+    blank_webgpu()
+    {
+        if(!this.previous_hidden)
+        {
+            return;
+        }
+        this.canvas.hidden = false;
+        this.canvas.style.visibility = "hidden";
+        if(this.cursor_canvas)
+        {
+            this.cursor_canvas.hidden = true;
+        }
+    }
+
     restore_vga()
     {
         if(this.canvas)
         {
             this.canvas.hidden = true;
+            this.canvas.style.visibility = "";
         }
         if(this.previous_hidden)
         {
