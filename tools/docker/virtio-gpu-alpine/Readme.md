@@ -4,6 +4,10 @@ This directory contains the reproducible Linux bring-up environment for virtio-g
 
 The guest is test-only. It has a blank root password and automatic root login on the VGA and serial consoles. Do not deploy it or expose it to an untrusted network.
 
+Start with the repository [GPU contributor guide](../../../docs/gpu/README.md)
+and [canonical architecture](../../../docs/virtio-gpu-webgpu.md). This file
+owns only the reproducible minimal KMS guest.
+
 ## What Docker Does
 
 Docker assembles a Linux/386 root filesystem from reviewed inputs; Docker is not part of the v86 runtime or test process after the image is generated.

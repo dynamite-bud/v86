@@ -83,7 +83,8 @@ Integration images are external and ignored. Use the image download command in `
 - `Readme.md`, `docs/how-it-works.md`, `tests/Readme.md`: setup, architecture, and test controls.
 - `src/virtio_gpu.js`, `src/browser/virtio_gpu_backend.js`, `src/browser/virtio_gpu_wgpu_backend.js`, `src/browser/virtio_gpu_webgpu_backend.js`: VirtIO GPU protocol device, renderer-independent contract, shared browser WebGPU adapter, and direct JavaScript WebGPU renderer.
 - `tools/virtio-gpu-wgpu/`: independent Rust/Wasm `wgpu` renderer with its own manifest and committed lockfile.
-- `docs/virtio-gpu-webgpu.md`: implemented 2D protocol, both browser renderers, state and failure invariants, Linux KMS proof, browser setup, 2D hardening, and the gated 3D/Mesa roadmap.
+- `docs/gpu/README.md`: operational GPU contributor guide, code map, build/test matrix, invariants, debugging, and current 3D handoff.
+- `docs/virtio-gpu-webgpu.md`: canonical implemented 2D protocol, renderer/state/failure design, hard limits, and gated 3D/Mesa architecture.
 - `tools/docker/virtio-gpu-alpine/`: reproducible i386 guest inputs, package locks, probe, build pipeline, and reviewed checksum contract.
 
 ## Runtime/Tooling Preferences

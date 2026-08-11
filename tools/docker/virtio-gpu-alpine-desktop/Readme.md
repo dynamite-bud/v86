@@ -4,6 +4,10 @@ This directory defines the reproducible full-desktop guest used to exercise v86'
 
 The image is for local development and browser acceptance only. It has a blank root password and automatic root login on the VGA and serial consoles. Do not deploy it or expose it to an untrusted network.
 
+Start with the repository [GPU contributor guide](../../../docs/gpu/README.md)
+and [canonical architecture](../../../docs/virtio-gpu-webgpu.md). This file
+owns only the reproducible desktop guest, launch, and snapshot workflow.
+
 ## Rendering Model
 
 Both sessions use the same device and presentation pipeline:

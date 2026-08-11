@@ -2,19 +2,34 @@
 
 ## Scope
 
-PR 1 through PR 3 provide a modern VirtIO GPU PCI function, the complete standard 2D path, a deterministic memory backend, and optional browser WebGPU presentation:
+The current feature branch provides a modern VirtIO GPU PCI function, the
+complete standard 2D path, deterministic and browser renderers, and the
+hardening required for Linux KMS and desktop use:
 
 - PCI identity `1af4:1050`, subsystem ID `16`, class `0380` (display controller, other).
 - VirtIO 1 modern transport only (`VIRTIO_F_VERSION_1`).
 - One configurable scanout, defaulting to `1024x768`, with control and cursor virtqueues.
-- Display info, 2D resource create/unref, attach/detach backing, transfer, set-scanout, and flush commands.
+- EDID, display events, controlled resize, 2D resources/backing/transfers, scanout/flush, and cursor commands.
 - Four common 32-bit scanout formats: B8G8R8A8, B8G8R8X8, R8G8B8A8, and R8G8B8X8.
-- Bounded fragmented guest-backing reads and ordered asynchronous backend submission.
-- Fence-aware replies, reset/restore generation guards, and serializable resource metadata.
-- A Linux 6.12 KMS test that transfers the locked `modetest` SMPTE pattern into `MemoryGpuBackend`.
-- A separately built Rust/Wasm `wgpu` renderer that presents the same 2D scanout on a dedicated browser canvas.
+- Bounded fragmented guest-backing reads, ordered asynchronous backend submission, and fence-aware replies.
+- Reset/device-loss recovery, serializable 2D state, ready snapshots, hard resource limits, and performance counters.
+- Reproducible Linux KMS plus Xorg/Wayland desktop acceptance through direct JavaScript WebGPU and Rust/Wasm `wgpu`.
 
-EDID, blobs, UUIDs, virgl, cursor commands, custom capsets, and experimental 3D command streams remain deferred.
+Capsets, contexts, 3D resources/transfers, `SUBMIT_3D`, blobs, UUIDs,
+host mappings, Mesa, shader translation, virgl compatibility, and Vulkan are
+not implemented or advertised.
+
+## Documentation Map
+
+- [`docs/gpu/README.md`](gpu/README.md) is the contributor entry point: code map, setup, commands, invariants, debugging, and the next task.
+- This document is canonical for the implemented protocol and the gated future 3D design.
+- [`tools/docker/virtio-gpu-alpine/Readme.md`](../tools/docker/virtio-gpu-alpine/Readme.md) owns the minimal KMS guest.
+- [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../tools/docker/virtio-gpu-alpine-desktop/Readme.md) owns the XFCE desktop guest and snapshot workflow.
+
+The obsolete root-level Codex plan and first-task files were removed after
+their implemented 2D material and surviving 3D decisions were consolidated
+here. The active Phase 6 handoff is
+[GitHub issue #1](https://github.com/dynamite-bud/v86/issues/1).
 
 ## Data Flow
 
@@ -384,6 +399,10 @@ Everything below is a future, experimental architecture, not a statement of
 current support. Default configuration must remain the standard 2D device. A
 phase may advertise only the bits, limits, formats, and opcodes whose gate has
 passed; naming an item in this roadmap does not make it available.
+
+Implementation work for this boundary is tracked in
+[issue #1](https://github.com/dynamite-bud/v86/issues/1). Its first gate is the
+pinned Linux/libdrm capset-7 pass-through spike; Mesa remains out of scope.
 
 ### Negotiation and 2D fallback
 
