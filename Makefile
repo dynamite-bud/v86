@@ -389,6 +389,7 @@ pci-unit-test:
 
 filesystem-unit-test:
 	./tests/unit/filesystem_capacity.js
+	./tests/unit/filestorage.js
 
 virtio-gpu-unit-test:
 	./tests/unit/virtio_gpu_protocol.js

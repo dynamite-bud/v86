@@ -509,7 +509,8 @@ V86.prototype.continue_init = async function(emulator, options)
 
         if(base_url)
         {
-            file_storage = new ServerFileStorageWrapper(file_storage, base_url, this.zstd_decompress.bind(this));
+            file_storage = new ServerFileStorageWrapper(
+                file_storage, base_url, this.zstd_decompress_worker.bind(this));
         }
         settings.fs9p = this.fs9p = new FS(
             file_storage, undefined, options.filesystem.total_size);
@@ -694,8 +695,8 @@ V86.prototype.zstd_decompress = function(decompressed_size, src)
 
 /**
  * @param {number} decompressed_size
- * @param {Uint8Array} src
- * @return {Promise<ArrayBuffer>}
+ * @param {!Uint8Array} src
+ * @return {!Promise<!ArrayBuffer>}
  */
 V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
 {
