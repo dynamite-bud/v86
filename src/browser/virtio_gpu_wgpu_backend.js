@@ -32,6 +32,8 @@ export class WgpuBackend extends VirtioGpuBackend
         this.owns_canvas = false;
         this.vga_canvas = null;
         this.vga_text = null;
+        this.cursor_canvas = null;
+        this.owns_cursor_canvas = false;
 
         if(this.container)
         {
@@ -57,6 +59,20 @@ export class WgpuBackend extends VirtioGpuBackend
         if(this.canvas)
         {
             this.canvas.hidden = true;
+        }
+        if(this.container && typeof document !== "undefined")
+        {
+            this.cursor_canvas = document.createElement("canvas");
+            this.cursor_canvas.classList.add("v86-virtio-gpu-cursor");
+            this.cursor_canvas.width = 64;
+            this.cursor_canvas.height = 64;
+            this.cursor_canvas.hidden = true;
+            this.cursor_canvas.style.position = "absolute";
+            this.cursor_canvas.style.pointerEvents = "none";
+            this.cursor_canvas.style.zIndex = "2";
+            this.cursor_canvas.style.imageRendering = "pixelated";
+            this.container.appendChild(this.cursor_canvas);
+            this.owns_cursor_canvas = true;
         }
     }
 
@@ -143,6 +159,42 @@ export class WgpuBackend extends VirtioGpuBackend
         }
     }
 
+    async setCursor(cursor)
+    {
+        if(!this.cursor_canvas || !this.canvas)
+        {
+            return;
+        }
+        if(cursor === null)
+        {
+            this.cursor_canvas.hidden = true;
+            return;
+        }
+        if(cursor.data !== null)
+        {
+            if(!(cursor.data instanceof Uint8Array) || cursor.data.byteLength !== 64 * 64 * 4)
+            {
+                throw new TypeError("Cursor data must contain one 64x64 RGBA image");
+            }
+            const context = this.cursor_canvas.getContext("2d");
+            const image = context.createImageData(64, 64);
+            image.data.set(cursor.data);
+            context.putImageData(image, 0, 0);
+        }
+
+        const canvas_rect = this.canvas.getBoundingClientRect();
+        const container_rect = this.container.getBoundingClientRect();
+        const scale_x = this.canvas.width ? canvas_rect.width / this.canvas.width : 1;
+        const scale_y = this.canvas.height ? canvas_rect.height / this.canvas.height : 1;
+        this.cursor_canvas.style.left =
+            canvas_rect.left - container_rect.left + (cursor.x - cursor.hot_x) * scale_x + "px";
+        this.cursor_canvas.style.top =
+            canvas_rect.top - container_rect.top + (cursor.y - cursor.hot_y) * scale_y + "px";
+        this.cursor_canvas.style.width = 64 * scale_x + "px";
+        this.cursor_canvas.style.height = 64 * scale_y + "px";
+        this.cursor_canvas.hidden = false;
+    }
+
     async waitIdle()
     {
         return this.invoke("wait_idle");
@@ -151,6 +203,7 @@ export class WgpuBackend extends VirtioGpuBackend
     async reset()
     {
         this.restore_vga();
+        await this.setCursor(null);
         this.stop_device_monitor();
         this.dispose_renderer();
         this.initialized = false;
@@ -165,6 +218,12 @@ export class WgpuBackend extends VirtioGpuBackend
             this.canvas.remove();
             this.canvas = null;
             this.owns_canvas = false;
+        }
+        if(this.owns_cursor_canvas && this.cursor_canvas)
+        {
+            this.cursor_canvas.remove();
+            this.cursor_canvas = null;
+            this.owns_cursor_canvas = false;
         }
     }
 

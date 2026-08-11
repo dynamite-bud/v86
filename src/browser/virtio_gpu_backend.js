@@ -45,6 +45,15 @@ export class VirtioGpuBackend
         return Promise.reject(new Error("VirtioGpuBackend.flush is not implemented"));
     }
 
+    /**
+     * @param {({resource_id: number, scanout_id: number, x: number, y: number,
+     *          hot_x: number, hot_y: number, data: (?Uint8Array)}|null)} cursor
+     */
+    setCursor(cursor)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.setCursor is not implemented"));
+    }
+
     waitIdle()
     {
         return Promise.reject(new Error("VirtioGpuBackend.waitIdle is not implemented"));
@@ -79,6 +88,7 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         this.scanout = null;
         this.flush_count = 0;
         this.last_flush = null;
+        this.cursor = null;
     }
 
     async initialize(options)
@@ -200,6 +210,27 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         return Promise.resolve();
     }
 
+    async setCursor(cursor)
+    {
+        this.assert_initialized();
+        if(cursor === null)
+        {
+            this.cursor = null;
+            return;
+        }
+        const data = cursor.data === null && this.cursor ? this.cursor.data :
+            new Uint8Array(cursor.data);
+        this.cursor = {
+            resource_id: cursor.resource_id,
+            scanout_id: cursor.scanout_id,
+            x: cursor.x,
+            y: cursor.y,
+            hot_x: cursor.hot_x,
+            hot_y: cursor.hot_y,
+            data,
+        };
+    }
+
     async waitIdle()
     {
         this.assert_initialized();
@@ -212,6 +243,7 @@ export class MemoryGpuBackend extends VirtioGpuBackend
         this.scanout = null;
         this.flush_count = 0;
         this.last_flush = null;
+        this.cursor = null;
         this.host_memory_bytes = 0;
         return Promise.resolve();
     }

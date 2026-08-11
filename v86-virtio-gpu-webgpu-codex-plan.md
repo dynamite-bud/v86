@@ -807,6 +807,13 @@ VIRTIO_GPU_CMD_MOVE_CURSOR
 Render the cursor as a separate WebGPU quad or browser overlay. Do not force a full guest framebuffer upload for cursor movement.
 
 ### EDID and display events
+Status: core device support is implemented. `GET_EDID` returns a checksummed
+preferred-mode block, `VIRTIO_GPU_F_EDID` is advertised, device configuration
+implements the display event registers, and `V86.virtio_gpu_set_size` raises a
+configuration interrupt for changed modes. Protocol coverage includes malformed
+requests, response bounds, feature bits, EDID limits, events, and snapshots.
+Automated browser resize acceptance remains required for the Phase 5 exit gate.
+
 
 - Advertise `VIRTIO_GPU_F_EDID` only after `GET_EDID` is implemented.
 - Add a valid EDID for the configured mode.

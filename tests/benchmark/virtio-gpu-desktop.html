@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>v86 VirtIO GPU desktop benchmark matrix</title>
+<style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { max-width: 960px; margin: 24px auto; padding: 0 16px; background: #17191d; color: #f1f3f5; }
+    code, pre { font-family: ui-monospace, monospace; }
+    a { color: #9bc1ff; }
+    li { margin: 12px 0; }
+    pre { overflow: auto; padding: 12px; background: #101216; white-space: pre-wrap; }
+</style>
+<h1>v86 VirtIO GPU desktop benchmark matrix</h1>
+<p>Run each scenario in this tab. Each page waits for desktop readiness, settles the session,
+opens a terminal with deterministic guest input, warms up, samples, and emits one JSON object
+under <code>window.virtioGpuBenchmark.result</code>, the page, and the console prefix
+<code>V86_VIRTIO_GPU_BENCHMARK=</code>.</p>
+<ol id="scenarios"></ol>
+<pre id="method"></pre>
+<script>
+const params = new URLSearchParams(location.search);
+const duration = positive_integer(params.get("duration"), 15000);
+const warmup = nonnegative_integer(params.get("warmup"), 2000);
+const machine = params.get("machine") || "label-this-machine";
+const scenarios = [
+    ["xorg", "webgpu-js"],
+    ["xorg", "wgpu"],
+    ["wayland", "webgpu-js"],
+    ["wayland", "wgpu"],
+];
+const list = document.getElementById("scenarios");
+for(const [desktop, renderer] of scenarios)
+{
+    const url = new URL("../../examples/virtio_gpu_desktop.html", location.href);
+    url.searchParams.set("desktop", desktop);
+    url.searchParams.set("renderer", renderer);
+    url.searchParams.set("benchmark", duration);
+    url.searchParams.set("benchmark_warmup", warmup);
+    url.searchParams.set("benchmark_machine", machine);
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = url.href;
+    link.textContent = `${desktop} × ${renderer}`;
+    item.appendChild(link);
+    list.appendChild(item);
+}
+document.getElementById("method").textContent = JSON.stringify({
+    schema_version: 1,
+    duration_ms: duration,
+    warmup_ms: warmup,
+    matrix: scenarios.map(([desktop, renderer]) => ({ desktop, renderer })),
+}, null, 2);
+
+function positive_integer(value, fallback)
+{
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonnegative_integer(value, fallback)
+{
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+</script>

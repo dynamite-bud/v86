@@ -19,6 +19,7 @@ function make_webgpu()
         configurations: [],
         textures: [],
         texture_writes: [],
+        texture_write_sources: [],
         buffer_writes: [],
         submissions: [],
         passes: [],
@@ -60,6 +61,7 @@ function make_webgpu()
     const queue = {
         writeTexture(destination, data, layout, size)
         {
+            state.texture_write_sources.push(data);
             state.texture_writes.push({
                 destination,
                 data: new Uint8Array(data),
@@ -228,5 +230,18 @@ renderer.dispose();
 assert.equal(state.present_buffer_destroyed, true);
 assert.equal(state.context_unconfigured, true);
 assert.equal(state.device_destroyed, true);
+
+{
+    const aligned_webgpu = make_webgpu();
+    const aligned_renderer = await JsWebGpuRenderer.create(
+        aligned_webgpu.canvas, 64, 2, 512, aligned_webgpu.gpu);
+    await aligned_renderer.create_resource_2d(1, 1, 64, 2);
+    const aligned_pixels = new Uint8Array(512);
+    aligned_renderer.upload_resource_2d(1, 0, 0, 64, 2, 256, aligned_pixels);
+    assert.equal(aligned_webgpu.state.texture_write_sources[0], aligned_pixels);
+    assert.equal(aligned_renderer.upload_scratch.byteLength, 0);
+    assert.equal(aligned_webgpu.state.texture_writes[0].layout.bytesPerRow, 256);
+    aligned_renderer.dispose();
+}
 
 console.log("virtio-gpu direct WebGPU backend tests passed");
