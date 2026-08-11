@@ -112,6 +112,17 @@ import { V86 } from "../build/libv86.mjs";
 const params = new URLSearchParams(location.search);
 const mode = params.get("desktop") === "wayland" ? "wayland" : "xorg";
 const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
+const benchmark = params.has("benchmark") ?
+    (await import("../tests/benchmark/virtio-gpu-desktop.js"))
+        .createVirtioGpuDesktopBenchmark({
+            mode,
+            renderer,
+            duration_ms: Number(params.get("benchmark")),
+            warmup_ms: params.has("benchmark_warmup") ?
+                Number(params.get("benchmark_warmup")) : undefined,
+            machine: params.get("benchmark_machine"),
+        }) :
+    null;
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -131,6 +142,7 @@ const emulator = new V86({
     filesystem: {
         baseurl: "../images/alpine-virtio-gpu-desktop-rootfs-flat",
         basefs: "../images/alpine-virtio-gpu-desktop-fs.json",
+        total_size: 2 * 1024 * 1024 * 1024,
     },
     screen_container: document.getElementById("screen_container"),
     autostart: true,
@@ -149,6 +161,11 @@ const emulator = new V86({
 window.emulator = emulator;
 window.desktopMode = mode;
 window.webgpuBackend = renderer;
+if(benchmark)
+{
+    window.virtioGpuBenchmark = benchmark;
+    benchmark.run(emulator);
+}
 status.textContent = `Booting Alpine XFCE (${mode}, ${renderer_label})…`;
 let serial_text = "";
 let serial_render_pending = false;

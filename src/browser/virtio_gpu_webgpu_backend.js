@@ -186,6 +186,7 @@ export class JsWebGpuRenderer
         this.pipeline = options.pipeline;
         this.sampler = options.sampler;
         this.present_params = options.present_params;
+        this.present_params_data = new Uint32Array(8);
         this.texture_usage = options.texture_usage;
         this.max_host_memory_bytes = options.max_host_memory_bytes;
         this.host_memory_bytes = 0;
@@ -315,23 +316,28 @@ export class JsWebGpuRenderer
         }
 
         const aligned_row_bytes = align_to(row_bytes, COPY_BYTES_PER_ROW_ALIGNMENT);
-        const upload_length = checked_multiply(aligned_row_bytes, rect.height,
-            "Upload dimensions overflow");
-        if(this.upload_scratch.byteLength < upload_length)
+        let upload_data = data;
+        if(stride !== aligned_row_bytes)
         {
-            this.upload_scratch = new Uint8Array(upload_length);
-        }
-        for(let row = 0; row < rect.height; row++)
-        {
-            const source_offset = row * stride;
-            const target_offset = row * aligned_row_bytes;
-            this.upload_scratch.set(
-                data.subarray(source_offset, source_offset + row_bytes), target_offset);
+            const upload_length = checked_multiply(aligned_row_bytes, rect.height,
+                "Upload dimensions overflow");
+            if(this.upload_scratch.byteLength < upload_length)
+            {
+                this.upload_scratch = new Uint8Array(upload_length);
+            }
+            for(let row = 0; row < rect.height; row++)
+            {
+                const source_offset = row * stride;
+                const target_offset = row * aligned_row_bytes;
+                this.upload_scratch.set(
+                    data.subarray(source_offset, source_offset + row_bytes), target_offset);
+            }
+            upload_data = this.upload_scratch.subarray(0, upload_length);
         }
 
         this.queue.writeTexture(
             { texture: resource.texture, origin: { x: rect.x, y: rect.y, z: 0 } },
-            this.upload_scratch.subarray(0, upload_length),
+            upload_data,
             { offset: 0, bytesPerRow: aligned_row_bytes, rowsPerImage: rect.height },
             { width: rect.width, height: rect.height, depthOrArrayLayers: 1 }
         );
@@ -362,17 +368,15 @@ export class JsWebGpuRenderer
             return false;
         }
 
-        const params = new Uint32Array([
-            this.scanout.x,
-            this.scanout.y,
-            this.scanout.width,
-            this.scanout.height,
-            resource.width,
-            resource.height,
-            resource.format,
-            0,
-        ]);
-        this.queue.writeBuffer(this.present_params, 0, params);
+        this.present_params_data[0] = this.scanout.x;
+        this.present_params_data[1] = this.scanout.y;
+        this.present_params_data[2] = this.scanout.width;
+        this.present_params_data[3] = this.scanout.height;
+        this.present_params_data[4] = resource.width;
+        this.present_params_data[5] = resource.height;
+        this.present_params_data[6] = resource.format;
+        this.present_params_data[7] = 0;
+        this.queue.writeBuffer(this.present_params, 0, this.present_params_data);
         this.configure_surface(this.scanout.width, this.scanout.height);
         const surface_texture = this.acquire_surface_texture();
         const encoder = this.device.createCommandEncoder({

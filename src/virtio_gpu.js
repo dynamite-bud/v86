@@ -569,12 +569,23 @@ VirtioGpu.prototype.transfer_to_host_2d = async function(request)
     }
 
     const data = new Uint8Array(upload_length);
-    for(let row = 0; row < rect.height; row++)
+    if(row_bytes === stride)
     {
         if(!copy_backing_range(this.cpu, resource.backing,
-            offset_low + row * stride, data, row * row_bytes, row_bytes))
+            offset_low, data, 0, upload_length))
         {
             return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+        }
+    }
+    else
+    {
+        for(let row = 0; row < rect.height; row++)
+        {
+            if(!copy_backing_range(this.cpu, resource.backing,
+                offset_low + row * stride, data, row * row_bytes, row_bytes))
+            {
+                return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            }
         }
     }
 

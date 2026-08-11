@@ -194,8 +194,9 @@ virtio_gpu: {
 
 The shared browser adapter creates a presentation canvas in the configured
 screen container unless `virtio_gpu.canvas` supplies one. Both renderers enforce
-the host-memory budget, repack resource uploads to WebGPU's 256-byte row
-alignment, convert all four standard 32-bit scanout formats, force opaque alpha
+the host-memory budget, use already aligned source rows directly and repack only
+when WebGPU's 256-byte row alignment requires it, convert all four standard
+32-bit scanout formats, force opaque alpha
 for X formats, and present only on `RESOURCE_FLUSH`. Fenced commands wait for
 submitted GPU work; unfenced commands return after ordered submission.
 
@@ -206,11 +207,75 @@ trigger the same VGA fallback.
 
 `examples/virtio_gpu_desktop.html` exposes renderer and Xorg/Wayland selectors.
 It defaults to `webgpu-js`; use `?renderer=wgpu` for the Rust/Wasm path. The
-desktop VM uses 1 GiB guest RAM while the GPU host-resource budget remains
-256 MiB unless configured otherwise.
+desktop requests 1 GiB guest RAM and reports a 2 GiB writable 9p filesystem
+capacity. The GPU host-resource budget remains the default 256 MiB.
 
 EDID, blobs, UUIDs, virgl, custom capsets, cursor commands, and 3D commands must
 not be advertised before their complete paths exist.
+
+## Desktop Performance Benchmark
+
+`tests/benchmark/virtio-gpu-desktop.html` generates the four entry points
+`examples/virtio_gpu_desktop.html?desktop={xorg|wayland}&renderer={webgpu-js|wgpu}`.
+Each page waits for `V86_DESKTOP_READY=PASS` and a visible WebGPU scanout,
+settles for 150 seconds, launches `xfce4-terminal` with the session D-Bus
+address, and prints a fixed 62-character line with a 20 ms guest sleep. After
+ten observed uploads and a two-second warmup, it records one 15-second window.
+Run the four links in the same foreground tab; hidden iframes can be throttled.
+
+The machine-readable result is exposed as
+`window.virtioGpuBenchmark.result`, rendered in the page, and logged after
+`V86_VIRTIO_GPU_BENCHMARK=`. It records readiness and duration, scanout,
+transfer/upload/flush counts and bytes, full frames, host enqueue timings, rAF,
+50 ms timer delay, long tasks, backend/renderer faults, console/window failures,
+and WebGPU validation messages.
+
+This baseline is machine-specific: Apple M4, 10 logical CPUs, Darwin 24.6.0
+arm64, Chrome 151.0.0.0, 16 GiB reported device memory, Apple `metal-3`
+adapter, device pixel ratio 1, localhost, 1 GiB guest RAM, 2 GiB writable
+filesystem, default 256 MiB GPU host budget, and a `1024x768` scanout. It used
+the pre-optimization built artifacts (`libv86.mjs`
+`f309d093ac491b0c79c9b31f971ce664b452408d096d6bcf7e07625fd105b155`;
+renderer Wasm
+`b9357b22828268cbeb62fc94b8e61c4f69520b19db9aa5f52c2ae7973b6715bd`).
+
+| Desktop | Renderer | Ready (s) | Full uploads | Upload/flush (Hz) | MiB/s | Transfer mean (ms) | Upload enqueue (ms) | Present enqueue (ms) | rAF (Hz) | Timer p95/max (ms) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Xorg | `webgpu-js` | 87.834 | 164 | 10.932 | 32.797 | 0.581 | 0.170 | 0.077 | 59.928 | 2.800/35.000 |
+| Xorg | `wgpu` | 89.070 | 159 | 10.599 | 31.797 | 0.678 | 0.265 | 0.107 | 59.862 | 2.400/27.700 |
+| Wayland | `webgpu-js` | 62.673 | 15 | 1.000 | 3.000 | 0.733 | 0.193 | 0.093 | 59.930 | 1.700/4.200 |
+| Wayland | `wgpu` | 64.554 | 13 | 0.867 | 2.600 | 1.038 | 0.438 | 0.177 | 59.932 | 2.200/11.800 |
+
+Every upload was one full 3 MiB `1024x768x4` frame with one matching flush.
+All runs had zero backend fatals, renderer faults, console/window failures,
+validation messages, long tasks, and rAF intervals over 50 ms.
+
+Guest work is dominant. Xorg produces a frame every 92-94 ms and Wayland every
+1.0-1.15 seconds, while a complete host transfer command averages 0.58-1.04 ms,
+renderer upload/present enqueue averages 0.08-0.44 ms, and browser rAF remains
+near 60 Hz. Wayland's lower rate is consistent with its software compositor and
+software GLES path on the emulated x86 CPU. GPU completion is not measured, so
+enqueue timing must not be described as GPU execution timing.
+
+The evidence supports three bounded changes:
+
+- Full-width transfers traverse fragmented guest backing once instead of
+  restarting at entry zero per row. One observed 3 MiB scanout went from
+  64,326 entry checks to 90 (714.7x fewer), without changing validation,
+  the owned guest copy, ordering, or partial-width behavior.
+- Both renderers bypass repacking when the incoming row is already aligned.
+  Measured 4096-byte rows therefore avoid one 3 MiB host copy per upload; the
+  Rust/wasm-bindgen boundary copy remains.
+- The direct renderer reuses its eight-word present parameter array instead of
+  allocating one per flush.
+
+The hashed baseline does not contain these source edits because this benchmark
+task intentionally ran no build. A rebuilt before/after matrix is required
+before claiming a frame-rate improvement. Deferred work includes partial guest
+damage, an explicit ownership contract before pooling the device upload copy,
+off-main-thread execution, GPU completion/fence timing, and a cursor path that
+does not damage the full scanout. Guest 3D acceleration remains a later phase.
+
 
 ## Roadmap After the Direct JavaScript Backend
 

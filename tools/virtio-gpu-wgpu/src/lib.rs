@@ -483,14 +483,19 @@ impl Renderer {
             .ok_or_else(|| "Upload row alignment overflow".to_owned())?
             / wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let upload_length = aligned_row_bytes as usize * rect.height as usize;
-        self.upload_scratch.resize(upload_length, 0);
-        for row in 0..rect.height as usize {
-            let source_offset = row * stride as usize;
-            let target_offset = row * aligned_row_bytes as usize;
-            self.upload_scratch[target_offset..target_offset + row_bytes as usize]
-                .copy_from_slice(&data[source_offset..source_offset + row_bytes as usize]);
-        }
+        let upload_data = if stride == aligned_row_bytes {
+            data
+        } else {
+            let upload_length = aligned_row_bytes as usize * rect.height as usize;
+            self.upload_scratch.resize(upload_length, 0);
+            for row in 0..rect.height as usize {
+                let source_offset = row * stride as usize;
+                let target_offset = row * aligned_row_bytes as usize;
+                self.upload_scratch[target_offset..target_offset + row_bytes as usize]
+                    .copy_from_slice(&data[source_offset..source_offset + row_bytes as usize]);
+            }
+            &self.upload_scratch
+        };
 
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -503,7 +508,7 @@ impl Renderer {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &self.upload_scratch,
+            upload_data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(aligned_row_bytes),
