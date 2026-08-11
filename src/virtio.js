@@ -1016,6 +1016,11 @@ VirtIO.prototype.is_feature_negotiated = function(feature)
     return (this.driver_feature[feature >>> 5] & (1 << (feature & 0x1F))) > 0;
 };
 
+VirtIO.prototype.is_driver_ok = function()
+{
+    return (this.device_status & VIRTIO_STATUS_DRIVER_OK) !== 0;
+};
+
 /**
  * Call this if an irrecoverable error has been occured.
  * Notifies driver if DRIVER_OK, or when DRIVER_OK gets set.

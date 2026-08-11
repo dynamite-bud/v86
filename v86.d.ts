@@ -368,6 +368,36 @@ export interface VirtioGpuConfig {
     max_host_memory_bytes?: number;
 
     /**
+     * Maximum width or height of a 2D resource.
+     * @default 4096
+     */
+    max_resource_dimension?: number;
+
+    /**
+     * Maximum number of live 2D resources.
+     * @default 256
+     */
+    max_resources?: number;
+
+    /**
+     * Maximum readable bytes accepted for one device command.
+     * @default 1048576
+     */
+    max_command_bytes?: number;
+
+    /**
+     * Maximum guest backing entries attached to one resource.
+     * @default 16384
+     */
+    max_backing_entries?: number;
+
+    /**
+     * Maximum guest backing entries attached across all resources.
+     * @default 32768
+     */
+    max_total_backing_entries?: number;
+
+    /**
      * Dedicated presentation canvas for either WebGPU backend. When omitted,
      * v86 creates one in the configured screen container.
      */
@@ -528,6 +558,12 @@ export interface V86Options {
          * @see {@link https://github.com/copy/v86/blob/master/docs/filesystem.md} for more details
          */
         basefs?: string;
+
+        /**
+         * Writable capacity reported to the guest through 9p statfs, in bytes.
+         * @default 274877906944
+         */
+        total_size?: number;
 
         /**
          * A function that will be called for each 9p request.
@@ -829,6 +865,41 @@ export class V86 {
      * Enable or disable sending keyboard events to the emulated PS2 controller.
      */
     keyboard_set_enabled(enabled: boolean): void;
+
+    /**
+     * Change the preferred virtio-gpu display size and notify the guest.
+     * Returns false when the requested size is already active.
+     */
+    virtio_gpu_set_size(width: number, height: number): boolean;
+
+    /**
+     * Read virtio-gpu counters and current resource gauges.
+     * Passing true resets cumulative counters after reading them.
+     */
+    virtio_gpu_get_stats(reset?: boolean): {
+        commands: number;
+        invalid_commands: number;
+        guest_read_bytes: number;
+        upload_bytes: number;
+        flushes: number;
+        flushed_bytes: number;
+        presentations: number;
+        presented_bytes: number;
+        cursor_updates: number;
+        cursor_moves: number;
+        fenced_commands: number;
+        fence_wait_ms: number;
+        guest_copy_ms: number;
+        upload_wait_ms: number;
+        present_wait_ms: number;
+        backend_errors: number;
+        config_changes: number;
+        max_active_queues: number;
+        command_counts: Record<string, number>;
+        live_resources: number;
+        resource_memory_bytes: number;
+        backing_entries: number;
+    };
 
     /**
      * Send a string to the first emulated serial terminal.

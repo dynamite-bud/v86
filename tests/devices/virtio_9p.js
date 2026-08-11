@@ -2,6 +2,7 @@
 
 import url from "node:url";
 import fs from "node:fs";
+import assert from "node:assert/strict";
 
 process.on("unhandledRejection", exn => { throw exn; });
 
@@ -591,6 +592,7 @@ const tests =
             assert_equal(before[1], "9p");
 
             // total size in 1024 blocks
+            assert_equal(before[2], String(2 * 1024 * 1024));
             assert_equal(after_add[2], before[2]);
             assert_equal(after_rm[2], before[2]);
 
@@ -1126,9 +1128,15 @@ const emulator = new V86({
     memory_size: 64 * 1024 * 1024,
     filesystem: {
         baseurl: __dirname + "/testfs/",
+        total_size: 2 * 1024 * 1024 * 1024,
     },
     disable_jit: +process.env.DISABLE_JIT,
     log_level: SHOW_LOGS ? 0x400000 : 0,
+});
+
+emulator.add_listener("emulator-ready", () =>
+{
+    assert.equal(emulator.fs9p.total_size, 2 * 1024 * 1024 * 1024);
 });
 
 let ran_command = false;

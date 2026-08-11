@@ -387,6 +387,9 @@ acpi-unit-test:
 pci-unit-test:
 	./tests/unit/pci.js
 
+filesystem-unit-test:
+	./tests/unit/filesystem_capacity.js
+
 virtio-gpu-unit-test:
 	./tests/unit/virtio_gpu_protocol.js
 	./tests/unit/virtio_gpu_webgpu_backend.js
@@ -397,6 +400,9 @@ virtio-gpu-test: build/v86-debug.wasm acpi-unit-test pci-unit-test virtio-gpu-un
 virtio-gpu-test-release: build/libv86.mjs build/v86.wasm acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 
+virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
+	./tests/browser/virtio_gpu_acceptance.js
+
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
@@ -404,7 +410,7 @@ rust-test: $(RUST_FILES)
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
-api-tests: build/v86-debug.wasm
+api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
 	./tests/api/reset.js

@@ -511,7 +511,8 @@ V86.prototype.continue_init = async function(emulator, options)
         {
             file_storage = new ServerFileStorageWrapper(file_storage, base_url, this.zstd_decompress.bind(this));
         }
-        settings.fs9p = this.fs9p = new FS(file_storage);
+        settings.fs9p = this.fs9p = new FS(
+            file_storage, undefined, options.filesystem.total_size);
 
         if(fs_url)
         {
@@ -1241,6 +1242,39 @@ V86.prototype.serial0_send = function(data)
     {
         this.bus.send("serial0-input", data.charCodeAt(i));
     }
+};
+
+/**
+ * Change the preferred virtio-gpu display size and notify the guest.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @return {boolean}
+ */
+V86.prototype.virtio_gpu_set_size = function(width, height)
+{
+    const virtio_gpu = this.v86.cpu.devices.virtio_gpu;
+    if(!virtio_gpu)
+    {
+        throw new Error("Cannot resize virtio-gpu: device is unavailable");
+    }
+    return virtio_gpu.set_display_size(width, height);
+};
+
+/**
+ * Read virtio-gpu counters and current resource gauges.
+ *
+ * @param {boolean=} reset
+ * @return {!Object}
+ */
+V86.prototype.virtio_gpu_get_stats = function(reset = false)
+{
+    const virtio_gpu = this.v86.cpu.devices.virtio_gpu;
+    if(!virtio_gpu)
+    {
+        throw new Error("Cannot read virtio-gpu stats: device is unavailable");
+    }
+    return virtio_gpu.get_performance_stats(reset);
 };
 
 /**

@@ -26,13 +26,24 @@ const VIRTIO_GPU_MAX_SCANOUTS = 16;
 const VIRTIO_GPU_MAX_BACKING_ENTRIES = 16384;
 const VIRTIO_GPU_BYTES_PER_PIXEL = 4;
 const VIRTIO_GPU_DEFAULT_HOST_MEMORY_BYTES = 256 * 1024 * 1024;
+const VIRTIO_GPU_DEFAULT_MAX_RESOURCE_DIMENSION = 4096;
+const VIRTIO_GPU_DEFAULT_MAX_RESOURCES = 256;
+const VIRTIO_GPU_DEFAULT_MAX_COMMAND_BYTES = 1024 * 1024;
+const VIRTIO_GPU_DEFAULT_MAX_TOTAL_BACKING_ENTRIES = 32768;
 
 const VIRTIO_GPU_CTRL_HDR_SIZE = 24;
 const VIRTIO_GPU_DISPLAY_ONE_SIZE = 24;
 const VIRTIO_GPU_DISPLAY_INFO_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE +
     VIRTIO_GPU_MAX_SCANOUTS * VIRTIO_GPU_DISPLAY_ONE_SIZE;
+const VIRTIO_GPU_EDID_DATA_SIZE = 1024;
+const VIRTIO_GPU_EDID_BLOCK_SIZE = 128;
+const VIRTIO_GPU_EDID_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8 + VIRTIO_GPU_EDID_DATA_SIZE;
+
+export const VIRTIO_GPU_F_EDID = 1;
+export const VIRTIO_GPU_EVENT_DISPLAY = 1;
 
 export const VIRTIO_GPU_CMD_GET_DISPLAY_INFO = 0x0100;
+export const VIRTIO_GPU_CMD_GET_EDID = 0x010A;
 export const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D = 0x0101;
 export const VIRTIO_GPU_CMD_RESOURCE_UNREF = 0x0102;
 export const VIRTIO_GPU_CMD_SET_SCANOUT = 0x0103;
@@ -40,9 +51,12 @@ export const VIRTIO_GPU_CMD_RESOURCE_FLUSH = 0x0104;
 export const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D = 0x0105;
 export const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING = 0x0106;
 export const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING = 0x0107;
+export const VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300;
+export const VIRTIO_GPU_CMD_MOVE_CURSOR = 0x0301;
 
 export const VIRTIO_GPU_RESP_OK_NODATA = 0x1100;
 export const VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101;
+export const VIRTIO_GPU_RESP_OK_EDID = 0x1104;
 export const VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200;
 export const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY = 0x1201;
 export const VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID = 0x1202;
@@ -80,6 +94,12 @@ var VirtioGpuResource;
 var VirtioGpuScanout;
 
 /**
+ * @typedef {{resource_id: number, scanout_id: number, x: number, y: number,
+ *            hot_x: number, hot_y: number}}
+ */
+var VirtioGpuCursor;
+
+/**
  * @typedef {{type: number, flags: number, fence_id_low: number,
  *            fence_id_high: number, ctx_id: number, ring_idx: number,
  *            complete: boolean}}
@@ -91,10 +111,12 @@ var VirtioGpuCtrlHeader;
  * @param {CPU} cpu
  * @param {BusConnector} bus
  * @param {{backend: (string|undefined), width: (number|undefined), height: (number|undefined),
- *         max_host_memory_bytes: (number|undefined), screen_container: (HTMLElement|undefined),
+ *         max_host_memory_bytes: (number|undefined), max_resource_dimension: (number|undefined),
+ *         max_resources: (number|undefined), max_command_bytes: (number|undefined),
+ *         max_backing_entries: (number|undefined), max_total_backing_entries: (number|undefined),
+ *         screen_container: (HTMLElement|undefined),
  *         canvas: (HTMLCanvasElement|undefined), wasm_module_url: (string|undefined),
  *         wasm_url: (string|undefined)}=} options
- * @param {VirtioGpuBackend=} backend
  */
 export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
 {
@@ -105,6 +127,16 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.max_host_memory_bytes = validate_host_memory_limit(options.max_host_memory_bytes);
     this.events_read = 0;
 
+    this.max_resource_dimension = validate_positive_limit(options.max_resource_dimension,
+        VIRTIO_GPU_DEFAULT_MAX_RESOURCE_DIMENSION, "max_resource_dimension");
+    this.max_resources = validate_positive_limit(options.max_resources,
+        VIRTIO_GPU_DEFAULT_MAX_RESOURCES, "max_resources");
+    this.max_command_bytes = validate_positive_limit(options.max_command_bytes,
+        VIRTIO_GPU_DEFAULT_MAX_COMMAND_BYTES, "max_command_bytes", VIRTIO_GPU_CTRL_HDR_SIZE);
+    this.max_backing_entries = validate_positive_limit(options.max_backing_entries,
+        VIRTIO_GPU_MAX_BACKING_ENTRIES, "max_backing_entries");
+    this.max_total_backing_entries = validate_positive_limit(options.max_total_backing_entries,
+        VIRTIO_GPU_DEFAULT_MAX_TOTAL_BACKING_ENTRIES, "max_total_backing_entries");
     if(options.backend !== undefined && options.backend !== "memory" &&
        options.backend !== "wgpu" && options.backend !== "webgpu-js")
     {
@@ -127,9 +159,14 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.resources = new Map();
     /** @type {!Array<?VirtioGpuScanout>} */
     this.scanouts = [null];
+    /** @type {!VirtioGpuCursor} */
+    this.cursor = create_empty_cursor();
     this.resource_memory_bytes = 0;
+    this.backing_entry_count = 0;
     this.work_generation = 0;
+    this.performance_stats = create_performance_stats();
     this.queue_active = [false, false];
+    this.queue_address_error = [false, false];
 
     const queues = [
         { size_supported: VIRTIO_GPU_CONTROL_QUEUE_SIZE, notify_offset: VIRTIO_GPU_CONTROL_QUEUE },
@@ -149,9 +186,13 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
         {
             initial_port: VIRTIO_GPU_COMMON_CONFIG_PORT,
             queues,
-            features: [VIRTIO_F_VERSION_1],
+            features: [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID],
             on_driver_ok: () => {
                 dbg_log("VirtIO GPU driver ready", LOG_VIRTIO);
+                if(this.events_read)
+                {
+                    this.virtio.notify_config_changes();
+                }
             },
         },
         notification:
@@ -206,6 +247,82 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     });
 }
 
+VirtioGpu.prototype.set_display_size = function(width, height)
+{
+    width = validate_mode_dimension(width, undefined, "width");
+    height = validate_mode_dimension(height, undefined, "height");
+    if(width === this.width && height === this.height)
+    {
+        return false;
+    }
+
+    this.width = width;
+    this.height = height;
+    this.backend_options.width = width;
+    this.backend_options.height = height;
+    this.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
+    this.performance_stats.config_changes++;
+    if(this.virtio.is_driver_ok())
+    {
+        this.virtio.notify_config_changes();
+    }
+    return true;
+};
+
+VirtioGpu.prototype.record_command = function(type)
+{
+    const stats = this.performance_stats;
+    stats.commands++;
+    stats.command_counts.set(type, (stats.command_counts.get(type) || 0) + 1);
+};
+
+VirtioGpu.prototype.record_response = function(type)
+{
+    if(type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
+    {
+        this.performance_stats.invalid_commands++;
+    }
+};
+
+VirtioGpu.prototype.get_performance_stats = function(reset = false)
+{
+    const stats = this.performance_stats;
+    const command_counts = {};
+    for(const [type, count] of stats.command_counts)
+    {
+        command_counts["0x" + type.toString(16)] = count;
+    }
+    const result = {
+        commands: stats.commands,
+        invalid_commands: stats.invalid_commands,
+        guest_read_bytes: stats.guest_read_bytes,
+        upload_bytes: stats.upload_bytes,
+        flushes: stats.flushes,
+        flushed_bytes: stats.flushed_bytes,
+        presentations: stats.presentations,
+        presented_bytes: stats.presented_bytes,
+        cursor_updates: stats.cursor_updates,
+        cursor_moves: stats.cursor_moves,
+        fenced_commands: stats.fenced_commands,
+        fence_wait_ms: stats.fence_wait_ms,
+        guest_copy_ms: stats.guest_copy_ms,
+        upload_wait_ms: stats.upload_wait_ms,
+        present_wait_ms: stats.present_wait_ms,
+        backend_errors: stats.backend_errors,
+        config_changes: stats.config_changes,
+        max_active_queues: stats.max_active_queues,
+        command_counts,
+        live_resources: this.resources.size,
+        resource_memory_bytes: this.resource_memory_bytes,
+        backing_entries: this.backing_entry_count,
+    };
+    if(reset)
+    {
+        this.performance_stats = create_performance_stats();
+    }
+    return result;
+};
+
 VirtioGpu.prototype.handle_queue = function(queue_id)
 {
     if(this.queue_active[queue_id])
@@ -214,6 +331,16 @@ VirtioGpu.prototype.handle_queue = function(queue_id)
     }
 
     const queue = this.virtio.queues[queue_id];
+    if(!is_valid_gpu_queue(this.cpu, queue))
+    {
+        if(!this.queue_address_error[queue_id])
+        {
+            this.queue_address_error[queue_id] = true;
+            this.performance_stats.invalid_commands++;
+            this.virtio.needs_reset();
+        }
+        return;
+    }
     if(!queue.has_request())
     {
         return;
@@ -221,11 +348,33 @@ VirtioGpu.prototype.handle_queue = function(queue_id)
 
     const generation = this.work_generation;
     const bufchain = queue.pop_request();
-    const request = new Uint8Array(bufchain.length_readable);
-    bufchain.get_next_blob(request);
+    const valid_chain = is_valid_gpu_buffer_chain(
+        this.cpu, bufchain, this.max_command_bytes);
+    const oversized = valid_chain && bufchain.length_readable > this.max_command_bytes;
+    const rejected = !valid_chain || oversized;
+    const writable_length = valid_chain ? bufchain.length_writable : 0;
+    const request = new Uint8Array(
+        rejected ? VIRTIO_GPU_CTRL_HDR_SIZE : bufchain.length_readable);
+    if(valid_chain)
+    {
+        bufchain.get_next_blob(request);
+    }
     this.queue_active[queue_id] = true;
+    const active_queues = (this.queue_active[0] ? 1 : 0) + (this.queue_active[1] ? 1 : 0);
+    this.performance_stats.max_active_queues =
+        Math.max(this.performance_stats.max_active_queues, active_queues);
+    if(rejected)
+    {
+        this.record_command(read_partial_ctrl_header(request).type);
+        this.record_response(VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    }
 
-    this.process_command(request, bufchain.length_writable, queue_id, generation).then(response =>
+    const command_work = rejected ? Promise.resolve(create_ctrl_response_for_writable(
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER,
+        read_partial_ctrl_header(request),
+        writable_length
+    )) : this.process_command(request, writable_length, queue_id, generation);
+    command_work.then(response =>
     {
         if(generation !== this.work_generation || response === null)
         {
@@ -234,7 +383,8 @@ VirtioGpu.prototype.handle_queue = function(queue_id)
 
         dbg_log("VirtIO GPU command " + read_partial_ctrl_header(request).type +
             " response " + (response.byteLength >= 4 ?
-                new DataView(response.buffer, response.byteOffset, response.byteLength).getUint32(0, true) : 0),
+                new DataView(response.buffer, response.byteOffset, response.byteLength)
+                    .getUint32(0, true) : 0),
             LOG_VIRTIO);
         bufchain.set_next_blob(response);
         queue.push_reply(bufchain);
@@ -277,22 +427,34 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
     queue_id = VIRTIO_GPU_CONTROL_QUEUE, generation = this.work_generation)
 {
     const header = read_partial_ctrl_header(request);
-    if(!header.complete)
+    this.record_command(header.type);
+    if(!header.complete || request.byteLength > this.max_command_bytes)
     {
+        this.record_response(VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
         return create_ctrl_response_for_writable(
             VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
     }
     if(writable_length < VIRTIO_GPU_CTRL_HDR_SIZE)
     {
+        this.record_response(VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
         return new Uint8Array(0);
     }
-    if(queue_id !== VIRTIO_GPU_CONTROL_QUEUE)
+    const cursor_queue_command = queue_id === VIRTIO_GPU_CURSOR_QUEUE &&
+        (header.type === VIRTIO_GPU_CMD_UPDATE_CURSOR ||
+         header.type === VIRTIO_GPU_CMD_MOVE_CURSOR);
+    if(queue_id !== VIRTIO_GPU_CONTROL_QUEUE && !cursor_queue_command)
     {
+        this.record_response(VIRTIO_GPU_RESP_ERR_UNSPEC);
         return create_ctrl_response(VIRTIO_GPU_RESP_ERR_UNSPEC, header);
     }
-    if(header.type === VIRTIO_GPU_CMD_GET_DISPLAY_INFO)
+    if(header.type === VIRTIO_GPU_CMD_GET_DISPLAY_INFO ||
+       header.type === VIRTIO_GPU_CMD_GET_EDID)
     {
-        return process_virtio_gpu_command(request, writable_length, this.width, this.height);
+        const response = process_virtio_gpu_command(
+            request, writable_length, this.width, this.height);
+        this.record_response(response.byteLength >= 4 ?
+            view_of(response).getUint32(0, true) : VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+        return response;
     }
 
     const scheduled = this.backend_work.then(async() =>
@@ -302,7 +464,9 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
             return null;
         }
 
-        const response_type = await this.execute_2d_command(request, header, generation);
+        const response_type = cursor_queue_command ?
+            await this.execute_cursor_command(request, header) :
+            await this.execute_2d_command(request, header, generation);
         if(generation !== this.work_generation)
         {
             return null;
@@ -310,7 +474,10 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
         if(response_type === VIRTIO_GPU_RESP_OK_NODATA &&
            (header.flags & VIRTIO_GPU_FLAG_FENCE))
         {
+            this.performance_stats.fenced_commands++;
+            const wait_started = performance_now();
             await this.backend.waitIdle();
+            this.performance_stats.fence_wait_ms += performance_now() - wait_started;
             if(generation !== this.work_generation)
             {
                 return null;
@@ -332,9 +499,14 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
             return null;
         }
         dbg_log("VirtIO GPU backend error: " + error, LOG_VIRTIO);
+        this.performance_stats.backend_errors++;
         response_type = VIRTIO_GPU_RESP_ERR_UNSPEC;
     }
 
+    if(response_type !== null)
+    {
+        this.record_response(response_type);
+    }
     return response_type === null ? null : create_ctrl_response(response_type, header);
 };
 
@@ -367,6 +539,72 @@ VirtioGpu.prototype.execute_2d_command = async function(request, header, generat
     }
 };
 
+VirtioGpu.prototype.execute_cursor_command = async function(request, header)
+{
+    if(request.byteLength < 56)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const scanout_id = view.getUint32(24, true);
+    const x = view.getUint32(28, true);
+    const y = view.getUint32(32, true);
+    if(scanout_id >= this.scanouts.length)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID;
+    }
+
+    if(header.type === VIRTIO_GPU_CMD_MOVE_CURSOR)
+    {
+        this.cursor.scanout_id = scanout_id;
+        this.cursor.x = x;
+        this.cursor.y = y;
+        this.performance_stats.cursor_moves++;
+        if(this.cursor.resource_id)
+        {
+            await this.backend.setCursor({ ...this.cursor, data: null });
+        }
+        return VIRTIO_GPU_RESP_OK_NODATA;
+    }
+
+    const resource_id = view.getUint32(40, true);
+    const hot_x = view.getUint32(44, true);
+    const hot_y = view.getUint32(48, true);
+    if(resource_id === 0)
+    {
+        this.performance_stats.cursor_updates++;
+        this.cursor = { resource_id: 0, scanout_id, x, y, hot_x: 0, hot_y: 0 };
+        await this.backend.setCursor(null);
+        return VIRTIO_GPU_RESP_OK_NODATA;
+    }
+
+    const resource = this.resources.get(resource_id);
+    if(!resource)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+    }
+    if(resource.width !== 64 || resource.height !== 64 ||
+       hot_x >= resource.width || hot_y >= resource.height ||
+       resource.backing.length === 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const source = read_virtio_gpu_backing_range(
+        this.cpu, resource.backing, 0, resource.byte_length);
+    if(source === null)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+
+    this.cursor = { resource_id, scanout_id, x, y, hot_x, hot_y };
+    await this.backend.setCursor({
+        ...this.cursor,
+        data: convert_cursor_pixels(source, resource.format),
+    });
+    this.performance_stats.cursor_updates++;
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
 VirtioGpu.prototype.create_resource_2d = async function(request, generation)
 {
     if(request.byteLength < 40)
@@ -382,9 +620,14 @@ VirtioGpu.prototype.create_resource_2d = async function(request, generation)
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     }
-    if(!SUPPORTED_2D_FORMATS.has(format) || width === 0 || height === 0)
+    if(!SUPPORTED_2D_FORMATS.has(format) || width === 0 || height === 0 ||
+       width > this.max_resource_dimension || height > this.max_resource_dimension)
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    if(this.resources.size >= this.max_resources)
+    {
+        return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
     }
 
     const byte_length = checked_resource_size(width, height);
@@ -430,6 +673,16 @@ VirtioGpu.prototype.unref_resource = async function(request, generation)
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     }
 
+    if(this.cursor.resource_id === resource_id)
+    {
+        await this.backend.setCursor(null);
+        if(generation !== this.work_generation)
+        {
+            return VIRTIO_GPU_RESP_OK_NODATA;
+        }
+        this.cursor = create_empty_cursor();
+    }
+
     await this.backend.destroyResource(resource_id);
     if(generation !== this.work_generation)
     {
@@ -441,6 +694,7 @@ VirtioGpu.prototype.unref_resource = async function(request, generation)
         this.scanouts[scanout_id] = null;
     }
     this.resource_memory_bytes -= resource.byte_length;
+    this.backing_entry_count -= resource.backing.length;
     this.resources.delete(resource_id);
     return VIRTIO_GPU_RESP_OK_NODATA;
 };
@@ -525,14 +779,28 @@ VirtioGpu.prototype.flush_resource = async function(request)
 
     if(resource.scanout_ids.size)
     {
-        await this.backend.flush({
-            resource_id,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-        });
+        const present_started = performance_now();
+        try
+        {
+            await this.backend.flush({
+                resource_id,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            });
+        }
+        finally
+        {
+            this.performance_stats.present_wait_ms += performance_now() - present_started;
+        }
+        this.performance_stats.presentations++;
+        this.performance_stats.presented_bytes +=
+            rect.width * rect.height * VIRTIO_GPU_BYTES_PER_PIXEL;
     }
+    this.performance_stats.flushes++;
+    this.performance_stats.flushed_bytes +=
+        rect.width * rect.height * VIRTIO_GPU_BYTES_PER_PIXEL;
     return VIRTIO_GPU_RESP_OK_NODATA;
 };
 
@@ -568,25 +836,48 @@ VirtioGpu.prototype.transfer_to_host_2d = async function(request)
         return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
     }
 
+    const copy_started = performance_now();
     const data = new Uint8Array(upload_length);
-    for(let row = 0; row < rect.height; row++)
+    if(row_bytes === stride)
     {
         if(!copy_backing_range(this.cpu, resource.backing,
-            offset_low + row * stride, data, row * row_bytes, row_bytes))
+            offset_low, data, 0, upload_length))
         {
             return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
         }
     }
+    else
+    {
+        for(let row = 0; row < rect.height; row++)
+        {
+            if(!copy_backing_range(this.cpu, resource.backing,
+                offset_low + row * stride, data, row * row_bytes, row_bytes))
+            {
+                return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    this.performance_stats.guest_copy_ms += performance_now() - copy_started;
 
-    await this.backend.uploadResource2D({
-        resource_id,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        stride: row_bytes,
-        data,
-    });
+    const upload_started = performance_now();
+    try
+    {
+        await this.backend.uploadResource2D({
+            resource_id,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            stride: row_bytes,
+            data,
+        });
+    }
+    finally
+    {
+        this.performance_stats.upload_wait_ms += performance_now() - upload_started;
+    }
+    this.performance_stats.guest_read_bytes += upload_length;
+    this.performance_stats.upload_bytes += upload_length;
     return VIRTIO_GPU_RESP_OK_NODATA;
 };
 
@@ -604,7 +895,8 @@ VirtioGpu.prototype.attach_backing = async function(request)
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     }
-    if(resource.backing.length || nr_entries === 0 || nr_entries > VIRTIO_GPU_MAX_BACKING_ENTRIES ||
+    if(resource.backing.length || nr_entries === 0 || nr_entries > this.max_backing_entries ||
+       nr_entries > this.max_total_backing_entries - this.backing_entry_count ||
        nr_entries > Math.floor((request.byteLength - 32) / 16))
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
@@ -638,6 +930,7 @@ VirtioGpu.prototype.attach_backing = async function(request)
 
     resource.backing = backing;
     resource.backing_length = backing_length;
+    this.backing_entry_count += backing.length;
     return VIRTIO_GPU_RESP_OK_NODATA;
 };
 
@@ -657,6 +950,7 @@ VirtioGpu.prototype.detach_backing = async function(request)
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
     }
+    this.backing_entry_count -= resource.backing.length;
     resource.backing = [];
     resource.backing_length = 0;
     return VIRTIO_GPU_RESP_OK_NODATA;
@@ -683,6 +977,14 @@ VirtioGpu.prototype.get_state = function()
         scanout.width,
         scanout.height,
     ]);
+    state[6] = [
+        this.cursor.resource_id,
+        this.cursor.scanout_id,
+        this.cursor.x,
+        this.cursor.y,
+        this.cursor.hot_x,
+        this.cursor.hot_y,
+    ];
     return state;
 };
 
@@ -691,27 +993,40 @@ VirtioGpu.prototype.set_state = function(state)
     this.work_generation++;
     const generation = this.work_generation;
     this.queue_active.fill(false);
+    this.queue_address_error.fill(false);
     this.virtio.set_state(state[0]);
-    this.events_read = state[1];
-    this.width = state[2];
-    this.height = state[3];
+    this.events_read = is_uint32(state[1]) ? state[1] : 0;
+    this.width = restore_mode_dimension(state[2], this.width);
+    this.height = restore_mode_dimension(state[3], this.height);
     this.backend_options.width = this.width;
     this.backend_options.height = this.height;
     this.resources.clear();
     this.resource_memory_bytes = 0;
+    this.backing_entry_count = 0;
 
-    for(const saved of state[4] || [])
+    for(const saved of Array.isArray(state[4]) ? state[4] : [])
     {
-        const resource = restore_resource_metadata(saved, this.max_host_memory_bytes - this.resource_memory_bytes);
-        if(resource)
+        if(this.resources.size >= this.max_resources)
+        {
+            break;
+        }
+        const resource = restore_resource_metadata(saved,
+            this.max_host_memory_bytes - this.resource_memory_bytes,
+            this.max_resource_dimension,
+            Math.min(this.max_backing_entries,
+                this.max_total_backing_entries - this.backing_entry_count),
+            this.cpu);
+        if(resource && !this.resources.has(resource.id))
         {
             this.resources.set(resource.id, resource);
             this.resource_memory_bytes += resource.byte_length;
+            this.backing_entry_count += resource.backing.length;
         }
     }
 
     this.scanouts = [null];
-    const saved_scanout = state[5] && state[5][0];
+    const saved_scanout = Array.isArray(state[5]) && Array.isArray(state[5][0]) &&
+        state[5][0];
     if(saved_scanout)
     {
         const resource = this.resources.get(saved_scanout[0]);
@@ -734,6 +1049,7 @@ VirtioGpu.prototype.set_state = function(state)
         }
     }
 
+    this.cursor = restore_cursor_metadata(state[6], this.resources);
     this.schedule_backend_reset(generation, true);
 };
 
@@ -742,10 +1058,13 @@ VirtioGpu.prototype.reset = function()
     this.work_generation++;
     const generation = this.work_generation;
     this.queue_active.fill(false);
+    this.queue_address_error.fill(false);
     this.events_read = 0;
     this.resources.clear();
     this.scanouts = [null];
+    this.cursor = create_empty_cursor();
     this.resource_memory_bytes = 0;
+    this.backing_entry_count = 0;
     this.virtio.reset();
     this.schedule_backend_reset(generation, false);
 };
@@ -800,6 +1119,22 @@ VirtioGpu.prototype.schedule_backend_reset = function(generation, restore_resour
             await this.backend.flush({ resource_id: scanout.resource_id,
                 x: scanout.x, y: scanout.y, width: scanout.width, height: scanout.height });
         }
+
+        const cursor = this.cursor;
+        if(cursor.resource_id && generation === this.work_generation)
+        {
+            const resource = this.resources.get(cursor.resource_id);
+            const source = resource && read_virtio_gpu_backing_range(
+                this.cpu, resource.backing, 0, resource.byte_length);
+            if(!resource || source === null)
+            {
+                throw new Error("Invalid virtio-gpu cursor backing in restored state");
+            }
+            await this.backend.setCursor({
+                ...cursor,
+                data: convert_cursor_pixels(source, resource.format),
+            });
+        }
     });
     this.backend_work = reset_work.catch(() => {});
     this.backend_ready = reset_work;
@@ -830,25 +1165,138 @@ export function process_virtio_gpu_command(request, writable_length, width, heig
         return create_ctrl_response_for_writable(
             VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
     }
-    if(header.type !== VIRTIO_GPU_CMD_GET_DISPLAY_INFO)
+    if(header.type === VIRTIO_GPU_CMD_GET_DISPLAY_INFO)
     {
-        return create_ctrl_response_for_writable(
-            VIRTIO_GPU_RESP_ERR_UNSPEC, header, writable_length);
-    }
-    if(writable_length < VIRTIO_GPU_DISPLAY_INFO_SIZE)
-    {
-        return create_ctrl_response_for_writable(
-            VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
-    }
+        if(writable_length < VIRTIO_GPU_DISPLAY_INFO_SIZE)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
 
-    const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_DISPLAY_INFO, header,
-        VIRTIO_GPU_DISPLAY_INFO_SIZE);
-    const view = view_of(response);
-    const scanout_offset = VIRTIO_GPU_CTRL_HDR_SIZE;
-    view.setUint32(scanout_offset + 8, width, true);
-    view.setUint32(scanout_offset + 12, height, true);
-    view.setUint32(scanout_offset + 16, 1, true);
-    return response;
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_DISPLAY_INFO, header,
+            VIRTIO_GPU_DISPLAY_INFO_SIZE);
+        const view = view_of(response);
+        const scanout_offset = VIRTIO_GPU_CTRL_HDR_SIZE;
+        view.setUint32(scanout_offset + 8, width, true);
+        view.setUint32(scanout_offset + 12, height, true);
+        view.setUint32(scanout_offset + 16, 1, true);
+        return response;
+    }
+    if(header.type === VIRTIO_GPU_CMD_GET_EDID)
+    {
+        if(request.byteLength < VIRTIO_GPU_CTRL_HDR_SIZE + 8 ||
+           writable_length < VIRTIO_GPU_EDID_RESPONSE_SIZE)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        const scanout_id = view_of(request).getUint32(VIRTIO_GPU_CTRL_HDR_SIZE, true);
+        if(scanout_id !== 0)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID, header, writable_length);
+        }
+
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_EDID, header,
+            VIRTIO_GPU_EDID_RESPONSE_SIZE);
+        const view = view_of(response);
+        view.setUint32(VIRTIO_GPU_CTRL_HDR_SIZE, VIRTIO_GPU_EDID_BLOCK_SIZE, true);
+        response.set(create_edid(width, height), VIRTIO_GPU_CTRL_HDR_SIZE + 8);
+        return response;
+    }
+    return create_ctrl_response_for_writable(
+        VIRTIO_GPU_RESP_ERR_UNSPEC, header, writable_length);
+}
+
+function create_edid(width, height)
+{
+    const edid = new Uint8Array(VIRTIO_GPU_EDID_BLOCK_SIZE);
+    edid.set([0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+    edid[8] = 0x5B;
+    edid[9] = 0x05;
+    edid[10] = 0x86;
+    edid[11] = 0x00;
+    edid[16] = 1;
+    edid[17] = 36;
+    edid[18] = 1;
+    edid[19] = 4;
+    edid[20] = 0x80;
+    edid[21] = Math.min(255, Math.round(width * 2.54 / 96));
+    edid[22] = Math.min(255, Math.round(height * 2.54 / 96));
+    edid[23] = 120;
+    edid[24] = 0x06;
+    edid.fill(0x01, 38, 54);
+
+    const pixel_clock = write_detailed_timing(edid, 54, width, height);
+    write_text_descriptor(edid, 72, 0xFC, "v86 WebGPU");
+    write_range_descriptor(edid, 90, pixel_clock);
+    write_text_descriptor(edid, 108, 0xFF, "v86-virtio-gpu");
+    edid[126] = 0;
+    let checksum = 0;
+    for(let index = 0; index < 127; index++)
+    {
+        checksum = checksum + edid[index] & 0xFF;
+    }
+    edid[127] = -checksum & 0xFF;
+    return edid;
+}
+
+function write_detailed_timing(edid, offset, width, height)
+{
+    const horizontal_blank = Math.min(0xFFF,
+        Math.max(160, Math.ceil(width / 40) * 8));
+    const vertical_blank = Math.min(0xFFF,
+        Math.max(30, Math.ceil(height / 20)));
+    const horizontal_sync_offset = Math.min(0x3FF,
+        Math.max(8, Math.floor(horizontal_blank / 32) * 8));
+    const horizontal_sync_pulse = Math.min(0x3FF,
+        Math.max(8, Math.floor(horizontal_blank / 24) * 8));
+    const vertical_sync_offset = 3;
+    const vertical_sync_pulse = 5;
+    const total_pixels = (width + horizontal_blank) * (height + vertical_blank);
+    const refresh_rate = Math.min(60, Math.max(1, Math.floor(0xFFFF * 10000 / total_pixels)));
+    const pixel_clock = Math.max(1, Math.round(total_pixels * refresh_rate / 10000));
+    const width_mm = Math.min(0xFFF, Math.round(width * 25.4 / 96));
+    const height_mm = Math.min(0xFFF, Math.round(height * 25.4 / 96));
+
+    edid[offset] = pixel_clock & 0xFF;
+    edid[offset + 1] = pixel_clock >>> 8;
+    edid[offset + 2] = width & 0xFF;
+    edid[offset + 3] = horizontal_blank & 0xFF;
+    edid[offset + 4] = (width >>> 8 & 0xF) << 4 | horizontal_blank >>> 8 & 0xF;
+    edid[offset + 5] = height & 0xFF;
+    edid[offset + 6] = vertical_blank & 0xFF;
+    edid[offset + 7] = (height >>> 8 & 0xF) << 4 | vertical_blank >>> 8 & 0xF;
+    edid[offset + 8] = horizontal_sync_offset & 0xFF;
+    edid[offset + 9] = horizontal_sync_pulse & 0xFF;
+    edid[offset + 10] = (vertical_sync_offset & 0xF) << 4 | vertical_sync_pulse & 0xF;
+    edid[offset + 11] = (horizontal_sync_offset >>> 8 & 0x3) << 6 |
+        (horizontal_sync_pulse >>> 8 & 0x3) << 4 |
+        (vertical_sync_offset >>> 4 & 0x3) << 2 |
+        vertical_sync_pulse >>> 4 & 0x3;
+    edid[offset + 12] = width_mm & 0xFF;
+    edid[offset + 13] = height_mm & 0xFF;
+    edid[offset + 14] = (width_mm >>> 8 & 0xF) << 4 | height_mm >>> 8 & 0xF;
+    edid[offset + 17] = 0x18;
+    return pixel_clock;
+}
+
+function write_text_descriptor(edid, offset, tag, text)
+{
+    edid.set([0, 0, 0, tag, 0], offset);
+    edid.fill(0x20, offset + 5, offset + 18);
+    const length = Math.min(text.length, 12);
+    for(let index = 0; index < length; index++)
+    {
+        edid[offset + 5 + index] = text.charCodeAt(index);
+    }
+    edid[offset + 5 + length] = 0x0A;
+}
+
+function write_range_descriptor(edid, offset, pixel_clock)
+{
+    edid.set([0, 0, 0, 0xFD, 0, 48, 120, 30, 160,
+        Math.min(255, Math.ceil(pixel_clock / 1000)), 0, 0, 0, 0, 0, 0, 0, 0], offset);
 }
 
 /** @param {Uint8Array} request @return {VirtioGpuCtrlHeader} */
@@ -923,7 +1371,8 @@ function copy_backing_range(cpu, backing, offset, destination, destination_offse
     return remaining === 0;
 }
 
-function restore_resource_metadata(saved, available_bytes)
+function restore_resource_metadata(
+    saved, available_bytes, max_dimension, max_backing_entries, cpu)
 {
     if(!Array.isArray(saved) || saved.length < 5)
     {
@@ -935,7 +1384,9 @@ function restore_resource_metadata(saved, available_bytes)
     const height = saved[3];
     const byte_length = checked_resource_size(width, height);
     if(!Number.isSafeInteger(id) || id <= 0 || !SUPPORTED_2D_FORMATS.has(format) ||
-       byte_length === null || byte_length > available_bytes || !Array.isArray(saved[4]))
+       width > max_dimension || height > max_dimension ||
+       byte_length === null || byte_length > available_bytes || !Array.isArray(saved[4]) ||
+       saved[4].length > max_backing_entries)
     {
         return null;
     }
@@ -944,19 +1395,120 @@ function restore_resource_metadata(saved, available_bytes)
     let backing_length = 0;
     for(const entry of saved[4])
     {
-        if(!Array.isArray(entry) || !Number.isSafeInteger(entry[0]) || entry[0] < 0 ||
-           !Number.isSafeInteger(entry[1]) || entry[1] <= 0)
+        if(!Array.isArray(entry) || !is_uint32(entry[0]) ||
+           !is_uint32(entry[1]) || entry[1] === 0 ||
+           !is_guest_ram_range(cpu, entry[0], entry[1]))
         {
             return null;
         }
         backing.push({ addr: entry[0], length: entry[1] });
         backing_length += entry[1];
+        if(!Number.isSafeInteger(backing_length))
+        {
+            return null;
+        }
     }
-    if(backing.length && backing_length < byte_length)
+    const rounded_resource_length = Math.ceil(byte_length / 4096) * 4096;
+    if(backing.length &&
+       (backing_length < byte_length || backing_length > rounded_resource_length))
     {
         return null;
     }
     return { id, format, width, height, byte_length, backing, backing_length, scanout_ids: new Set() };
+}
+
+function create_empty_cursor()
+{
+    return { resource_id: 0, scanout_id: 0, x: 0, y: 0, hot_x: 0, hot_y: 0 };
+}
+
+function restore_cursor_metadata(saved, resources)
+{
+    if(!Array.isArray(saved) || saved.length < 6)
+    {
+        return create_empty_cursor();
+    }
+    const [resource_id, scanout_id, x, y, hot_x, hot_y] = saved;
+    if(![resource_id, scanout_id, x, y, hot_x, hot_y].every(is_uint32) ||
+       scanout_id !== 0)
+    {
+        return create_empty_cursor();
+    }
+    if(resource_id === 0)
+    {
+        return { resource_id, scanout_id, x, y, hot_x: 0, hot_y: 0 };
+    }
+    const resource = resources.get(resource_id);
+    if(!resource || resource.width !== 64 || resource.height !== 64 ||
+       resource.backing.length === 0 || hot_x >= resource.width || hot_y >= resource.height)
+    {
+        return create_empty_cursor();
+    }
+    return { resource_id, scanout_id, x, y, hot_x, hot_y };
+}
+
+function is_uint32(value)
+{
+    return Number.isSafeInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
+}
+
+function convert_cursor_pixels(source, format)
+{
+    const result = new Uint8Array(source.byteLength);
+    const bgra = format === VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM ||
+        format === VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+    const opaque = format === VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM ||
+        format === VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM;
+    for(let offset = 0; offset < source.byteLength; offset += VIRTIO_GPU_BYTES_PER_PIXEL)
+    {
+        result[offset] = source[offset + (bgra ? 2 : 0)];
+        result[offset + 1] = source[offset + 1];
+        result[offset + 2] = source[offset + (bgra ? 0 : 2)];
+        result[offset + 3] = opaque ? 0xFF : source[offset + 3];
+    }
+    return result;
+}
+
+function is_valid_gpu_queue(cpu, queue)
+{
+    const size = queue.size;
+    return Number.isSafeInteger(size) && size > 0 && size <= queue.size_supported &&
+        (size & size - 1) === 0 &&
+        queue.desc_addr % 16 === 0 &&
+        queue.avail_addr % 2 === 0 &&
+        queue.used_addr % 4 === 0 &&
+        is_guest_ram_range(cpu, queue.desc_addr, size * 16) &&
+        is_guest_ram_range(cpu, queue.avail_addr, 6 + size * 2) &&
+        is_guest_ram_range(cpu, queue.used_addr, 6 + size * 8);
+}
+
+function is_valid_gpu_buffer_chain(cpu, bufchain, max_bytes)
+{
+    if(!Number.isSafeInteger(bufchain.length_readable) || bufchain.length_readable < 0 ||
+       !Number.isSafeInteger(bufchain.length_writable) || bufchain.length_writable < 0 ||
+       bufchain.length_writable > max_bytes)
+    {
+        return false;
+    }
+    return are_valid_gpu_descriptors(cpu, bufchain.read_buffers, max_bytes) &&
+        are_valid_gpu_descriptors(cpu, bufchain.write_buffers, max_bytes);
+}
+
+function are_valid_gpu_descriptors(cpu, descriptors, max_bytes)
+{
+    for(const descriptor of descriptors)
+    {
+        if(descriptor.addr_high !== 0 ||
+           !Number.isSafeInteger(descriptor.addr_low) || descriptor.addr_low < 0 ||
+           !Number.isSafeInteger(descriptor.len) || descriptor.len < 0 ||
+           descriptor.len > max_bytes ||
+           descriptor.len === 0 && descriptor.addr_low > cpu.mem8.length ||
+           descriptor.len > 0 && !is_guest_ram_range(cpu, descriptor.addr_low, descriptor.len))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 function is_guest_ram_range(cpu, addr, length)
@@ -1044,12 +1596,17 @@ function create_ctrl_response(type, request_header, length = VIRTIO_GPU_CTRL_HDR
     return response;
 }
 
+function restore_mode_dimension(value, fallback)
+{
+    return Number.isSafeInteger(value) && value > 0 && value <= 0xFFF ? value : fallback;
+}
+
 function validate_mode_dimension(value, default_value, name)
 {
     value = value === undefined ? default_value : value;
-    if(!Number.isSafeInteger(value) || value <= 0 || value > 0xFFFFFFFF)
+    if(!Number.isSafeInteger(value) || value <= 0 || value > 0xFFF)
     {
-        throw new Error("virtio-gpu " + name + " must be a positive 32-bit integer");
+        throw new Error("virtio-gpu " + name + " must be a positive 12-bit integer");
     }
     return value;
 }
@@ -1060,6 +1617,47 @@ function validate_host_memory_limit(value)
     if(!Number.isSafeInteger(value) || value < 0)
     {
         throw new Error("virtio-gpu max_host_memory_bytes must be a non-negative safe integer");
+    }
+    return value;
+}
+
+
+function create_performance_stats()
+{
+    return {
+        commands: 0,
+        invalid_commands: 0,
+        guest_read_bytes: 0,
+        upload_bytes: 0,
+        flushes: 0,
+        flushed_bytes: 0,
+        presentations: 0,
+        presented_bytes: 0,
+        cursor_updates: 0,
+        cursor_moves: 0,
+        fenced_commands: 0,
+        fence_wait_ms: 0,
+        guest_copy_ms: 0,
+        upload_wait_ms: 0,
+        present_wait_ms: 0,
+        backend_errors: 0,
+        config_changes: 0,
+        max_active_queues: 0,
+        command_counts: new Map(),
+    };
+}
+
+function performance_now()
+{
+    return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+function validate_positive_limit(value, default_value, name, minimum = 1)
+{
+    value = value === undefined ? default_value : value;
+    if(!Number.isSafeInteger(value) || value < minimum)
+    {
+        throw new Error("virtio-gpu " + name + " must be a safe integer of at least " + minimum);
     }
     return value;
 }

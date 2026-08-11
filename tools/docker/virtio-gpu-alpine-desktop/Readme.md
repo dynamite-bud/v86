@@ -128,21 +128,21 @@ V86_DESKTOP_END
 
 ## Verification
 
-Run the preserved protocol and KMS regressions after image or renderer changes:
+Run the protocol, KMS, and automated browser regressions after image or renderer
+changes:
 
 ```sh
 make virtio-gpu-unit-test
 make virtio-gpu-test
+make virtio-gpu-browser-test
 ```
 
-Browser acceptance for both desktop sessions and both renderer selectors must verify:
-
-- `V86_DESKTOP_READY=PASS` and `/dev/dri/card0` in the serial contract.
-- The selected backend initialized without fatal errors.
-- A visible `1024x768` WebGPU canvas and active scanout.
-- Terminal keyboard input.
-- Thunar browsing the generated filesystem.
-- No WebGPU validation, device-loss, or uncaught JavaScript errors.
+The browser target runs Xorg and Wayland through both `webgpu-js` and `wgpu`.
+It verifies `V86_DESKTOP_READY=PASS`, a visible scanout, reset fallback,
+snapshot rehydration, EDID/config-event resize, cursor overlay, injected device
+loss/VGA fallback plus snapshot-based recovery, and the absence of backend,
+WebGPU validation, and uncaught JavaScript errors. Manually verify terminal
+keyboard input and Thunar when changing guest packages or desktop configuration.
 
 Chromium may report that `AudioContext` autoplay was blocked before a user gesture; that warning is unrelated to VirtIO GPU presentation.
 
