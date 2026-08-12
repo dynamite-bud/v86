@@ -5,6 +5,8 @@ import { MemoryGpuBackend } from "../../src/browser/virtio_gpu_backend.js";
 import {
     VirtioGpu,
     VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+    VIRTIO_GPU_CMD_GET_CAPSET_INFO,
+    VIRTIO_GPU_CMD_GET_CAPSET,
     VIRTIO_GPU_CMD_GET_EDID,
     VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
     VIRTIO_GPU_CMD_RESOURCE_UNREF,
@@ -15,15 +17,21 @@ import {
     VIRTIO_GPU_CMD_UPDATE_CURSOR,
     VIRTIO_GPU_CMD_MOVE_CURSOR,
     VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+    VIRTIO_GPU_CMD_CTX_CREATE,
+    VIRTIO_GPU_CMD_CTX_DESTROY,
     VIRTIO_GPU_RESP_OK_NODATA,
     VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
     VIRTIO_GPU_RESP_OK_EDID,
+    VIRTIO_GPU_RESP_OK_CAPSET_INFO,
+    VIRTIO_GPU_RESP_OK_CAPSET,
     VIRTIO_GPU_RESP_ERR_UNSPEC,
     VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY,
     VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID,
     VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
     VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER,
     VIRTIO_GPU_FLAG_FENCE,
+    VIRTIO_GPU_F_VIRGL,
+    VIRTIO_GPU_F_CONTEXT_INIT,
     VIRTIO_GPU_F_EDID,
     VIRTIO_GPU_EVENT_DISPLAY,
     VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
@@ -127,6 +135,35 @@ function make_get_edid(scanout_id, options = {}, length = 32)
     if(length >= 28)
     {
         new DataView(request.buffer).setUint32(24, scanout_id, true);
+    }
+    return request;
+}
+
+function make_get_capset_info(index, options = {})
+{
+    const request = make_request(VIRTIO_GPU_CMD_GET_CAPSET_INFO, options, 32);
+    new DataView(request.buffer).setUint32(24, index, true);
+    return request;
+}
+
+function make_get_capset(id, version, options = {})
+{
+    const request = make_request(VIRTIO_GPU_CMD_GET_CAPSET, options, 32);
+    const view = new DataView(request.buffer);
+    view.setUint32(24, id, true);
+    view.setUint32(28, version, true);
+    return request;
+}
+
+function make_context(type, context_id, capset_id = 7, name_length = 0)
+{
+    const request = make_request(type, { ctx_id: context_id },
+        type === VIRTIO_GPU_CMD_CTX_CREATE ? 96 : 24);
+    if(type === VIRTIO_GPU_CMD_CTX_CREATE)
+    {
+        const view = new DataView(request.buffer);
+        view.setUint32(24, name_length, true);
+        view.setUint32(28, capset_id, true);
     }
     return request;
 }
@@ -366,6 +403,116 @@ class OrderedBackend extends MemoryGpuBackend
     assert.equal(device.events_read, 1);
     assert.equal(device.width, 1280);
     assert.equal(device.height, 720);
+}
+
+{
+    const { device: default_device } = await make_device();
+    assert.equal(response_type(await default_device.process_command(
+        make_get_capset_info(0), 40)), VIRTIO_GPU_RESP_ERR_UNSPEC);
+    assert.throws(() => new VirtioGpu(make_cpu(), {}, {
+        backend: "webgpu-js",
+        experimental_3d_capset_probe: true,
+    }), /requires the memory backend/);
+
+    const { device } = await make_device({ experimental_3d_capset_probe: true });
+    assert.equal(device.virtio.device_feature[0],
+        1 << VIRTIO_GPU_F_EDID |
+        1 << VIRTIO_GPU_F_VIRGL |
+        1 << VIRTIO_GPU_F_CONTEXT_INIT);
+
+    const info = await device.process_command(make_get_capset_info(0), 40);
+    assert.equal(response_type(info), VIRTIO_GPU_RESP_OK_CAPSET_INFO);
+    assert.equal(info.byteLength, 40);
+    const expected_info = new Uint8Array(16);
+    const expected_info_view = new DataView(expected_info.buffer);
+    expected_info_view.setUint32(0, 7, true);
+    expected_info_view.setUint32(4, 1, true);
+    expected_info_view.setUint32(8, 912, true);
+    assert.deepEqual(info.subarray(24), expected_info);
+
+    const capset = await device.process_command(make_get_capset(7, 1), 936);
+    assert.equal(response_type(capset), VIRTIO_GPU_RESP_OK_CAPSET);
+    assert.equal(capset.byteLength, 936);
+    const expected_capset = new Uint8Array(912);
+    const expected_capset_view = new DataView(expected_capset.buffer);
+    expected_capset_view.setUint32(0, 0x57363856, true);
+    expected_capset_view.setUint16(4, 1, true);
+    expected_capset_view.setUint32(8, 912, true);
+    expected_capset_view.setUint32(24, 12, true);
+    expected_capset_view.setUint32(28, 32, true);
+    assert.deepEqual(capset.subarray(24), expected_capset);
+
+    assert.equal(response_type(await device.process_command(
+        make_get_capset_info(1), 40)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    const nonzero_info_padding = make_get_capset_info(0);
+    new DataView(nonzero_info_padding.buffer).setUint32(28, 1, true);
+    assert.equal(response_type(await device.process_command(
+        nonzero_info_padding, 40)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    const oversized_info = new Uint8Array(33);
+    oversized_info.set(make_get_capset_info(0));
+    assert.equal(response_type(await device.process_command(
+        oversized_info, 40)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_get_capset(6, 1), 936)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_get_capset(7, 2), 936)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_get_capset(7, 1), 935)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    const probe_free_state = device.get_state();
+    probe_free_state[0] = device.virtio.get_state();
+
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 11), 24)),
+        VIRTIO_GPU_RESP_OK_NODATA);
+    assert.equal(device.capset_probe_contexts.has(11), true);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 11), 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 12, 6), 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 12, 7, 65), 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    const invalid_ring = make_context(VIRTIO_GPU_CMD_CTX_CREATE, 12);
+    invalid_ring[20] = 1;
+    const oversized_create = new Uint8Array(97);
+    oversized_create.set(make_context(VIRTIO_GPU_CMD_CTX_CREATE, 12));
+    assert.equal(response_type(await device.process_command(oversized_create, 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    const oversized_destroy = new Uint8Array(25);
+    oversized_destroy.set(make_context(VIRTIO_GPU_CMD_CTX_DESTROY, 11));
+    assert.equal(response_type(await device.process_command(oversized_destroy, 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(device.capset_probe_contexts.has(11), true);
+    assert.equal(response_type(await device.process_command(invalid_ring, 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_DESTROY, 11), 24)),
+        VIRTIO_GPU_RESP_OK_NODATA);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_DESTROY, 11), 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    for(let context_id = 1; context_id <= 32; context_id++)
+    {
+        assert.equal(response_type(await device.process_command(
+            make_context(VIRTIO_GPU_CMD_CTX_CREATE, context_id), 24)),
+            VIRTIO_GPU_RESP_OK_NODATA);
+    }
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 33), 24)),
+        VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+    assert.throws(() => device.get_state(),
+        /Cannot save virtio-gpu state while a capset probe context is live/);
+    device.reset();
+    await device.backend_ready;
+    assert.equal(device.capset_probe_contexts.size, 0);
+    assert.equal(response_type(await device.process_command(
+        make_context(VIRTIO_GPU_CMD_CTX_CREATE, 34), 24)),
+        VIRTIO_GPU_RESP_OK_NODATA);
+    device.set_state(probe_free_state);
+    await device.backend_ready;
+    assert.equal(device.capset_probe_contexts.size, 0);
 }
 
 {

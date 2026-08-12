@@ -11,13 +11,20 @@ Implemented and tested today:
 - A deterministic in-memory backend for Node tests.
 - Two browser presentation backends: direct JavaScript WebGPU (`webgpu-js`) and Rust/Wasm `wgpu` (`wgpu`). Both currently upload and present standard 2D resources only.
 - Reproducible Linux KMS and Alpine XFCE guests, with Xorg and Wayland exercised through both browser backends.
+- An internal, opt-in capset-7 transport probe proving the pinned Linux/libdrm
+  `GET_CAPS` and `CONTEXT_INIT` path. It advertises no rendering capability.
 
 Not implemented:
 
-- VirtIO GPU capsets, contexts, 3D resources/transfers, `SUBMIT_3D`, resource blobs/UUIDs, host mappings, Mesa/Gallium, shader translation, virgl compatibility, or Vulkan.
-- The device therefore reports `num_capsets = 0` and does not advertise 3D feature bits.
+- Production VirtIO GPU 3D capsets, resources/transfers, `SUBMIT_3D`,
+  resource blobs/UUIDs, host mappings, Mesa/Gallium, shader translation, virgl
+  compatibility, or Vulkan.
+- The default device therefore reports `num_capsets = 0` and does not advertise
+  3D feature bits.
 
-The next milestone is [XWAH-1: custom capset transport and one WebGPU triangle](https://github.com/dynamite-bud/v86/issues/1). Start that work from `origin/main`; do not start with Mesa.
+The mandatory Linux/libdrm capset-7 gate has passed. The next XWAH-1 milestone
+is the Rust/Wasm private submit decoder and one reference WebGPU triangle; do
+not start with Mesa.
 
 ## Data Flow
 
@@ -47,6 +54,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Protocol tests | `tests/unit/virtio_gpu_protocol.js` | Wire layouts, commands, malformed input, limits, state, ordering |
 | Renderer tests | `tests/unit/virtio_gpu_webgpu_backend.js` | Direct renderer and shared browser lifecycle |
 | Linux KMS test | `tests/devices/virtio_gpu.js` | Pinned guest probe, DRM/KMS modeset, reference pixels |
+| Linux capset gate | `tests/devices/virtio_gpu_capset_probe.js` | Pinned Linux 6.18.44/libdrm capset-7 `GET_CAPS` and `CONTEXT_INIT` proof |
 | Browser matrix | `tests/browser/virtio_gpu_acceptance.js` | Xorg/Wayland × JavaScript/Rust backends, resize, cursor, reset, device loss, snapshots |
 | Desktop example | `examples/virtio_gpu_desktop.html` | Manual desktop, renderer/session selectors, persistent ready snapshots |
 | KMS guest | `tools/docker/virtio-gpu-alpine/` | Minimal reproducible Linux DRM/KMS image and probe |
@@ -106,6 +114,7 @@ Review the generated contract against the committed contract. Never commit the g
 | PCI/interrupt or ACPI behavior | `make pci-unit-test acpi-unit-test` |
 | Guest backing/file storage | `make filesystem-unit-test` |
 | Linux KMS path | `make virtio-gpu-test virtio-gpu-test-release` |
+| Capset transport or pinned Linux/libdrm gate | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test` |
 | Browser backend, canvas lifecycle, resize, cursor, or loss | `make virtio-gpu-browser-test` |
 | Ready-state persistence | `make virtio-gpu-ready-snapshot-test` |
 | Rust renderer | `make virtio-gpu-wgpu`; run `cargo fmt --manifest-path tools/virtio-gpu-wgpu/Cargo.toml -- --check` and the applicable browser tests |

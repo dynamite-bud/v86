@@ -43,6 +43,9 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `v86-networking` | Deterministic hostname, UID 1000 runtime directory, optional VirtIO NIC DHCP, and `/run/v86-network-ready`. |
 | `profile` | Starts the appliance only for the automatic tty1 login. |
 | `appliance-session` | Architecture, privilege, network, DRM, process, renderer, and serial readiness/failure contract. |
+| `virtio-gpu-capset-probe.c` | Direct pinned-libdrm `GET_CAPS` and `CONTEXT_INIT` proof for private capset ID 7. |
+| `probe-world.lock` | Exact direct build-only packages for the capset probe. |
+| `probe-packages.lock` | Complete sorted capset-probe builder package closure; the build rejects drift. |
 | `xinitrc` | Openbox, llvmpipe, 1024x768 mode, Ghostty, and Codex process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting configuration for PCI `1af4:1050`, with guest acceleration disabled. |
 | `ghostty-config` | Undecorated maximized window and the Codex launcher command. |
@@ -84,8 +87,9 @@ The image target writes ignored build products under `images/`:
 
 Do not commit generated images or Docker exports. An intentional input change requires all of the following:
 
-1. update `world.lock` only for deliberate direct-package changes;
-2. regenerate and review the complete `packages.lock` closure rather than bypassing its comparison;
+1. update `world.lock` or `probe-world.lock` only for deliberate direct-package changes;
+2. regenerate and review the matching complete `packages.lock` or
+   `probe-packages.lock` closure rather than bypassing its comparison;
 3. update `artifacts.lock` only from a reviewed release and verified checksum;
 4. rebuild twice and confirm the generated image-contract checksum is stable;
 5. update the artifact sizes and checksums in `docs/gpu/ghostty-codex-appliance.md`;
@@ -145,6 +149,29 @@ V86_APPLIANCE_END
 ```
 
 The browser declares success only after both the final guest marker and a visible dedicated WebGPU canvas. Startup failure copies bounded Xorg, Openbox, Ghostty, and GL diagnostics to serial, emits a precise `V86_APPLIANCE_FAILURE=...`, and leaves the serial console available.
+
+## Capset-7 Transport Gate
+
+This pinned Linux 6.18.44 image also owns XWAH-1's first mandatory transport
+gate. The probe is dormant during every normal appliance boot. The dedicated
+Node harness adds `v86_gpu_capset_probe=1`, enables the internal zero-feature
+host probe, runs direct DRM ioctls, and exits before Xorg:
+
+```sh
+make virtio-gpu-codex-image
+make virtio-gpu-capset-probe-test
+```
+
+Success requires both exact markers:
+
+```text
+V86_GPU_CAPSET7_GET_CAPS=PASS magic=0x57363856 size=912
+V86_GPU_CAPSET7_CONTEXT_INIT=PASS capset=7
+```
+
+This proves that pinned Linux and libdrm preserve provisional capset ID 7. It
+does not provide 3D resources, shaders, submits, Mesa acceleration, or a public
+emulator option. Normal boots remain the standard 2D appliance.
 
 ## Verification
 

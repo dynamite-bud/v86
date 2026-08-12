@@ -38,12 +38,26 @@ const VIRTIO_GPU_DISPLAY_INFO_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE +
 const VIRTIO_GPU_EDID_DATA_SIZE = 1024;
 const VIRTIO_GPU_EDID_BLOCK_SIZE = 128;
 const VIRTIO_GPU_EDID_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8 + VIRTIO_GPU_EDID_DATA_SIZE;
+const V86_WEBGPU_CAPSET_ID = 7;
+const V86_WEBGPU_CAPSET_VERSION = 1;
+const V86_WEBGPU_CAPSET_SIZE = 912;
+const V86_WEBGPU_CAPSET_MAGIC = 0x57363856;
+const V86_WEBGPU_CAPSET_FORMAT_STRIDE = 12;
+const V86_WEBGPU_CAPSET_MAX_CONTEXTS = 32;
+const VIRTIO_GPU_CAPSET_REQUEST_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8;
+const VIRTIO_GPU_CTX_CREATE_REQUEST_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 72;
+const VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 16;
+const VIRTIO_GPU_CAPSET_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + V86_WEBGPU_CAPSET_SIZE;
 
 export const VIRTIO_GPU_F_EDID = 1;
+export const VIRTIO_GPU_F_VIRGL = 0;
+export const VIRTIO_GPU_F_CONTEXT_INIT = 4;
 export const VIRTIO_GPU_EVENT_DISPLAY = 1;
 
 export const VIRTIO_GPU_CMD_GET_DISPLAY_INFO = 0x0100;
 export const VIRTIO_GPU_CMD_GET_EDID = 0x010A;
+export const VIRTIO_GPU_CMD_GET_CAPSET_INFO = 0x0108;
+export const VIRTIO_GPU_CMD_GET_CAPSET = 0x0109;
 export const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D = 0x0101;
 export const VIRTIO_GPU_CMD_RESOURCE_UNREF = 0x0102;
 export const VIRTIO_GPU_CMD_SET_SCANOUT = 0x0103;
@@ -51,12 +65,16 @@ export const VIRTIO_GPU_CMD_RESOURCE_FLUSH = 0x0104;
 export const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D = 0x0105;
 export const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING = 0x0106;
 export const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING = 0x0107;
+export const VIRTIO_GPU_CMD_CTX_CREATE = 0x0200;
+export const VIRTIO_GPU_CMD_CTX_DESTROY = 0x0201;
 export const VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300;
 export const VIRTIO_GPU_CMD_MOVE_CURSOR = 0x0301;
 
 export const VIRTIO_GPU_RESP_OK_NODATA = 0x1100;
 export const VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101;
 export const VIRTIO_GPU_RESP_OK_EDID = 0x1104;
+export const VIRTIO_GPU_RESP_OK_CAPSET_INFO = 0x1102;
+export const VIRTIO_GPU_RESP_OK_CAPSET = 0x1103;
 export const VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200;
 export const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY = 0x1201;
 export const VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID = 0x1202;
@@ -116,6 +134,7 @@ var VirtioGpuCtrlHeader;
  *         max_backing_entries: (number|undefined), max_total_backing_entries: (number|undefined),
  *         screen_container: (HTMLElement|undefined),
  *         canvas: (HTMLCanvasElement|undefined), wasm_module_url: (string|undefined),
+ *         experimental_3d_capset_probe: (boolean|undefined),
  *         wasm_url: (string|undefined)}=} options
  */
 export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
@@ -126,6 +145,10 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.height = validate_mode_dimension(options.height, 768, "height");
     this.max_host_memory_bytes = validate_host_memory_limit(options.max_host_memory_bytes);
     this.events_read = 0;
+    // Gate-only mode for proving capset ID 7 through pinned Linux/libdrm.
+    // It deliberately advertises no private rendering feature bits.
+    this.experimental_3d_capset_probe = options.experimental_3d_capset_probe === true;
+    this.capset_probe_contexts = new Set();
 
     this.max_resource_dimension = validate_positive_limit(options.max_resource_dimension,
         VIRTIO_GPU_DEFAULT_MAX_RESOURCE_DIMENSION, "max_resource_dimension");
@@ -141,6 +164,11 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
        options.backend !== "wgpu" && options.backend !== "webgpu-js")
     {
         throw new Error("Unsupported virtio-gpu backend: " + options.backend);
+    }
+    if(this.experimental_3d_capset_probe &&
+       (backend !== undefined || options.backend && options.backend !== "memory"))
+    {
+        throw new Error("experimental_3d_capset_probe requires the memory backend");
     }
 
     this.backend = backend ||
@@ -186,7 +214,10 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
         {
             initial_port: VIRTIO_GPU_COMMON_CONFIG_PORT,
             queues,
-            features: [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID],
+            features: this.experimental_3d_capset_probe ?
+                [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID,
+                    VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_CONTEXT_INIT] :
+                [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID],
             on_driver_ok: () => {
                 dbg_log("VirtIO GPU driver ready", LOG_VIRTIO);
                 if(this.events_read)
@@ -233,7 +264,7 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
                 {
                     bytes: 4,
                     name: "num_capsets",
-                    read: () => 0,
+                    read: () => this.experimental_3d_capset_probe ? 1 : 0,
                     write: data => { /* read only */ },
                 },
                 {
@@ -447,6 +478,18 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
         this.record_response(VIRTIO_GPU_RESP_ERR_UNSPEC);
         return create_ctrl_response(VIRTIO_GPU_RESP_ERR_UNSPEC, header);
     }
+    if(this.experimental_3d_capset_probe &&
+       (header.type === VIRTIO_GPU_CMD_GET_CAPSET_INFO ||
+        header.type === VIRTIO_GPU_CMD_GET_CAPSET ||
+        header.type === VIRTIO_GPU_CMD_CTX_CREATE ||
+        header.type === VIRTIO_GPU_CMD_CTX_DESTROY))
+    {
+        const response = this.process_capset_probe_command(request, writable_length, header);
+        this.record_response(response.byteLength >= 4 ?
+            view_of(response).getUint32(0, true) : VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+        return response;
+    }
+
     if(header.type === VIRTIO_GPU_CMD_GET_DISPLAY_INFO ||
        header.type === VIRTIO_GPU_CMD_GET_EDID)
     {
@@ -508,6 +551,72 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
         this.record_response(response_type);
     }
     return response_type === null ? null : create_ctrl_response(response_type, header);
+};
+
+VirtioGpu.prototype.process_capset_probe_command = function(request, writable_length, header)
+{
+    const view = view_of(request);
+    if(header.type === VIRTIO_GPU_CMD_GET_CAPSET_INFO)
+    {
+        if(request.byteLength !== VIRTIO_GPU_CAPSET_REQUEST_SIZE ||
+           writable_length < VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE ||
+           view.getUint32(24, true) !== 0 || view.getUint32(28, true) !== 0)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_CAPSET_INFO, header,
+            VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE);
+        const response_view = view_of(response);
+        response_view.setUint32(24, V86_WEBGPU_CAPSET_ID, true);
+        response_view.setUint32(28, V86_WEBGPU_CAPSET_VERSION, true);
+        response_view.setUint32(32, V86_WEBGPU_CAPSET_SIZE, true);
+        return response;
+    }
+    if(header.type === VIRTIO_GPU_CMD_GET_CAPSET)
+    {
+        if(request.byteLength !== VIRTIO_GPU_CAPSET_REQUEST_SIZE ||
+           writable_length < VIRTIO_GPU_CAPSET_RESPONSE_SIZE ||
+           view.getUint32(24, true) !== V86_WEBGPU_CAPSET_ID ||
+           view.getUint32(28, true) !== V86_WEBGPU_CAPSET_VERSION)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_CAPSET, header,
+            VIRTIO_GPU_CAPSET_RESPONSE_SIZE);
+        const response_view = view_of(response);
+        response_view.setUint32(24, V86_WEBGPU_CAPSET_MAGIC, true);
+        response_view.setUint16(28, V86_WEBGPU_CAPSET_VERSION, true);
+        response_view.setUint16(30, 0, true);
+        response_view.setUint32(32, V86_WEBGPU_CAPSET_SIZE, true);
+        response_view.setUint32(48, V86_WEBGPU_CAPSET_FORMAT_STRIDE, true);
+        response_view.setUint32(52, V86_WEBGPU_CAPSET_MAX_CONTEXTS, true);
+        return response;
+    }
+    if(header.type === VIRTIO_GPU_CMD_CTX_CREATE)
+    {
+        const name_length = request.byteLength >= 28 ? view.getUint32(24, true) : 65;
+        const context_init = request.byteLength >= 32 ? view.getUint32(28, true) : 0;
+        if(request.byteLength !== VIRTIO_GPU_CTX_CREATE_REQUEST_SIZE ||
+           header.ctx_id === 0 || header.ring_idx !== 0 ||
+           name_length > 64 || context_init !== V86_WEBGPU_CAPSET_ID ||
+           this.capset_probe_contexts.size >= V86_WEBGPU_CAPSET_MAX_CONTEXTS ||
+           this.capset_probe_contexts.has(header.ctx_id))
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        this.capset_probe_contexts.add(header.ctx_id);
+        return create_ctrl_response(VIRTIO_GPU_RESP_OK_NODATA, header);
+    }
+    if(request.byteLength !== VIRTIO_GPU_CTRL_HDR_SIZE || header.ctx_id === 0 ||
+       header.ring_idx !== 0 || !this.capset_probe_contexts.delete(header.ctx_id))
+    {
+        return create_ctrl_response_for_writable(
+            VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+    }
+    return create_ctrl_response(VIRTIO_GPU_RESP_OK_NODATA, header);
 };
 
 /**
@@ -958,6 +1067,11 @@ VirtioGpu.prototype.detach_backing = async function(request)
 
 VirtioGpu.prototype.get_state = function()
 {
+    if(this.capset_probe_contexts.size)
+    {
+        throw new Error("Cannot save virtio-gpu state while a capset probe context is live");
+    }
+
     const state = [];
     state[0] = this.virtio;
     state[1] = this.events_read;
@@ -994,6 +1108,7 @@ VirtioGpu.prototype.set_state = function(state)
     const generation = this.work_generation;
     this.queue_active.fill(false);
     this.queue_address_error.fill(false);
+    this.capset_probe_contexts.clear();
     this.virtio.set_state(state[0]);
     this.events_read = is_uint32(state[1]) ? state[1] : 0;
     this.width = restore_mode_dimension(state[2], this.width);
@@ -1059,6 +1174,7 @@ VirtioGpu.prototype.reset = function()
     const generation = this.work_generation;
     this.queue_active.fill(false);
     this.queue_address_error.fill(false);
+    this.capset_probe_contexts.clear();
     this.events_read = 0;
     this.resources.clear();
     this.scanouts = [null];

@@ -1,3 +1,12 @@
+FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8 AS capset-probe-builder
+
+COPY probe-world.lock probe-packages.lock /tmp/
+RUN xargs apk add --no-cache < /tmp/probe-world.lock && \
+    apk info -v | sort | cmp - /tmp/probe-packages.lock
+COPY virtio-gpu-capset-probe.c /tmp/virtio-gpu-capset-probe.c
+RUN cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
+    /tmp/virtio-gpu-capset-probe.c -o /virtio-gpu-capset-probe
+
 FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8
 
 ENV KERNEL=lts
@@ -5,6 +14,8 @@ ENV KERNEL=lts
 COPY world.lock packages.lock artifacts.lock /tmp/
 RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
     apk info -v | sort | cmp - /tmp/packages.lock
+
+COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \

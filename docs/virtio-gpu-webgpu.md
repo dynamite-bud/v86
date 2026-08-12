@@ -404,6 +404,28 @@ Implementation work for this boundary is tracked in
 [issue #1](https://github.com/dynamite-bud/v86/issues/1). Its first gate is the
 pinned Linux/libdrm capset-7 pass-through spike; Mesa remains out of scope.
 
+#### Linux/libdrm capset-7 transport gate
+
+The mandatory transport gate passed on 2026-08-12 with the pinned appliance
+kernel Linux 6.18.44 and libdrm 2.4.134 headers. Linux accepts private capset ID
+7 because its context path permits advertised IDs through 63; `GET_CAPS`
+matches the device-provided ID and version rather than a fixed UAPI whitelist.
+The executable guest proof performs both relevant ioctls and observes:
+
+```text
+V86_GPU_CAPSET7_GET_CAPS=PASS magic=0x57363856 size=912
+V86_GPU_CAPSET7_CONTEXT_INIT=PASS capset=7
+```
+
+`make virtio-gpu-capset-probe-test` reproduces the proof after
+`make virtio-gpu-codex-image`. The internal
+`experimental_3d_capset_probe` option exists only for this gate: it advertises
+the Linux-required `VIRTIO_GPU_F_VIRGL` and `VIRTIO_GPU_F_CONTEXT_INIT`, returns
+the zero-feature capset envelope, and implements context create/destroy. It is
+false by default, absent from the public TypeScript API, and does not advertise
+basic render, formats, resources, transfers, or submit support. Phase 6 remains
+gated on the Rust decoder and reference triangle.
+
 ### Negotiation and 2D fallback
 
 3D is an explicit opt-in and initially exists only with the Rust/Wasm `wgpu`

@@ -402,6 +402,9 @@ virtio-gpu-test: build/v86-debug.wasm acpi-unit-test pci-unit-test virtio-gpu-un
 virtio-gpu-test-release: build/libv86.mjs build/v86.wasm acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 
+virtio-gpu-capset-probe-test: build/v86-debug.wasm virtio-gpu-unit-test
+	./tests/devices/virtio_gpu_capset_probe.js
+
 virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_acceptance.js
 
@@ -479,5 +482,6 @@ denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
-	virtio-gpu-browser-test virtio-gpu-ready-snapshot-test virtio-gpu-codex-browser-test \
-	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
+	virtio-gpu-capset-probe-test virtio-gpu-browser-test virtio-gpu-ready-snapshot-test \
+	virtio-gpu-codex-browser-test virtio-gpu-kms-image virtio-gpu-desktop-image \
+	virtio-gpu-codex-image
