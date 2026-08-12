@@ -4,7 +4,22 @@
 
 v86 is a 32-bit x86 PC emulator for browsers and Node.js. A Rust interpreter/JIT translates hot guest code to WebAssembly; JavaScript supplies the host bridge, PC device models, browser adapters, storage, networking, and public API. The emulated ISA is roughly Pentium 4/SSE3 and does not support x86-64 or multicore guests.
 
-`Readme.md` states that upstream generally does not accept issues or pull requests written partly or wholly with generative AI, except case-by-case. Confirm contribution policy before preparing an upstream submission.
+`Readme.md` states that upstream generally does not accept tracker reports or pull requests written partly or wholly with generative AI, except case-by-case. Confirm contribution policy before preparing an upstream submission.
+
+## XWAH Workflow and Git Policy
+
+XWAH means **Xorcist Web Agent Harness**. Use `XWAH-N` as the project work-item identifier, where `N` is the immutable GitHub tracker number.
+
+- `main` is the authoritative integration branch and the base for all new work. Fetch `origin/main` before creating a branch or worktree, and start from that ref unless the user explicitly selects another base.
+- Treat `master`, `feature/virtio-gpu-2d`, and existing topic branches as historical or backport targets, not bases for new work.
+- Every GitHub work-item title MUST begin with `XWAH-N:`, for example `XWAH-2: Expand VirtIO GPU color-fidelity coverage`.
+- In branches, commits, plans, and human-readable references, use `XWAH-N`; NEVER create a new `issue-N` identifier. GitHub `#N` syntax MAY still be used where a native link or CLI command requires the immutable tracker number.
+- Every tracker-backed branch MUST use `feature/XWAH-N/<kebab-case-slug>`, for example `feature/XWAH-2/virtio-gpu-3d`.
+- Open pull requests against `main`. Keep unrelated XWAH work on separate branches and in separate worktrees.
+- Every commit MUST follow semantic Conventional Commit syntax with a nonempty lowercase scope: `<type>(<scope>): <imperative summary>`.
+- Prefer the narrow subsystem as the scope, such as `feat(codex): package i386 code mode host`, `feat(alpine): add cage kiosk image`, `fix(virtio-gpu): preserve scanout ordering`, or `docs(xwah): define branch workflow`.
+- Use `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, or `chore` as the commit type. Do not use unscoped messages or vague summaries such as `update`, `changes`, or `misc fixes`.
+- Put `XWAH-N` in the commit body or footer when traceability is useful; keep the subject focused on the semantic change.
 
 ## Architecture & Data Flow
 
