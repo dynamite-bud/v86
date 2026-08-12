@@ -295,6 +295,9 @@ clean:
 run:
 	python3 -m http.server 2> /dev/null
 
+run-isolated:
+	python3 tools/coi-server.py 2> /dev/null
+
 update_version:
 	set -e ;\
 	COMMIT=`git log --format="%h" -n 1` ;\
