@@ -34,6 +34,7 @@ This proves a complete desktop over VirtIO GPU 2D and host WebGPU presentation. 
 - `20-virtio-gpu.conf`: Xorg modesetting configuration for the VirtIO GPU.
 - `xfce4-power-manager.xml`: disables guest display blanking and DPMS for stable browser and snapshot sessions.
 - `image-contract.json`: reviewed package and generated-artifact checksums.
+- `../virtio-gpu-color/`: shared checked KMS utility and bounded color-scene fixtures used by the minimal and desktop guests.
 
 Docker only assembles and exports the root filesystem. Docker is not part of the v86 browser runtime.
 
@@ -167,14 +168,12 @@ changes:
 make virtio-gpu-unit-test
 make virtio-gpu-test
 make virtio-gpu-browser-test
+make virtio-gpu-color-test
 ```
 
-The browser target runs Xorg and Wayland through both `webgpu-js` and `wgpu`.
-It verifies `V86_DESKTOP_READY=PASS`, a visible scanout, reset fallback,
-snapshot rehydration, EDID/config-event resize, cursor overlay, injected device
-loss/VGA fallback plus snapshot-based recovery, and the absence of backend,
-WebGPU validation, and uncaught JavaScript errors. Manually verify terminal
-keyboard input and Thunar when changing guest packages or desktop configuration.
+`virtio-gpu-browser-test` runs Xorg and Wayland through both `webgpu-js` and `wgpu`. It verifies `V86_DESKTOP_READY=PASS`, a visible scanout, reset fallback, snapshot rehydration, EDID/config-event resize, cursor overlay, injected device loss/VGA fallback plus snapshot-based recovery, and the absence of backend, WebGPU validation, and uncaught JavaScript errors.
+
+`virtio-gpu-color-test` uses the same four-session matrix, stops the desktop display server, and takes exclusive KMS ownership for five deterministic scanouts. CDP captures the compositor surface at a 1:1 device-pixel ratio; the harness decodes each screenshot to RGBA and requires every pixel to match its checked reference. It uses local port 8081 by default. Manually verify terminal keyboard input and Thunar only when changing guest packages or desktop configuration.
 
 Chromium may report that `AudioContext` autoplay was blocked before a user gesture; that warning is unrelated to VirtIO GPU presentation.
 

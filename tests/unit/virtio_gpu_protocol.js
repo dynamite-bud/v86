@@ -602,6 +602,34 @@ class OrderedBackend extends MemoryGpuBackend
 }
 
 {
+    const { cpu, device } = await make_device();
+    const cases = [
+        [VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, [3, 2, 1, 4]],
+        [VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, [3, 2, 1, 255]],
+        [VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM, [1, 2, 3, 4]],
+        [VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM, [1, 2, 3, 255]],
+    ];
+    for(let index = 0; index < cases.length; index++)
+    {
+        const resource_id = index + 1;
+        const address = 0x1000;
+        const [format, expected] = cases[index];
+        cpu.mem8.set([1, 2, 3, 4], address);
+        assert.equal(await execute(device, make_create(resource_id, format, 64, 64)),
+            VIRTIO_GPU_RESP_OK_NODATA);
+        assert.equal(await execute(device, make_attach(resource_id,
+            [{ addr: address, length: 64 * 64 * 4 }])), VIRTIO_GPU_RESP_OK_NODATA);
+        assert.equal(response_type(await device.process_command(
+            make_cursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0, resource_id), 24, 1)),
+            VIRTIO_GPU_RESP_OK_NODATA);
+        assert.deepEqual(Array.from(device.backend.cursor.data.subarray(0, 4)), expected,
+            `format ${format} channel order and opacity`);
+        assert.equal(await execute(device, make_resource_command(
+            VIRTIO_GPU_CMD_RESOURCE_UNREF, resource_id)), VIRTIO_GPU_RESP_OK_NODATA);
+    }
+}
+
+{
     const { device } = await make_device();
     assert.equal(response_type(await device.process_command(
         make_cursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0, 1, 0, 0, 55), 24, 1)),

@@ -1,3 +1,11 @@
+FROM docker.io/i386/alpine@sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753 AS color-builder
+
+RUN apk add --no-cache build-base=0.5-r3 libdrm-dev=2.4.123-r1
+COPY --from=color v86-gpu-color.c scenes.generated.h /tmp/
+RUN cc -std=c11 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror \
+    $(pkg-config --cflags libdrm) /tmp/v86-gpu-color.c -o /tmp/v86-gpu-color \
+    $(pkg-config --libs libdrm)
+
 FROM docker.io/i386/alpine@sha256:fcc4c908760c4f561a5199f2e53576063b1b8eeaa0c41e6432d705aab4389753
 
 ENV KERNEL=lts
@@ -6,12 +14,15 @@ COPY world.lock packages.lock /tmp/
 RUN apk add --no-cache $(cat /tmp/world.lock) && \
     apk info -v | sort | cmp - /tmp/packages.lock
 
+COPY --from=color-builder /tmp/v86-gpu-color /usr/local/bin/v86-gpu-color
+COPY --from=color fixtures /usr/local/share/v86-gpu-color
 COPY virtio-gpu-probe /usr/local/sbin/virtio-gpu-probe
 COPY virtio-gpu-probe.initd /etc/init.d/virtio-gpu-probe
 COPY 20-virtio-gpu.conf /etc/X11/xorg.conf.d/20-virtio-gpu.conf
 COPY xinitrc /root/.xinitrc
 
-RUN chmod +x /usr/local/sbin/virtio-gpu-probe /etc/init.d/virtio-gpu-probe /root/.xinitrc && \
+RUN chmod +x /usr/local/bin/v86-gpu-color /usr/local/sbin/virtio-gpu-probe \
+        /etc/init.d/virtio-gpu-probe /root/.xinitrc && \
     sed -i 's/getty 38400 tty1/agetty --autologin root tty1 linux/' /etc/inittab && \
     echo 'ttyS0::respawn:/sbin/agetty --autologin root -s ttyS0 115200 vt100' >> /etc/inittab && \
     echo 'virtio_gpu' > /etc/modules-load.d/virtio-gpu.conf && \

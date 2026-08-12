@@ -127,9 +127,17 @@ make virtio-gpu-test
 make virtio-gpu-test-release
 ```
 
-Both targets first run the ACPI GPE, PCI shared-IRQ, and exhaustive virtio-gpu protocol unit tests. The source target imports `src/main.js`; the release target imports `build/libv86.mjs`. The guest probe starts the locked `modetest` SMPTE pattern, and the host harness checks scanout dimensions, resource size, flush completion, and known B8G8R8X8 pixels in `MemoryGpuBackend`.
+Both targets first run the ACPI GPE, PCI shared-IRQ, and exhaustive virtio-gpu protocol unit tests. The source target imports `src/main.js`; the release target imports `build/libv86.mjs`. The guest then replaces the initial `modetest` scanout with every scene from the checked `v86-gpu-color` KMS utility. The host verifies dimensions, stride, B8G8R8X8 format, flush completion, exact full-frame RGBA digests, ramp monotonicity, all 4,096 palette cells, and SMPTE reference blocks in `MemoryGpuBackend`.
 
-The harness uses a quiet kernel and `log_level: 0` so debug tracing does not dominate runtime. It fails immediately if the 9p root mount enters initramfs recovery or any PCI/DRM/KMS marker fails, and otherwise waits up to 90 seconds multiplied by `TIMEOUT_EXTRA_FACTOR`.
+The shared sources are under `tools/docker/virtio-gpu-color/`. `reference.js` is the single host implementation for scene expansion; `generate-fixtures.js` emits the PPM fixtures, C header, and `fixtures/manifest.json`. The manifest pins every file and source-pixel payload by SHA-256. It also records the NASA page and asset URLs, source hashes and dimensions, and exact FFmpeg 8.1.1 conversion commands for the untagged lossless Blue Marble and Tokyo photographs. Fixture source pixels total 325,632 bytes; the largest live decoded scene is 3,293,184 bytes, enforced below the 4 MiB ceiling. Check all generated output without rewriting it:
+
+```sh
+node tools/docker/virtio-gpu-color/generate-fixtures.js --check
+```
+
+`make virtio-gpu-color-test` boots the desktop fixture and compares compositor screenshots decoded to RGBA across Xorg/Wayland and both browser WebGPU backends. It binds its local server to port 8081 by default and writes a captured PPM plus JSON mismatch report under `build/virtio-gpu-color-failures/` on failure.
+
+The harness uses a quiet kernel and `log_level: 0` so debug tracing does not dominate runtime. It fails immediately if the 9p root mount enters initramfs recovery or any PCI/DRM/KMS marker fails, and otherwise waits up to 180 seconds multiplied by `TIMEOUT_EXTRA_FACTOR`.
 
 ## Troubleshooting
 
@@ -172,6 +180,4 @@ Keep kernel `quiet` and emulator `log_level: 0` for routine probes. Debug loggin
 
 The rootfs includes `lspci`, `modetest`, `drm_info`, `kmscube`, Mesa utilities, Xorg's modesetting driver, libinput, Fluxbox, and `xinit`. `/etc/X11/xorg.conf.d/20-virtio-gpu.conf` disables acceleration for the first software-rendered desktop path.
 
-The probe runs `modetest` against the connected virtio-gpu output and keeps it alive through a non-producing pipe so the scanout remains available for host-side pixel assertions. This proves the guest's standard KMS path through `MemoryGpuBackend`; it does not yet put those pixels on a browser canvas.
-
-`startx` can now exercise the same software 2D resource path, but visible browser presentation belongs to the next renderer-backend slice.
+The probe runs `modetest` against the connected virtio-gpu output and keeps it alive through a non-producing pipe for initial bring-up. The color harness then launches the checked KMS utility and advances each scanout only after exact host-side validation. This proves the guest's standard KMS path through `MemoryGpuBackend`; `make virtio-gpu-color-test` proves the same pixels reach the browser compositor.
