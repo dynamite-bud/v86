@@ -1,4 +1,4 @@
-# Ghostty and Codex Appliance
+# Openbox, Ghostty, and Codex Appliance
 
 Status: **IMPLEMENTED**
 
@@ -21,7 +21,7 @@ Codex's standard Linux network seccomp filter is unavailable on i386 because its
 
 ## Image Contract
 
-`tools/docker/virtio-gpu-alpine-codex/` builds a separate image. It does not replace or weaken the XFCE graphics regression fixture.
+`tools/docker/virtio-gpu-alpine-codex/` owns the separate Xorg/Openbox reference image. Its [implementation README](../../tools/docker/virtio-gpu-alpine-codex/Readme.md) documents every source file, the reproducible build, launch and verification commands, security boundaries, troubleshooting, and the Cage sibling handoff. This fixture does not replace or weaken the XFCE graphics regression image, and future Cage work must not convert it in place.
 
 The boot chain is:
 
@@ -57,6 +57,20 @@ Generated artifacts are ignored under `images/`:
 - `alpine-virtio-gpu-codex-fs.json`
 - `alpine-virtio-gpu-codex-rootfs-flat/`
 - `alpine-virtio-gpu-codex-image-contract.json`
+
+## Implementation Method
+
+The work followed a gated, reproducible path rather than modifying the existing desktop fixture:
+
+1. Gate 0 checked v86 and upstream application architectures before image work. This rejected the impossible x86-64 OMP chain instead of hiding it behind a stub.
+2. Ghostty and Codex were ported and released independently on their forks. The appliance consumes immutable release archives; it does not compile either application during the image build.
+3. A separate Alpine `linux/386` image retained the proven kernel, VirtIO GPU KMS, Mesa, and browser presentation path while removing XFCE and adding only the Openbox kiosk session.
+4. `world.lock` records deliberate direct APK inputs. `packages.lock` records the full installed closure, and the Docker build fails on any closure drift.
+5. Docker exports the root filesystem, then `normalize_rootfs.py --preserve-owners` sorts entries, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged session.
+6. The page adds the fixture as an isolated browser entry point. A relay is opt-in, and a supplied relay becomes a VirtIO NIC plus guest DHCP rather than an implicit host network dependency.
+7. Bounded serial markers make architecture, privileges, networking, rendering, and every live process observable. Browser acceptance requires both those markers and a visible WebGPU scanout.
+
+This structure keeps downloaded application artifacts, guest assembly, emulator presentation, and browser acceptance independently reviewable.
 
 ## Networking
 
@@ -111,6 +125,25 @@ The acceptance harness verifies:
 - a writable workspace and pristine fresh-session reset on the direct JavaScript backend.
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
+
+## Observed Authenticated Run
+
+An authenticated run through a configured relay reached `gpt-5.6-sol` and returned a normal Codex response from `/home/codex/workspace`. It also exposed two application-level limitations:
+
+- `codex_apps` MCP startup timed out during `tools/list` pagination after 30 seconds. The normal model response still completed.
+- Code Mode failed closed because `/usr/local/bin/codex-code-mode-host` is absent. The pinned downstream release publishes only the main Codex archive and its checksum; the appliance does not fabricate a host executable or suppress the warning.
+
+These are not appliance readiness successes and are not hidden by the serial contract. [Issue #6](https://github.com/dynamite-bud/v86/issues/6), a child of issue #3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. A future i386 Codex release must build, package, checksum, and exercise the real Code Mode host before that feature is enabled. External MCP readiness needs its own bounded acceptance scenario rather than a longer appliance boot timeout.
+
+## Cage Sibling Boundary
+
+Alpine 3.24 publishes [`cage` 0.3.0-r0 for `x86`](https://pkgs.alpinelinux.org/package/v3.24/community/x86/cage). Package availability is therefore established; native Ghostty Wayland behavior, software-rendered wlroots operation, input, resize, and lifecycle remain unproven in v86.
+
+Add Cage as `tools/docker/virtio-gpu-alpine-cage-codex/`, beside this implementation. It must have independent `alpine-virtio-gpu-cage-codex` generated artifacts, a Make target, browser page, serial markers, and acceptance harness. Do not rename this directory, reuse its output paths, replace its Xorg/Openbox package locks, or remove its tests.
+
+The Cage session should begin from the environment already proven by the XFCE/labwc Wayland fixture: software GLES, DRM modifiers disabled, `/dev/dri/card0`, software cursors, and seatd. Cage acceptance must then prove a live Wayland socket, Cage, native Ghostty, Codex, keyboard input, resize, visible scanout, and the absence of Xorg, Openbox, Xwayland, XFCE, and a display manager.
+
+Cleanup for the Cage phase means removing temporary probes, generated images, stale package entries, and duplicated dead startup paths. It does **not** mean deleting this Openbox reference. Keep both variants runnable so Cage has a compatibility baseline, rollback path, and measurable image/boot comparison. The detailed file naming and handoff checklist are in the [Openbox fixture README](../../tools/docker/virtio-gpu-alpine-codex/Readme.md#cage-sibling-handoff).
 
 ## Size Evidence
 

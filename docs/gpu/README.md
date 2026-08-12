@@ -142,5 +142,6 @@ Review the generated contract against the committed contract. Never commit the g
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../../tools/docker/virtio-gpu-alpine-desktop/Readme.md): desktop image, launch URLs, snapshots, sessions, and image verification.
 - [GitHub issue #1](https://github.com/dynamite-bud/v86/issues/1): bounded Phase 6 implementation handoff.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): issue #3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
+- [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
 
 Historical root-level Codex task/plan files were removed after their implemented 2D material and surviving 3D decisions were consolidated into the canonical architecture and this contributor guide.
