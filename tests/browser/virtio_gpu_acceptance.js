@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const READY_TIMEOUT_MS = Number(process.env.V86_GPU_BROWSER_TIMEOUT_MS || 300000);
+const PORT = Number(process.env.V86_GPU_BROWSER_PORT || 0);
 const TEST_READY_SNAPSHOT = process.env.V86_GPU_BROWSER_SNAPSHOT === "1";
 const DEFAULT_MATRIX = ["webgpu-js:xorg", "webgpu-js:wayland", "wgpu:xorg", "wgpu:wayland"];
 const matrix = (process.env.V86_GPU_BROWSER_MATRIX || DEFAULT_MATRIX.join(","))
@@ -76,7 +77,7 @@ async function main()
     });
     await new Promise((resolve, reject) => {
         server.once("error", reject);
-        server.listen(0, "127.0.0.1", resolve);
+        server.listen(PORT, "127.0.0.1", resolve);
     });
     const address = server.address();
     const base_url = `http://127.0.0.1:${address.port}`;
@@ -88,7 +89,7 @@ async function main()
         {
             results.push(await run_scenario_in_chrome(base_url, scenario));
         }
-        console.log(JSON.stringify({ result: "pass", scenarios: results }, null, 2));
+        console.log(JSON.stringify({ result: "pass", port: address.port, scenarios: results }, null, 2));
     }
     finally
     {

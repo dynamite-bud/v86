@@ -7,6 +7,11 @@ import tarfile
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source")
+    parser.add_argument(
+        "--preserve-owners",
+        action="store_true",
+        help="retain numeric uid/gid values while clearing owner names",
+    )
     parser.add_argument("output")
     args = parser.parse_args()
 
@@ -19,8 +24,9 @@ def main():
         with tarfile.open(args.output, "w", format=tarfile.GNU_FORMAT) as output:
             for member in members:
                 member.mtime = 0
-                member.uid = 0
-                member.gid = 0
+                if not args.preserve_owners:
+                    member.uid = 0
+                    member.gid = 0
                 member.uname = ""
                 member.gname = ""
                 member.pax_headers = {}

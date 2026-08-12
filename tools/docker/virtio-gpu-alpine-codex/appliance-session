@@ -1,0 +1,91 @@
+#!/bin/sh
+
+exec 3>/dev/ttyS0
+
+fail()
+{
+    reason=$1
+    [ ! -f /tmp/v86-appliance.log ] || tail -n 200 /tmp/v86-appliance.log >&3
+    [ ! -f /tmp/v86-glxinfo.log ] || tail -n 200 /tmp/v86-glxinfo.log >&3
+    printf 'V86_APPLIANCE_FAILURE=%s\n' "$reason" >&3
+    printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
+    exit 1
+}
+
+printf 'V86_APPLIANCE_BEGIN\n' >&3
+printf 'V86_APPLIANCE_ARCH=%s\n' "$(uname -m)" >&3
+printf 'V86_APPLIANCE_UID=%s\n' "$(id -u)" >&3
+hostname_value=$(hostname)
+printf 'V86_APPLIANCE_HOSTNAME=%s\n' "$hostname_value" >&3
+printf 'V86_APPLIANCE_KERNEL=%s\n' "$(uname -r)" >&3
+
+[ "$(uname -m)" = i686 ] || fail wrong-architecture
+[ "$(id -u)" = 1000 ] || fail privileged-session
+[ "$hostname_value" = v86-appliance ] || fail hostname
+
+ghostty_version=$(ghostty --version 2>/dev/null | head -n 1) || fail ghostty-version
+codex_version=$(codex --version 2>/dev/null) || fail codex-version
+printf 'V86_APPLIANCE_GHOSTTY=%s\n' "$ghostty_version" >&3
+printf 'V86_APPLIANCE_CODEX=%s\n' "$codex_version" >&3
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    [ -e /dev/dri/card0 ] && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+[ -e /dev/dri/card0 ] || fail drm-missing
+printf 'V86_APPLIANCE_DRM=/dev/dri/card0\n' >&3
+
+if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
+    printf 'V86_APPLIANCE_NETWORK=UNCONFIGURED\n' >&3
+elif [ -e /run/v86-network-ready ] &&
+     ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet '; then
+    printf 'V86_APPLIANCE_NETWORK=PASS\n' >&3
+else
+    [ ! -f /var/log/v86-networking.log ] || cat /var/log/v86-networking.log >&3
+    fail network-unavailable
+fi
+
+[ -d /run/user/1000 ] && [ -w /run/user/1000 ] || fail runtime-directory
+export HOME=/home/codex
+export USER=codex
+export LOGNAME=codex
+export XDG_RUNTIME_DIR=/run/user/1000
+export XDG_CURRENT_DESKTOP=OPENBOX
+export XDG_SESSION_DESKTOP=openbox
+export XDG_SESSION_TYPE=x11
+export LIBGL_ALWAYS_SOFTWARE=1
+export GSK_RENDERER=gl
+
+rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready
+startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-appliance.log 2>&1 &
+session_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 900 ]; do
+    kill -0 "$session_pid" 2>/dev/null || break
+    if [ -e /tmp/v86-appliance-gl-ready ] &&
+       [ -e /tmp/v86-appliance-ui-ready ] &&
+       [ -S /tmp/.X11-unix/X0 ] &&
+       pidof openbox >/dev/null &&
+       pidof ghostty >/dev/null &&
+       pidof codex >/dev/null; then
+        renderer=$(sed -n 's/^OpenGL renderer string: //p' /tmp/v86-glxinfo.log | head -n 1)
+        opengl_version=$(sed -n 's/^OpenGL version string: //p' /tmp/v86-glxinfo.log | head -n 1)
+        printf 'V86_APPLIANCE_XORG=PASS\n' >&3
+        printf 'V86_APPLIANCE_RENDERER=%s\n' "$renderer" >&3
+        printf 'V86_APPLIANCE_OPENGL=%s\n' "$opengl_version" >&3
+        printf 'V86_APPLIANCE_OPENBOX=PASS\n' >&3
+        printf 'V86_APPLIANCE_GHOSTTY_PROCESS=PASS\n' >&3
+        printf 'V86_APPLIANCE_GHOSTTY_WINDOW=PASS\n' >&3
+        printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+        printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
+        wait "$session_pid"
+        exit $?
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+fail session-startup

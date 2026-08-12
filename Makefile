@@ -405,6 +405,9 @@ virtio-gpu-test-release: build/libv86.mjs build/v86.wasm acpi-unit-test pci-unit
 virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_acceptance.js
 
+virtio-gpu-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
+	./tests/browser/virtio_gpu_codex_acceptance.js
+
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
@@ -459,6 +462,9 @@ virtio-gpu-kms-image:
 virtio-gpu-desktop-image:
 	tools/docker/virtio-gpu-alpine-desktop/build.sh
 
+virtio-gpu-codex-image:
+	tools/docker/virtio-gpu-alpine-codex/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -473,4 +479,5 @@ denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
-	virtio-gpu-kms-image virtio-gpu-desktop-image
+	virtio-gpu-browser-test virtio-gpu-ready-snapshot-test virtio-gpu-codex-browser-test \
+	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
