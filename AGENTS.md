@@ -104,6 +104,7 @@ Integration images are external and ignored. Use the image download command in `
 
 ## Runtime/Tooling Preferences
 
+- Create git worktrees under `/Volumes/Xorcist-SSD/PersonalProjects/` named `v86-XWAH-N-<kebab-case-slug>`, and put temporary/scratch files under `/Volumes/Xorcist-SSD/tmp` instead of `/tmp` or other system temp directories.
 - Use GNU Make as the task runner and Node.js as the JavaScript runtime; do not substitute Bun. CI pins Node `24.17.0`; the README identifies recent Node (`24.16` known working). The repository has no JS dependency lockfile or pinned package manager.
 - Rust stable with `wasm32-unknown-unknown`, Cargo, Clang, and `tools/rust-lld-wrapper` builds the core. The optional `tools/virtio-gpu-wgpu/` renderer also requires `wasm-bindgen`; keep it outside the root crate. Java is required for optimized Closure builds; Python 3 serves files and powers utilities.
 - Full QA additionally needs NASM, GDB, QEMU, 32-bit GCC/libc, rustfmt, and downloaded guest images. The dev container provides an amd64 Linux toolchain.
