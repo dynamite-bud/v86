@@ -17,7 +17,7 @@ Not implemented:
 - VirtIO GPU capsets, contexts, 3D resources/transfers, `SUBMIT_3D`, resource blobs/UUIDs, host mappings, Mesa/Gallium, shader translation, virgl compatibility, or Vulkan.
 - The device therefore reports `num_capsets = 0` and does not advertise 3D feature bits.
 
-The next milestone is [issue #1: custom capset transport and one WebGPU triangle](https://github.com/dynamite-bud/v86/issues/1). Start that work from `feature/virtio-gpu-2d`; do not start with Mesa.
+The next milestone is [XWAH-1: custom capset transport and one WebGPU triangle](https://github.com/dynamite-bud/v86/issues/1). Start that work from `origin/main`; do not start with Mesa.
 
 ## Data Flow
 
@@ -140,8 +140,8 @@ Review the generated contract against the committed contract. Never commit the g
 - [`docs/virtio-gpu-webgpu.md`](../virtio-gpu-webgpu.md): canonical implemented architecture, protocol invariants, limits, state, browser behavior, and gated 3D design.
 - [`tools/docker/virtio-gpu-alpine/Readme.md`](../../tools/docker/virtio-gpu-alpine/Readme.md): minimal KMS guest build and probe.
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../../tools/docker/virtio-gpu-alpine-desktop/Readme.md): desktop image, launch URLs, snapshots, sessions, and image verification.
-- [GitHub issue #1](https://github.com/dynamite-bud/v86/issues/1): bounded Phase 6 implementation handoff.
-- [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): issue #3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
+- [XWAH-1](https://github.com/dynamite-bud/v86/issues/1): bounded Phase 6 implementation handoff.
+- [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
 
 Historical root-level Codex task/plan files were removed after their implemented 2D material and surviving 3D decisions were consolidated into the canonical architecture and this contributor guide.

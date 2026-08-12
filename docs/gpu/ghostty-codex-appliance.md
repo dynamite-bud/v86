@@ -2,7 +2,7 @@
 
 Status: **IMPLEMENTED**
 
-Issue [dynamite-bud/v86#3](https://github.com/dynamite-bud/v86/issues/3) originally required Ghostty and OMP. Gate 0 proved that the original chain cannot run in v86: v86 has no x86-64 guest support, OMP and Bun publish no i386 runtime, and Alpine publishes Ghostty only for x86_64 and aarch64. The approved scope replaces OMP with a pinned downstream i386 Codex port. This does not add x86-64 support or claim upstream i386 support for either application.
+[XWAH-3](https://github.com/dynamite-bud/v86/issues/3) originally required Ghostty and OMP. Gate 0 proved that the original chain cannot run in v86: v86 has no x86-64 guest support, OMP and Bun publish no i386 runtime, and Alpine publishes Ghostty only for x86_64 and aarch64. The approved scope replaces OMP with a pinned downstream i386 Codex port. This does not add x86-64 support or claim upstream i386 support for either application.
 
 ## Architecture and Artifact Evidence
 
@@ -133,7 +133,7 @@ An authenticated run through a configured relay reached `gpt-5.6-sol` and return
 - `codex_apps` MCP startup timed out during `tools/list` pagination after 30 seconds. The normal model response still completed.
 - Code Mode failed closed because `/usr/local/bin/codex-code-mode-host` is absent. The pinned downstream release publishes only the main Codex archive and its checksum; the appliance does not fabricate a host executable or suppress the warning.
 
-These are not appliance readiness successes and are not hidden by the serial contract. [Issue #6](https://github.com/dynamite-bud/v86/issues/6), a child of issue #3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. A future i386 Codex release must build, package, checksum, and exercise the real Code Mode host before that feature is enabled. External MCP readiness needs its own bounded acceptance scenario rather than a longer appliance boot timeout.
+These are not appliance readiness successes and are not hidden by the serial contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. A future i386 Codex release must build, package, checksum, and exercise the real Code Mode host before that feature is enabled. External MCP readiness needs its own bounded acceptance scenario rather than a longer appliance boot timeout.
 
 ## Cage Sibling Boundary
 

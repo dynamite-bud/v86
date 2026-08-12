@@ -1,6 +1,6 @@
 # Alpine i386 Openbox Ghostty Codex Appliance
 
-This directory is the reproducible **Xorg/Openbox reference appliance** for the i386 Ghostty and Codex work tracked in [dynamite-bud/v86#3](https://github.com/dynamite-bud/v86/issues/3). It boots directly into Codex inside a maximized, undecorated Ghostty window while retaining v86's standard VirtIO GPU 2D protocol and either browser WebGPU presentation backend.
+This directory is the reproducible **Xorg/Openbox reference appliance** for the i386 Ghostty and Codex work tracked in [XWAH-3](https://github.com/dynamite-bud/v86/issues/3). It boots directly into Codex inside a maximized, undecorated Ghostty window while retaining v86's standard VirtIO GPU 2D protocol and either browser WebGPU presentation backend.
 
 Keep this implementation intact when adding a Cage variant. A Cage + Ghostty + Codex appliance belongs in the sibling directory `tools/docker/virtio-gpu-alpine-cage-codex/` with distinct image names, generated artifacts, browser entry point, readiness markers, and acceptance harness. The two fixtures must remain runnable side by side.
 
@@ -24,7 +24,7 @@ Guest rendering remains software-rendered. Linux sends the completed scanout thr
 
 ## Architecture Decision
 
-v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, OMP, Bun, or Linux artifacts requested by the original issue. The implemented appliance therefore pins reviewed downstream i386 ports:
+v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, OMP, Bun, or Linux artifacts requested by the original XWAH-3 contract. The implemented appliance therefore pins reviewed downstream i386 ports:
 
 - Ghostty [`v1.3.1-i386`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386), built for Alpine `x86-linux-musl`;
 - Codex [`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1), built for `i686-unknown-linux-musl`.
@@ -181,7 +181,7 @@ An authenticated run through the configured relay reached `gpt-5.6-sol` and retu
 - `codex_apps` MCP startup can time out during `tools/list` pagination. This is an external MCP startup failure; the observed normal Codex response still completed.
 - Code Mode fails closed because the pinned downstream release contains the main Codex archive and checksum but does not ship `/usr/local/bin/codex-code-mode-host`. The image must not fabricate a stub or silence this warning. A future i386 release must build, package, checksum, and test the real host before enabling that feature.
 
-These warnings do not prove an emulator, VirtIO NIC, or Ghostty failure. [Issue #6](https://github.com/dynamite-bud/v86/issues/6), a child of issue #3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. Preserve the visible diagnostics until their underlying components are implemented.
+These warnings do not prove an emulator, VirtIO NIC, or Ghostty failure. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. Preserve the visible diagnostics until their underlying components are implemented.
 
 ## Troubleshooting
 
