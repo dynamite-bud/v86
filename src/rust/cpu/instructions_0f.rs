@@ -1204,6 +1204,10 @@ pub unsafe fn instr_0F30() {
                 high == 0,
                 "Changing APIC address (high 32 bits) not supported"
             );
+            // BSP (bit 8) is read-only and ignored on write per the SDM;
+            // guests commonly write back the value they read (now including
+            // BSP), so it is masked out of the address check along with
+            // EXTD/EN
             let address = low & !(IA32_APIC_BASE_BSP | IA32_APIC_BASE_EXTD | IA32_APIC_BASE_EN);
             dbg_assert!(
                 (address == 0 && !*acpi_enabled) // windows me
@@ -1286,7 +1290,8 @@ pub unsafe fn instr_0F32() {
         IA32_PLATFORM_ID => {},
         IA32_APIC_BASE => {
             if *acpi_enabled {
-                low = APIC_MEM_ADDRESS as i32;
+                // the single CPU is the bootstrap processor
+                low = APIC_MEM_ADDRESS as i32 | IA32_APIC_BASE_BSP;
                 if *apic_enabled {
                     low |= IA32_APIC_BASE_EN
                 }
