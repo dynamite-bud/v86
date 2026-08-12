@@ -5,6 +5,10 @@ pub const PREFIX_MASK_REP: u8 = PREFIX_REPZ | PREFIX_REPNZ;
 pub const PREFIX_MASK_OPSIZE: u8 = 0b100000;
 pub const PREFIX_MASK_ADDRSIZE: u8 = 0b1000000;
 
+// Groundwork for SMP atomic RMW (XWAH-9): records the LOCK prefix (0xF0) so
+// downstream instruction implementations can observe it. Currently unused.
+pub const PREFIX_LOCK: u8 = 0b10000000;
+
 pub const PREFIX_66: u8 = PREFIX_MASK_OPSIZE;
 pub const PREFIX_67: u8 = PREFIX_MASK_ADDRSIZE;
 pub const PREFIX_F2: u8 = PREFIX_REPNZ;

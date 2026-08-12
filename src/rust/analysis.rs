@@ -3,7 +3,7 @@
 use crate::cpu_context::CpuContext;
 use crate::gen;
 use crate::modrm;
-use crate::prefix::{PREFIX_66, PREFIX_67, PREFIX_F2, PREFIX_F3, PREFIX_MASK_SEGMENT};
+use crate::prefix::{PREFIX_66, PREFIX_67, PREFIX_F2, PREFIX_F3, PREFIX_LOCK, PREFIX_MASK_SEGMENT};
 use crate::regs::{CS, DS, ES, FS, GS, SS};
 
 #[derive(PartialEq, Eq)]
@@ -86,7 +86,8 @@ pub fn instr_67_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
     analyze_step_handle_prefix(cpu, analysis)
 }
 pub fn instr_F0_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
-    // lock: Ignored
+    // lock: tracked in the compile-time context only (XWAH-9 SMP groundwork)
+    cpu.prefixes |= PREFIX_LOCK;
     analyze_step_handle_prefix(cpu, analysis)
 }
 pub fn instr_F2_analyze(cpu: &mut CpuContext, analysis: &mut Analysis) {
