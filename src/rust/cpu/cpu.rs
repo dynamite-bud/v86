@@ -293,6 +293,12 @@ pub const TSC_RATE: f64 = 1_000_000.0;
 
 pub static mut cpuid_level: u32 = 0x16;
 
+// XWAH-9: number of logical processors reported by CPUID (SMP groundwork).
+// 255 is the limit of xAPIC physical destination addressing (8-bit APIC IDs,
+// with 0xFF reserved for broadcast).
+pub const MAX_CPUS: u32 = 255;
+pub static mut smp_cpus: u32 = 1;
+
 pub static mut jit_block_boundary: bool = false;
 
 const TSC_ENABLE_IMPRECISE_BROWSER_WORKAROUND: bool = true;
@@ -4646,3 +4652,9 @@ pub unsafe fn reset_cpu() {
 
 #[no_mangle]
 pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
+
+#[no_mangle]
+pub unsafe fn set_smp_cpus(n: u32) {
+    dbg_assert!(n >= 1 && n <= MAX_CPUS);
+    smp_cpus = n
+}
