@@ -32,6 +32,7 @@ import { FS } from "../../lib/filesystem.js";
  * @param {{
       disable_mouse: (boolean|undefined),
       disable_keyboard: (boolean|undefined),
+      cpus: (number|undefined),
       wasm_fn: (Function|undefined),
       screen: ({
           scale: (number|undefined),
@@ -244,6 +245,17 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
     settings.mac_address_translation = options.mac_address_translation;
     settings.cpuid_level = options.cpuid_level;
+    // NOTE: Experimental (XWAH-9): guests see the SMP topology, but secondary
+    // CPUs do not start yet; values > 1 slow down SeaBIOS/guest boot while
+    // they time out waiting for the application processors
+    settings.cpus = options.cpus === undefined ? 1 : options.cpus;
+    dbg_assert(
+        Number.isInteger(settings.cpus) && settings.cpus >= 1 && settings.cpus <= 255,
+        "options.cpus must be an integer between 1 and 255");
+    if(!Number.isInteger(settings.cpus) || settings.cpus < 1 || settings.cpus > 255)
+    {
+        settings.cpus = 1;
+    }
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
     if(options.virtio_gpu &&

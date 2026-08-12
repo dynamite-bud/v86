@@ -665,6 +665,15 @@ export interface V86Options {
     cpuid_level?: number;
 
     /**
+     * Number of emulated CPUs (1 to 255). Experimental: guests currently see
+     * the SMP topology, but secondary CPUs do not start yet (XWAH-9). Values
+     * greater than 1 slow down SeaBIOS/guest boot while they time out waiting
+     * for the application processors.
+     * @default 1
+     */
+    cpus?: number;
+
+    /**
      * Turn off the x86-to-wasm jit
      * @default false
      */

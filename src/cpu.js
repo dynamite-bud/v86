@@ -394,6 +394,7 @@ CPU.prototype.wasm_patch = function()
     this.store_current_tsc = get_import("store_current_tsc");
 
     this.set_cpuid_level = get_import("set_cpuid_level");
+    this.set_smp_cpus = get_import("set_smp_cpus");
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
@@ -1011,6 +1012,9 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
+    this.smp_cpus = settings.cpus || 1;
+    this.set_smp_cpus(this.smp_cpus);
+
     this.acpi_enabled[0] = +settings.acpi;
 
     this.reset_cpu();
@@ -1108,11 +1112,11 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.smp_cpus);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.smp_cpus);
         }
         else if(value === FW_CFG_NUMA)
         {
@@ -1690,7 +1694,9 @@ CPU.prototype.fill_cmos = function(rtc, settings)
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
+    // QEMU convention: CMOS 0x5F holds the number of additional (application)
+    // processors, i.e. smp_cpus - 1
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.smp_cpus - 1);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);
