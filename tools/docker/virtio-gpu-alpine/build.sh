@@ -13,7 +13,7 @@ CONTAINER_NAME=v86-virtio-gpu-alpine
 IMAGE_NAME=v86-virtio-gpu-alpine
 
 mkdir -p "$IMAGES"
-docker build . --platform linux/386 --rm --tag "$IMAGE_NAME"
+docker build --build-context color=../virtio-gpu-color . --platform linux/386 --rm --tag "$IMAGE_NAME"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker create --platform linux/386 --name "$CONTAINER_NAME" "$IMAGE_NAME" >/dev/null
 docker export "$CONTAINER_NAME" -o "$RAW_ROOTFS_TAR"

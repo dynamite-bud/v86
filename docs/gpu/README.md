@@ -48,6 +48,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Renderer tests | `tests/unit/virtio_gpu_webgpu_backend.js` | Direct renderer and shared browser lifecycle |
 | Linux KMS test | `tests/devices/virtio_gpu.js` | Pinned guest probe, DRM/KMS modeset, reference pixels |
 | Browser matrix | `tests/browser/virtio_gpu_acceptance.js` | Xorg/Wayland × JavaScript/Rust backends, resize, cursor, reset, device loss, snapshots |
+| Color fidelity | `tools/docker/virtio-gpu-color/`, `tests/browser/virtio_gpu_color.js` | Checked ramps, 4,096-color palette, SMPTE, pinned NASA photographs, exact KMS/backend/browser RGBA validation |
 | Desktop example | `examples/virtio_gpu_desktop.html` | Manual desktop, renderer/session selectors, persistent ready snapshots |
 | KMS guest | `tools/docker/virtio-gpu-alpine/` | Minimal reproducible Linux DRM/KMS image and probe |
 | Desktop guest | `tools/docker/virtio-gpu-alpine-desktop/` | Reproducible XFCE Xorg/Wayland image and readiness contract |
@@ -107,12 +108,13 @@ Review the generated contract against the committed contract. Never commit the g
 | Guest backing/file storage | `make filesystem-unit-test` |
 | Linux KMS path | `make virtio-gpu-test virtio-gpu-test-release` |
 | Browser backend, canvas lifecycle, resize, cursor, or loss | `make virtio-gpu-browser-test` |
+| Scanout color fidelity or fixture inputs | `make virtio-gpu-color-test`; also run `make virtio-gpu-test` for the memory backend |
 | Ready-state persistence | `make virtio-gpu-ready-snapshot-test` |
 | Rust renderer | `make virtio-gpu-wgpu`; run `cargo fmt --manifest-path tools/virtio-gpu-wgpu/Cargo.toml -- --check` and the applicable browser tests |
 | Guest-image inputs | Rebuild the image, compare its generated checksum contract, then run its KMS/browser contract |
 | JavaScript changes | `make eslint` or targeted ESLint plus the focused contract above |
 
-`all-tests` includes the GPU unit target but not the long browser matrix. Run the browser target explicitly for browser or renderer changes.
+`all-tests` includes the GPU unit target but not the long browser acceptance or color-fidelity matrices. Run the applicable browser target explicitly for browser, renderer, or scanout-fixture changes.
 
 ## Invariants
 

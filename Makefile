@@ -392,6 +392,7 @@ filesystem-unit-test:
 	./tests/unit/filestorage.js
 
 virtio-gpu-unit-test:
+	node tools/docker/virtio-gpu-color/generate-fixtures.js --check
 	./tests/unit/virtio_gpu_protocol.js
 	./tests/unit/virtio_gpu_webgpu_backend.js
 	./tests/unit/ready_state_snapshot.js
@@ -407,6 +408,8 @@ virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 
 virtio-gpu-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_codex_acceptance.js
+virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
+	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
@@ -480,4 +483,4 @@ denodoc:
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-browser-test virtio-gpu-ready-snapshot-test virtio-gpu-codex-browser-test \
-	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
+	virtio-gpu-color-test virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
