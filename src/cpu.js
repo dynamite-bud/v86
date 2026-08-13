@@ -13,6 +13,7 @@ import {
 } from "./const.js";
 import { h, view, pads, Bitmap, dump_file } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { StateLoadError } from "./state.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI } from "./acpi.js";
@@ -394,7 +395,21 @@ CPU.prototype.wasm_patch = function()
     this.store_current_tsc = get_import("store_current_tsc");
 
     this.set_cpuid_level = get_import("set_cpuid_level");
-    this.set_smp_cpus = get_import("set_smp_cpus");
+
+    // SMP exports (XWAH-9): optional because wasm builds that predate
+    // set_smp_cpus legitimately lack them — every caller guards on
+    // presence and falls back to single-CPU behavior
+    this.set_smp_cpus = get_optional_import("set_smp_cpus");
+    this.get_firmware_cpus = get_optional_import("get_firmware_cpus");
+    this.rearm_cpu_event_halt = get_optional_import("rearm_cpu_event_halt");
+
+    // per-vCPU save/restore region (XWAH-9, docs/smp-phase2-design.md
+    // §JS-side impacts); missing on wasm builds that predate set_smp_cpus
+    this.get_vcpu_state_addr = get_optional_import("get_vcpu_state_addr");
+    this.get_vcpu_state_size = get_optional_import("get_vcpu_state_size");
+    this.get_current_vcpu = get_optional_import("get_current_vcpu");
+    this.vcpu_prepare_save = get_optional_import("vcpu_prepare_save");
+    this.vcpu_finish_restore = get_optional_import("vcpu_finish_restore");
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
@@ -422,6 +437,7 @@ CPU.prototype.wasm_patch = function()
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");
     this.get_apic_addr = get_import("get_apic_addr");
+    this.reset_secondary_apics = get_import("reset_secondary_apics");
     this.get_ioapic_addr = get_import("get_ioapic_addr");
 
     this.zstd_create_ctx = get_import("zstd_create_ctx");
@@ -574,6 +590,28 @@ CPU.prototype.get_state = function()
     state[91] = this.devices.parallel1;
     state[92] = this.devices.virtio_gpu;
 
+    if(this.smp_cpus > 1)
+    {
+        // Trailing vcpu slot (XWAH-9, docs/smp-phase2-design.md §JS-side
+        // impacts): [u32 smp_cpus][u32 current_vcpu] header followed by
+        // the raw per-vCPU array (N × Vcpu: save area, run state, wake and
+        // INIT/SIPI latches; layout in vcpu.rs). Only assigned when
+        // smp_cpus > 1 so cpus=1 state images stay byte-identical. Built
+        // last: vcpu_prepare_save syncs the live block — including
+        // current_tsc, written by store_current_tsc above — into the
+        // current vCPU's save area, making the region agree with the
+        // per-field slots captured from the live block.
+        this.vcpu_prepare_save();
+        const region = new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.get_vcpu_state_size());
+        const vcpu_state = new Uint8Array(8 + region.length);
+        const header = new DataView(vcpu_state.buffer, 0, 8);
+        header.setUint32(0, this.smp_cpus, true);
+        header.setUint32(4, this.get_current_vcpu(), true);
+        vcpu_state.set(region, 8);
+        state[93] = vcpu_state;
+    }
+
     return state;
 };
 
@@ -620,7 +658,9 @@ CPU.prototype.get_state_pic = function()
 CPU.prototype.get_state_apic = function()
 {
     const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
-    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+    // one struct per vCPU LAPIC (XWAH-9); byte-identical to the old
+    // single-struct image when smp_cpus is 1
+    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), this.smp_cpus * APIC_STRUCT_SIZE);
 };
 
 CPU.prototype.get_state_ioapic = function()
@@ -631,6 +671,135 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    const VCPU_STATE_HEADER_SIZE = 8; // [u32 smp_cpus][u32 current_vcpu]
+    // Per-vCPU struct size and trailing-field offsets, derived from the
+    // wasm module when state[93] is present. The Rust layout (vcpu.rs,
+    // repr(C) Vcpu) is the authority: [u8; 1216] save_area, then the
+    // run_state/wake_pending/pending_init/pending_sipi bytes and the free
+    // pending_sipi_vector u8.
+    let vcpu_struct_size = 0;
+    let vcpu_run_state_offset = 0;
+
+    if(state[46] instanceof Uint8Array)
+    {
+        // validate before any state is applied: throwing mid-restore would
+        // leave a half-restored machine behind
+        const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
+        if(state[46].length !== APIC_STRUCT_SIZE &&
+            state[46].length !== this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state[46].length +
+                " (expected " + APIC_STRUCT_SIZE + " or " +
+                this.smp_cpus * APIC_STRUCT_SIZE + "; was the state image " +
+                "saved with a different cpus setting?)");
+        }
+    }
+
+    // validate the trailing vcpu slot in the same pre-mutation block: a
+    // cpus mismatch in either direction must fail before anything is
+    // restored (XWAH-9, docs/smp-phase2-design.md §JS-side impacts)
+    let vcpu_current = -1; // >= 0 exactly when state[93] passed validation
+    if(state[93] === undefined || state[93] === null)
+    {
+        // note: an unset trailing array slot deserializes as undefined
+        // today, but would round-trip through JSON as null if a later
+        // slot is ever added behind it
+        if(this.smp_cpus > 1)
+        {
+            throw new StateLoadError(
+                "State image has no vcpu contexts (expected " +
+                this.smp_cpus + "); was it saved with cpus=1 or by an " +
+                "older version?");
+        }
+    }
+    else
+    {
+        if(!this.vcpu_finish_restore)
+        {
+            throw new StateLoadError(
+                "State image has vcpu contexts, but the wasm module " +
+                "predates vcpu save/restore");
+        }
+        if(!(state[93] instanceof Uint8Array) ||
+            state[93].length < VCPU_STATE_HEADER_SIZE)
+        {
+            throw new StateLoadError("Unexpected vcpu state: " + state[93]);
+        }
+        vcpu_struct_size = this.get_vcpu_state_size() / this.smp_cpus;
+        dbg_assert(Number.isInteger(vcpu_struct_size),
+            "vcpu state size not divisible by cpu count");
+        vcpu_run_state_offset = vcpu_struct_size - 5;
+        const header = new DataView(
+            state[93].buffer, state[93].byteOffset, VCPU_STATE_HEADER_SIZE);
+        const image_cpus = header.getUint32(0, true);
+        vcpu_current = header.getUint32(4, true);
+        if(image_cpus !== this.smp_cpus)
+        {
+            throw new StateLoadError(
+                "State image was saved with cpus=" + image_cpus +
+                ", but the machine has cpus=" + this.smp_cpus);
+        }
+        if(vcpu_current >= image_cpus ||
+            state[93].length !== VCPU_STATE_HEADER_SIZE + this.smp_cpus * vcpu_struct_size)
+        {
+            throw new StateLoadError(
+                "Unexpected vcpu state length " + state[93].length +
+                " or current vcpu " + vcpu_current);
+        }
+        for(let i = 0; i < this.smp_cpus; i++)
+        {
+            // an out-of-range run_state discriminant or a bool byte other
+            // than 0/1 would be undefined behavior once Rust reads the
+            // struct back (run_state, then the wake_pending/pending_init/
+            // pending_sipi bools; the trailing pending_sipi_vector is a
+            // free u8)
+            const struct_start = VCPU_STATE_HEADER_SIZE + i * vcpu_struct_size;
+            const run_state = state[93][struct_start + vcpu_run_state_offset];
+            if(run_state > 2)
+            {
+                throw new StateLoadError(
+                    "Unexpected run state " + run_state + " for vcpu " + i);
+            }
+            for(let offset = vcpu_run_state_offset + 1;
+                offset < vcpu_run_state_offset + 4; offset++)
+            {
+                const bool_byte = state[93][struct_start + offset];
+                if(bool_byte > 1)
+                {
+                    throw new StateLoadError(
+                        "Unexpected bool byte " + bool_byte + " at struct offset " +
+                        offset + " for vcpu " + i);
+                }
+            }
+        }
+    }
+
+    // the restored machine may be live: allow a later full halt to fire
+    // the machine-dead event again
+    this.rearm_cpu_event_halt && this.rearm_cpu_event_halt();
+
+    if(vcpu_current >= 0)
+    {
+        // Canonical vcpu restore order: write the image's whole per-vCPU
+        // region first and make its current vCPU live again
+        // (vcpu_finish_restore loads that save area into the live block and
+        // resets the scheduler rotation), then let the per-field restores
+        // below overwrite the live block. The final live block equals the
+        // saved one either way — get_state ran vcpu_prepare_save, so the
+        // region's current save area and the per-field slots hold the same
+        // bytes — but region-first also restores live-block fields that
+        // have no individual state slot (e.g. apic_enabled) and keeps
+        // save_area[current] trivially consistent with the live block.
+        // The full_clear_tlb/update_state_flags calls at the end of this
+        // function cover the implicit vcpu switch.
+        dbg_assert(this.get_vcpu_state_size() === this.smp_cpus * vcpu_struct_size);
+        new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.smp_cpus * vcpu_struct_size)
+            .set(state[93].subarray(VCPU_STATE_HEADER_SIZE));
+        this.vcpu_finish_restore(vcpu_current);
+    }
+
     this.memory_size[0] = state[0];
 
     if(this.mem8.length !== this.memory_size[0])
@@ -839,7 +1008,7 @@ CPU.prototype.set_state_apic = function(state)
         apic[13] = state[11]; // tpr
         apic[14] = state[12]; // icr0
         apic[15] = state[13]; // icr1
-        apic.set(state[15], 16); // irr
+        apic.set(state[14], 16); // irr
         apic.set(state[15], 24); // isr
         apic.set(state[16], 32); // tmr
         apic[40] = state[17]; // spurious_vector
@@ -848,13 +1017,36 @@ CPU.prototype.set_state_apic = function(state)
         apic[43] = state[20]; // error
         apic[44] = state[21]; // read_error
         apic[45] = state[22] || IOAPIC_CONFIG_MASKED; // lvt_thermal_sensor
+
+        if(this.smp_cpus > 1)
+        {
+            // old images always hold a single LAPIC; it went into LAPIC 0
+            this.reset_secondary_apics();
+        }
     }
     else
     {
-        const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
         dbg_assert(state instanceof Uint8Array);
-        dbg_assert(state.length === apic.length); // later versions might need to handle state upgrades here
-        apic.set(state);
+
+        if(state.length === APIC_STRUCT_SIZE && this.smp_cpus > 1)
+        {
+            // single-LAPIC image restored into a multi-vCPU machine: LAPIC 0
+            // gets the image, the others return to power-on state
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+            apic.set(state);
+            this.reset_secondary_apics();
+        }
+        else if(state.length === this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), state.length);
+            apic.set(state);
+        }
+        else
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state.length +
+                " (expected " + this.smp_cpus * APIC_STRUCT_SIZE + ")");
+        }
     }
 };
 
@@ -1012,10 +1204,18 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
-    this.smp_cpus = settings.cpus || 1;
-    // guarded like cpuid_level: keeps new js working against an older
-    // v86.wasm that lacks the export (the topology is then just not visible)
-    this.set_smp_cpus && this.set_smp_cpus(this.smp_cpus);
+    // An older v86.wasm without the export has exactly one LAPIC and no
+    // vcpu contexts: smp_cpus must then stay 1 everywhere on the JS side
+    // (fw_cfg, CMOS, APIC state views), not just skip the wasm call
+    this.smp_cpus = this.set_smp_cpus ? settings.cpus || 1 : 1;
+    if(this.set_smp_cpus)
+    {
+        this.set_smp_cpus(this.smp_cpus);
+    }
+    else if(settings.cpus > 1)
+    {
+        dbg_log("cpus option ignored: wasm module predates set_smp_cpus", LOG_CPU);
+    }
 
     this.acpi_enabled[0] = +settings.acpi;
 
@@ -1114,20 +1314,27 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            // XWAH-9: must stay at 1 until startup IPIs actually start
-            // application processors; SeaBIOS spins forever waiting for the
-            // advertised CPUs to come up (verified empirically). smp_cpus is
-            // currently only visible to the guest through cpuid.
-            this.fw_value = i32(1);
+            // XWAH-9: the wasm module is the single authority for the
+            // firmware-visible CPU count — get_firmware_cpus reports
+            // smp_cpus exactly when startup IPIs actually start application
+            // processors, and 1 otherwise (SeaBIOS spins forever waiting
+            // for advertised CPUs that cannot come up, verified
+            // empirically). Older wasm without the export has no vcpu
+            // contexts and always boots one CPU.
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
             // XWAH-9: see FW_CFG_NB_CPUS
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_NUMA)
         {
-            this.fw_value = new Uint8Array(16);
+            // u64 NUMA node count (0), then one u64 node id per CPU:
+            // SeaBIOS reads 8 * (1 + max_cpus) bytes when it builds the
+            // ACPI tables (all zero — no NUMA topology)
+            const max_cpus = this.get_firmware_cpus ? this.get_firmware_cpus() : 1;
+            this.fw_value = new Uint8Array(8 * (1 + max_cpus));
         }
         else if(value === FW_CFG_FILE_DIR)
         {
@@ -1702,10 +1909,12 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
     // QEMU convention: CMOS 0x5F holds the number of additional (application)
-    // processors, i.e. smp_cpus - 1. XWAH-9: must stay at 0 until startup
-    // IPIs actually start application processors; SeaBIOS spins forever
-    // waiting for the advertised CPUs to come up (verified empirically).
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
+    // processors, i.e. smp_cpus - 1. XWAH-9: sourced from the wasm module
+    // like fw_cfg NB_CPUS/MAX_CPUS, the single authority that reports more
+    // than one CPU exactly when startup IPIs actually start application
+    // processors (SeaBIOS spins forever waiting for advertised CPUs that
+    // cannot come up, verified empirically).
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.get_firmware_cpus ? this.get_firmware_cpus() - 1 : 0);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);

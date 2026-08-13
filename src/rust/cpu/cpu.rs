@@ -9,7 +9,7 @@ use crate::cpu::misc_instr::{
     push16, push32,
 };
 use crate::cpu::modrm::{resolve_modrm16, resolve_modrm32};
-use crate::cpu::{apic, ioapic, pic};
+use crate::cpu::{apic, ioapic, pic, vcpu};
 use crate::dbg::dbg_trace;
 use crate::gen;
 use crate::jit;
@@ -3274,6 +3274,12 @@ pub unsafe fn segment_prefix_op(seg: i32) {
 pub unsafe fn main_loop() -> f64 {
     profiler::stat_increment(stat::MAIN_LOOP);
 
+    if vcpu::count() > 1 {
+        return main_loop_smp();
+    }
+
+    // Single-vCPU fast path: today's loop, unchanged.
+
     let start = js::microtick();
 
     if *in_hlt {
@@ -3307,6 +3313,164 @@ pub unsafe fn main_loop() -> f64 {
     }
 
     return 0.0;
+}
+
+// Round-robin rotation pointer of the SMP scheduler. Persists across
+// main_loop invocations so a vCPU running when the frame budget expires
+// cannot starve the others (docs/smp-phase2-design.md §Scheduler).
+static mut VCPU_ROTATION: usize = 0;
+
+/// Restart the round-robin at the BSP. Any value would be schedulable
+/// (pick_vcpu reduces modulo the vCPU count), but a snapshot restore
+/// (vcpu::vcpu_finish_restore) resets it so the pre-restore rotation does
+/// not leak into the restored machine's scheduling.
+pub unsafe fn reset_vcpu_rotation() { VCPU_ROTATION = 0 }
+// The machine-dead event has been delivered to JS; rearmed by reset_cpu
+static mut HALT_EVENT_SENT: bool = false;
+
+// Time-sliced SMP scheduler, used when vcpu::count() > 1
+// (docs/smp-phase2-design.md §Scheduler, §AP startup): round-robin over the
+// schedulable vCPUs, one do_many_cycles_native slice each, until the frame
+// budget is spent. When nobody is schedulable, yield the min hardware-timer
+// deadline while a halted vCPU could still wake; the machine is dead only
+// when every vCPU is Parked or WaitForSipi.
+unsafe fn main_loop_smp() -> f64 {
+    let start = js::microtick();
+
+    loop {
+        // INIT/SIPI latched by the LAPIC are applied here, at a slice
+        // boundary: no vCPU is mid-instruction and no APIC lock is held
+        process_pending_init_sipi();
+
+        match pick_vcpu() {
+            Some(i) => {
+                if i != vcpu::current() {
+                    vcpu::switch_to(i);
+                    // switch_to contract: tlb_data/tlb_code still cache the
+                    // outgoing vCPU's mappings
+                    full_clear_tlb();
+                }
+                VCPU_ROTATION = i + 1;
+                // Deliver pending interrupts into this context. A halted
+                // vCPU picked because of wake_pending either receives its
+                // interrupt here (pic_call_irq clears in_hlt) or the wake
+                // was spurious; the wake is consumed either way.
+                handle_irqs();
+                vcpu::clear_wake_pending(i);
+                if !*in_hlt {
+                    do_many_cycles_native();
+                }
+            },
+            None => {
+                // Nobody is schedulable right now: give the hardware
+                // timers a chance to deliver an interrupt that wakes a
+                // halted vCPU before yielding to the host
+                let t = js::run_hardware_timers(*acpi_enabled, js::microtick());
+                handle_irqs();
+                if pick_vcpu().is_none() {
+                    if (0..vcpu::count()).all(|i| vcpu::run_state(i) != vcpu::RunState::Runnable) {
+                        // dead: every vCPU is Parked or WaitForSipi, and
+                        // only an INIT/SIPI from a running vCPU (or an
+                        // NMI, unsupported) could revive one
+                        if !HALT_EVENT_SENT {
+                            HALT_EVENT_SENT = true;
+                            js::cpu_event_halt();
+                        }
+                        return 100.0;
+                    }
+                    profiler::stat_increment(stat::MAIN_LOOP_IDLE);
+                    return t;
+                }
+                // a timer interrupt made a vCPU schedulable; keep going
+            },
+        }
+
+        let now = js::microtick();
+        js::run_hardware_timers(*acpi_enabled, now);
+        handle_irqs();
+
+        if now - start > TIME_PER_FRAME {
+            break;
+        }
+    }
+
+    return 0.0;
+}
+
+// A vCPU is schedulable when Runnable and not halted, or halted with a wake
+// pending (handle_irqs on its context then either delivers the interrupt or
+// proves the wake spurious). Runnable-and-halted implies IF=1: hlt with
+// IF=0 becomes Parked in instr_F4. Parked and WaitForSipi vCPUs only leave
+// those states through INIT/SIPI, never through the scheduler.
+unsafe fn pick_vcpu() -> Option<usize> {
+    let count = vcpu::count();
+    for offset in 0..count {
+        let i = (VCPU_ROTATION + offset) % count;
+        if vcpu::run_state(i) == vcpu::RunState::Runnable
+            && (!vcpu_in_hlt(i) || vcpu::wake_pending(i))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+// in_hlt of any vCPU: the live block for the current one, the save area for
+// the others
+unsafe fn vcpu_in_hlt(i: usize) -> bool {
+    if i == vcpu::current() {
+        *in_hlt
+    }
+    else {
+        vcpu::saved_in_hlt(i)
+    }
+}
+
+// Apply latched INIT/SIPI IPIs (docs/smp-phase2-design.md §AP startup).
+// INIT resets the target's save area to power-on values via the live block
+// and parks it in WaitForSipi; a SIPI then patches the real-mode entry
+// point into the save area and makes the target Runnable. An INIT latch's
+// target may be the current vCPU (an AP that INIT'd itself): switch_to(i)
+// is then a no-op and reset_vcpu_block resets the live block, which is
+// exactly the target's own state. A SIPI latch is never consumed with its
+// target current: apic::deliver ignores self-SIPI, so the latch was set
+// while another vCPU ran, and that vCPU (not the WaitForSipi target) is
+// still current at the next slice boundary — apply_sipi may assert this.
+unsafe fn process_pending_init_sipi() {
+    let count = vcpu::count();
+    let resume = vcpu::current();
+    let mut switched = false;
+    for i in 0..count {
+        if vcpu::take_pending_init(i) {
+            vcpu::switch_to(i);
+            reset_vcpu_block();
+            // per the SDM, INIT also returns the target's LAPIC to its
+            // power-up state except the APIC ID. reset_one locks the APIC
+            // table internally; no APIC lock is held here.
+            apic::reset_one(i);
+            vcpu::set_run_state(i, vcpu::RunState::WaitForSipi);
+            vcpu::clear_wake_pending(i);
+            switched = true;
+        }
+    }
+    if switched {
+        // park the power-on image in the target's save area again; the TLB
+        // is empty (reset_vcpu_block flushed), so the flush below only
+        // upholds the switch_to contract
+        vcpu::switch_to(resume);
+        full_clear_tlb();
+    }
+    for i in 0..count {
+        if let Some(vector) = vcpu::take_pending_sipi(i) {
+            if vcpu::run_state(i) == vcpu::RunState::WaitForSipi {
+                vcpu::apply_sipi(i, vector);
+                vcpu::set_run_state(i, vcpu::RunState::Runnable);
+                vcpu::note_interrupt(i);
+            }
+            // else: the target left WaitForSipi since the SIPI was
+            // latched; dropped like a SIPI to a running vCPU
+        }
+    }
 }
 
 pub unsafe fn do_many_cycles_native() {
@@ -4468,10 +4632,15 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 #[no_mangle]
 pub unsafe fn handle_irqs() {
     if *flags & FLAG_INTERRUPT != 0 {
-        if let Some(irq) = pic::pic_acknowledge_irq() {
-            pic_call_irq(irq)
+        // the 8259's ExtINT line wires to the BSP (vCPU 0) only; the APIC
+        // leg acknowledges from the current vCPU's LAPIC context
+        if vcpu::current() == 0 {
+            if let Some(irq) = pic::pic_acknowledge_irq() {
+                pic_call_irq(irq);
+                return;
+            }
         }
-        else if *acpi_enabled {
+        if *acpi_enabled {
             if let Some(irq) = apic::acknowledge_irq() {
                 pic_call_irq(irq)
             }
@@ -4488,12 +4657,30 @@ unsafe fn pic_call_irq(interrupt_nr: u8) {
     call_interrupt_vector(interrupt_nr as i32, false, None);
 }
 
+// Wake the BSP after any PIC state change that may newly assert INTR —
+// device IRQ raise, but also port writes (OCW1 unmask included): the
+// 8259's ExtINT line wires to the BSP (vCPU 0), which may not be the
+// current vCPU, and the machine may be idling in the host with the BSP
+// halted, so mirror apic::deliver's cross-vCPU wake. Waking only when the
+// 8259 is actually asserting INTR avoids two context switches and TLB
+// flushes per masked device IRQ for nothing; spurious wakes are harmless,
+// missed wakes hang the guest.
+unsafe fn wake_bsp_if_pic_requested() {
+    if vcpu::count() > 1 && pic::has_requested_irq() {
+        vcpu::note_interrupt(0);
+        if vcpu_in_hlt(0) {
+            js::stop_idling();
+        }
+    }
+}
+
 #[no_mangle]
 unsafe fn device_raise_irq(i: u8) {
     pic::set_irq(i);
     if *acpi_enabled {
         ioapic::set_irq(i);
     }
+    wake_bsp_if_pic_requested();
     handle_irqs()
 }
 
@@ -4535,6 +4722,9 @@ pub fn io_port_write8(port: i32, value: i32) {
                     0x4D1 => pic::port4D1_write(value as u8),
                     _ => dbg_assert!(false),
                 };
+                // covers every port-driven PIC state change, e.g. an AP
+                // unmasking an already-requested line via OCW1
+                wake_bsp_if_pic_requested();
                 handle_irqs()
             },
             _ => js::io_port_write8(port, value),
@@ -4565,6 +4755,61 @@ pub unsafe fn check_page_switch(block_addr: u32, next_block_addr: u32) {
 
 #[no_mangle]
 pub unsafe fn reset_cpu() {
+    // Reset every vCPU's state block through the live block: switch it in,
+    // reset it, mark APs as waiting for INIT+SIPI. With one vCPU this
+    // degenerates to a single reset_vcpu_block with no-op switches.
+    let vcpu_count = vcpu::count();
+    if vcpu_count == 0 {
+        // set_smp_cpus has not sized the vCPU table; plain single-CPU reset
+        reset_vcpu_block();
+    }
+    else {
+        for i in 0..vcpu_count {
+            vcpu::switch_to(i);
+            reset_vcpu_block();
+            vcpu::set_run_state(
+                i,
+                if i == 0 { vcpu::RunState::Runnable } else { vcpu::RunState::WaitForSipi },
+            );
+            vcpu::clear_wake_pending(i);
+            vcpu::clear_pending(i);
+        }
+        vcpu::switch_to(0);
+        if vcpu_count > 1 {
+            // switch_to contract: flush after a real switch (the last
+            // reset_vcpu_block flushed while another vCPU was live)
+            full_clear_tlb();
+        }
+    }
+
+    // machine-global state, reset exactly once:
+
+    // machine-shared per vcpu.rs SHARED_FIELDS: zeroing it in
+    // reset_vcpu_block would snap the global counter back mid-run when a
+    // latched INIT resets an AP
+    *instruction_counter = 0;
+
+    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
+    // interrupts) must return to power-on values on reboot; stale values
+    // would misroute interrupts now that destinations are matched honestly
+    apic::reset();
+    ioapic::reset();
+
+    set_tsc(0, 0);
+
+    // scheduler state: restart the rotation at the BSP and rearm the
+    // machine-dead event
+    VCPU_ROTATION = 0;
+    HALT_EVENT_SENT = false;
+
+    jit::jit_clear_cache_js();
+}
+
+/// Reset the current vCPU's state block (and the TLB caching its mappings)
+/// to power-on values with the real-mode entry point at F000:FFF0.
+/// Machine-global state (APIC/IOAPIC, TSC, JIT cache) is reset once by
+/// reset_cpu, not here.
+unsafe fn reset_vcpu_block() {
     for i in 0..8 {
         *segment_is_null.offset(i) = false;
         *segment_limits.offset(i) = 0;
@@ -4600,12 +4845,6 @@ pub unsafe fn reset_cpu() {
 
     full_clear_tlb();
 
-    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
-    // interrupts) must return to power-on values on reboot; stale values
-    // would misroute interrupts now that destinations are matched honestly
-    apic::reset();
-    ioapic::reset();
-
     *protected_mode = false;
 
     // http://www.sandpile.org/x86/initial.htm
@@ -4629,7 +4868,6 @@ pub unsafe fn reset_cpu() {
 
     *last_virt_eip = -1;
 
-    *instruction_counter = 0;
     *previous_ip = 0;
     *in_hlt = false;
 
@@ -4643,8 +4881,6 @@ pub unsafe fn reset_cpu() {
     *last_op1 = 0;
     *last_op_size = 0;
 
-    set_tsc(0, 0);
-
     *instruction_pointer = 0xFFFF0;
     switch_cs_real_mode(0xF000);
 
@@ -4652,9 +4888,13 @@ pub unsafe fn reset_cpu() {
     write_reg32(ESP, 0x100);
 
     update_state_flags();
-
-    jit::jit_clear_cache_js();
 }
+
+// Called by CPU.set_state after a snapshot restore: the restored machine
+// may be live again, so the one-shot machine-dead event must be able to
+// fire for a later full halt
+#[no_mangle]
+pub unsafe fn rearm_cpu_event_halt() { HALT_EVENT_SENT = false }
 
 #[no_mangle]
 pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
@@ -4662,5 +4902,23 @@ pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
 #[no_mangle]
 pub unsafe fn set_smp_cpus(n: u32) {
     dbg_assert!(n >= 1 && n <= MAX_CPUS);
-    smp_cpus = n
+    smp_cpus = n;
+    vcpu::init(n as usize);
+    apic::init(n as usize)
+}
+
+/// Firmware-visible CPU count, read by cpu.js for fw_cfg NB_CPUS/MAX_CPUS
+/// and CMOS 0x5F. The wasm module is the single authority for "SMP
+/// enabled": vcpu::init arms Startup IPIs exactly when it sizes the table
+/// with more than one vCPU, so a count above 1 is advertised if and only
+/// if a SIPI is honored — JavaScript can never half-update the two
+/// (XWAH-9 stage 4; see vcpu::AP_STARTUP_ENABLED).
+#[no_mangle]
+pub unsafe fn get_firmware_cpus() -> u32 {
+    if vcpu::ap_startup_enabled() {
+        smp_cpus
+    }
+    else {
+        1
+    }
 }

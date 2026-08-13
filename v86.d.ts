@@ -665,10 +665,11 @@ export interface V86Options {
     cpuid_level?: number;
 
     /**
-     * Number of emulated CPUs (1 to 255). Experimental: the SMP topology is
-     * currently visible to guests through cpuid only; firmware CPU counts
-     * remain 1 until secondary CPUs can actually start (XWAH-9), so guests
-     * boot and run on a single CPU.
+     * Number of emulated CPUs (1 to 255). Experimental time-sliced SMP
+     * (XWAH-9): the firmware advertises all CPUs and secondary CPUs boot,
+     * multiplexed on a single host thread (no parallelism). Values above 1
+     * require `acpi: true` — the local APIC is gated on acpi — and are
+     * clamped to 1 without it.
      * @default 1
      */
     cpus?: number;

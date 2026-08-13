@@ -169,6 +169,9 @@ const emulator = new V86({
     memory_size,
     vga_memory_size,
     cpus,
+    // cpus > 1 requires acpi (the LAPIC MMIO window is gated on it);
+    // keep the appliance's historical acpi-less setup for one CPU
+    acpi: cpus > 1,
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {

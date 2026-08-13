@@ -245,14 +245,23 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
     settings.mac_address_translation = options.mac_address_translation;
     settings.cpuid_level = options.cpuid_level;
-    // NOTE: Experimental (XWAH-9): the SMP topology is currently visible to
-    // guests through cpuid only; firmware CPU counts remain 1 (SeaBIOS hangs
-    // waiting for application processors that cannot start yet), so guests
-    // still boot and run on a single CPU
+    // NOTE: Experimental (XWAH-9): time-sliced SMP — the firmware
+    // advertises all CPUs and secondary CPUs actually boot, multiplexed on
+    // one host thread. Requires acpi (the LAPIC MMIO window is gated on
+    // acpi_enabled; without it the guest could never start or interrupt
+    // the secondary CPUs)
     const cpus = options.cpus === undefined ? 1 : options.cpus;
     const cpus_valid = Number.isInteger(cpus) && cpus >= 1 && cpus <= 255;
     dbg_assert(cpus_valid, "options.cpus must be an integer between 1 and 255");
-    settings.cpus = cpus_valid ? cpus : 1;
+    const cpus_without_acpi = cpus_valid && cpus > 1 && !options.acpi;
+    dbg_assert(!cpus_without_acpi, "options.cpus > 1 requires acpi: true");
+    if(cpus_without_acpi)
+    {
+        dbg_log("cpus option clamped to 1: cpus > 1 requires acpi: true " +
+            "(the LAPIC MMIO window is gated on acpi_enabled, so secondary " +
+            "CPUs could never be started or interrupted)");
+    }
+    settings.cpus = cpus_valid && !cpus_without_acpi ? cpus : 1;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
     if(options.virtio_gpu &&
