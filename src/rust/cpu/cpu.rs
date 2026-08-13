@@ -4697,5 +4697,6 @@ pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
 pub unsafe fn set_smp_cpus(n: u32) {
     dbg_assert!(n >= 1 && n <= MAX_CPUS);
     smp_cpus = n;
-    vcpu::init(n as usize)
+    vcpu::init(n as usize);
+    apic::init(n as usize)
 }

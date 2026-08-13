@@ -13,6 +13,7 @@ import {
 } from "./const.js";
 import { h, view, pads, Bitmap, dump_file } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { StateLoadError } from "./state.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI } from "./acpi.js";
@@ -422,6 +423,7 @@ CPU.prototype.wasm_patch = function()
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");
     this.get_apic_addr = get_import("get_apic_addr");
+    this.reset_secondary_apics = get_import("reset_secondary_apics");
     this.get_ioapic_addr = get_import("get_ioapic_addr");
 
     this.zstd_create_ctx = get_import("zstd_create_ctx");
@@ -620,7 +622,9 @@ CPU.prototype.get_state_pic = function()
 CPU.prototype.get_state_apic = function()
 {
     const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
-    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+    // one struct per vCPU LAPIC (XWAH-9); byte-identical to the old
+    // single-struct image when smp_cpus is 1
+    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), this.smp_cpus * APIC_STRUCT_SIZE);
 };
 
 CPU.prototype.get_state_ioapic = function()
@@ -848,13 +852,36 @@ CPU.prototype.set_state_apic = function(state)
         apic[43] = state[20]; // error
         apic[44] = state[21]; // read_error
         apic[45] = state[22] || IOAPIC_CONFIG_MASKED; // lvt_thermal_sensor
+
+        if(this.smp_cpus > 1)
+        {
+            // old images always hold a single LAPIC; it went into LAPIC 0
+            this.reset_secondary_apics();
+        }
     }
     else
     {
-        const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
         dbg_assert(state instanceof Uint8Array);
-        dbg_assert(state.length === apic.length); // later versions might need to handle state upgrades here
-        apic.set(state);
+
+        if(state.length === APIC_STRUCT_SIZE && this.smp_cpus > 1)
+        {
+            // single-LAPIC image restored into a multi-vCPU machine: LAPIC 0
+            // gets the image, the others return to power-on state
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+            apic.set(state);
+            this.reset_secondary_apics();
+        }
+        else if(state.length === this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), state.length);
+            apic.set(state);
+        }
+        else
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state.length +
+                " (expected " + this.smp_cpus * APIC_STRUCT_SIZE + ")");
+        }
     }
 };
 

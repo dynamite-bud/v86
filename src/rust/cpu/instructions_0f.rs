@@ -30,6 +30,7 @@ use crate::cpu::misc_instr::{
 use crate::cpu::misc_instr::{lar, lsl, verr, verw};
 use crate::cpu::misc_instr::{lss16, lss32};
 use crate::cpu::sse_instr::*;
+use crate::cpu::vcpu;
 
 #[no_mangle]
 pub unsafe fn instr16_0F00_0_mem(addr: i32) {
@@ -1290,8 +1291,11 @@ pub unsafe fn instr_0F32() {
         IA32_PLATFORM_ID => {},
         IA32_APIC_BASE => {
             if *acpi_enabled {
-                // the single CPU is the bootstrap processor
-                low = APIC_MEM_ADDRESS as i32 | IA32_APIC_BASE_BSP;
+                low = APIC_MEM_ADDRESS as i32;
+                if vcpu::current() == 0 {
+                    // only vCPU 0 is the bootstrap processor
+                    low |= IA32_APIC_BASE_BSP;
+                }
                 if *apic_enabled {
                     low |= IA32_APIC_BASE_EN
                 }
@@ -3250,9 +3254,8 @@ pub unsafe fn instr_0FA2() {
         1 => {
             eax = 3 | 7 << 4 | 6 << 8; // pentium3
 
-            // XWAH-9: bits 31:24 are the initial APIC ID of the current CPU;
-            // always 0 (BSP) until per-CPU APIC IDs arrive
-            let initial_apic_id = 0;
+            // XWAH-9: bits 31:24 are the initial APIC ID of the current CPU
+            let initial_apic_id = vcpu::current() as i32;
             // initial apic id, logical cpu count, clflush size
             ebx = initial_apic_id << 24 | (smp_cpus << 16) as i32 | 8 << 8;
             ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
@@ -3331,9 +3334,8 @@ pub unsafe fn instr_0FA2() {
         0xB => {
             // XWAH-9: extended topology enumeration (Intel SDM vol. 2A);
             // Linux prefers this leaf over leaves 1/4 when cpuid_level >= 0xB
-            // x2APIC ID of the current logical processor; always 0 (BSP) until
-            // per-CPU APIC IDs arrive
-            let x2apic_id = 0;
+            // x2APIC ID of the current logical processor
+            let x2apic_id = vcpu::current() as i32;
             match read_reg32(ECX) as u32 {
                 0 => {
                     // SMT level: one logical processor per core
