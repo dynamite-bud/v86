@@ -75,6 +75,29 @@ export function CPU(bus, wm, stop_idling)
 
     this.wasm_memory = memory;
 
+    // XWAH-9 Phase 3 Stage 5: under guest_memory_backend "imported" guest
+    // RAM is a separate WebAssembly.Memory (created by starter.js before
+    // instantiation) rather than a region of the module's linear memory
+    this.guest_memory = this.wm.guest_memory || null;
+
+    if(this.guest_memory)
+    {
+        if(!this.wm.exports["set_guest_memory_shared"])
+        {
+            // only multimem builds export this; a default artifact would
+            // silently allocate guest RAM in its own linear memory instead
+            throw new Error("guest_memory_backend \"imported\" requires the multimem wasm artifact " +
+                "(build/v86-multimem[-debug].wasm), but the loaded module is a default build");
+        }
+        if(typeof SharedArrayBuffer !== "undefined" && this.guest_memory.buffer instanceof SharedArrayBuffer)
+        {
+            // must precede the first JIT compile: generated modules declare
+            // their "e"."g" guest-memory import shared to match the actual
+            // memory (LinkError otherwise)
+            this.wm.exports["set_guest_memory_shared"](1);
+        }
+    }
+
     this.memory_size = view(Uint32Array, memory, 812, 1);
 
     this.mem8 = new Uint8Array(0);
@@ -333,6 +356,14 @@ CPU.prototype.create_jit_imports = function()
     const jit_imports = Object.create(null);
 
     jit_imports["m"] = this.wm.exports["memory"];
+
+    if(this.wm.guest_memory)
+    {
+        // multimem build: JIT-generated modules are two-memory modules that
+        // import guest RAM as "e"."g" (memidx 1) next to the instance
+        // memory "e"."m" (src/rust/wasmgen/wasm_builder.rs)
+        jit_imports["g"] = this.wm.guest_memory;
+    }
 
     for(const name of Object.keys(this.wm.exports))
     {
@@ -1182,6 +1213,32 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.memory_size[0] = size;
 
     const memory_offset = this.allocate_memory(size);
+
+    if(this.guest_memory)
+    {
+        // imported backend: guest RAM is the imported guest memory and
+        // guest-physical addresses are 0-based offsets into it
+        dbg_assert(memory_offset === 0, "imported guest RAM is 0-based");
+
+        const buffer = this.guest_memory.buffer;
+        // starter.js created the memory one wasm page larger than the
+        // (identically normalised) memory size: the JIT slow-path scratch
+        // pages live at [size, size + 0x2000) (memory.rs
+        // gram_jit_scratch_base)
+        if(size + 0x2000 > buffer.byteLength)
+        {
+            throw new Error("Imported guest memory too small: memory_size=" + size +
+                " + jit scratch does not fit in " + buffer.byteLength + " bytes");
+        }
+        dbg_assert(size + 0x10000 === buffer.byteLength,
+            "starter.js and create_memory disagree about the guest memory size");
+
+        // direct views, not the view() proxy: the guest memory is created
+        // with maximum == initial, so its buffer can never grow or detach
+        this.mem8 = new Uint8Array(buffer, 0, size);
+        this.mem32s = new Uint32Array(buffer, 0, size >> 2);
+        return;
+    }
 
     this.mem8 = view(Uint8Array, this.wasm_memory, memory_offset, size);
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);

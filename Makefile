@@ -215,8 +215,9 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
-# guest-RAM accessor modules for the multimem build (XWAH-9 Phase 3 Stage 3);
-# Stage 5 adds them to the default artifacts
+# guest-RAM accessor modules for the multimem build (XWAH-9 Phase 3 Stage 3).
+# Stage 5's guest_memory_backend "imported" loads them next to the main
+# artifact at runtime; shipping them with release bundles is Stage 6
 build/gram.wasm: gen/generate_gram_wasm.js gen/util.js
 	./gen/generate_gram_wasm.js --output-dir build/ --variant nonshared
 build/gram-shared.wasm: gen/generate_gram_wasm.js gen/util.js
@@ -464,6 +465,19 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/plain-race-vs-atomic.js
 	./tests/threads/shared-view-coherence.js
 
+# multimem variant (XWAH-9 Phase 3 Stage 5, named by design doc §4 Stage 6):
+# the imported-guest-memory backend end-to-end — real guests through the
+# public API plus the Layer B cross-thread test (which threads-test skips
+# unless the multimem artifact happens to exist; here it is a hard
+# dependency). NOTE: the multimem and default builds share the cargo
+# artifact path (see build/v86-multimem.wasm above), so this target
+# invalidates a previous default build's cargo cache and vice versa — the
+# copied build/*.wasm artifacts stay distinct.
+.PHONY: multimem-tests
+multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
+	./tests/api/multimem.js
+	./tests/threads/multimem-instance.js
+
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
@@ -478,9 +492,13 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/smp.js
 	./tests/api/smp-state.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test multimem-tests
 	# Skipping:
 	# - devices-test (hangs)
+	# multimem-tests runs last: its build/v86-multimem-debug.wasm dependency
+	# shares the cargo artifact path with the default build (see the
+	# build/v86-multimem.wasm comment), so ordering it after every
+	# default-artifact consumer avoids extra cargo cache invalidations
 
 eslint:
 	eslint src tests gen lib examples tools

@@ -432,6 +432,32 @@ export interface V86Options {
     wasm_path?: string;
 
     /**
+     * NOTE: Experimental (XWAH-9). Guest RAM backing:
+     * - "linear" (default): guest RAM lives inside the wasm module's own
+     *   linear memory, exactly as before.
+     * - "imported": guest RAM is a separate `WebAssembly.Memory` created
+     *   before instantiation and imported by the wasm side. The default
+     *   loader then loads `v86-multimem.wasm`/`v86-multimem-debug.wasm` and
+     *   the matching `gram.wasm`/`gram-shared.wasm` accessor module from the
+     *   same directory. `wasm_path` still overrides the main artifact path,
+     *   but must then point at a multimem-compatible artifact (the gram
+     *   artifacts are expected next to it).
+     * @default "linear"
+     */
+    guest_memory_backend?: "linear" | "imported";
+
+    /**
+     * NOTE: Experimental (XWAH-9). Only meaningful with
+     * `guest_memory_backend: "imported"`: whether the imported guest memory
+     * is created shared (SharedArrayBuffer-backed, usable from workers).
+     * "auto" follows `crossOriginIsolated` in browsers and SharedArrayBuffer
+     * availability in Node. When the backing is shared, `read_memory`
+     * returns a copy instead of a live view.
+     * @default "auto"
+     */
+    guest_memory_shared?: "auto" | boolean;
+
+    /**
      * The memory size in bytes, should be a power of 2.
      * @example 16 * 1024 * 1024
      * @default 64 * 1024 * 1024
@@ -979,6 +1005,11 @@ export class V86 {
 
     /**
      * Reads data from memory at specified offset.
+     *
+     * Returns a live view of guest RAM, except when guest RAM is backed by
+     * a SharedArrayBuffer (guest_memory_backend "imported" with a shared
+     * memory), where a copy is returned instead: browsers reject SAB-backed
+     * views in APIs like TextDecoder, Blob and fetch.
      *
      * @param offset
      * @param length

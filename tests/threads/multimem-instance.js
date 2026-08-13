@@ -5,24 +5,25 @@
 // disk) while a worker drives concurrent JS-view traffic against a disjoint
 // region of the SAME shared guest RAM (the Phase 4 device/worker shape).
 //
-// GATED: build/v86-multimem-debug.wasm is produced by Stage 4
-// (docs/smp-phase3-design.md §4), which is being implemented on a sibling
-// branch. Until the artifact and the Stage 5 JS integration exist this test
-// skips cleanly (the repo's established missing-artifact pattern).
-//
-// ASSUMPTIONS against the documented Stage 4/5 interfaces — finalize when
-// Stage 4/5 merge (each assumption is asserted or gated, never silent):
-//   A1. Stage 5 adds `options.guest_memory_backend: "imported"` to V86
-//       (design §4 Stage 5) and selects build/v86-multimem-debug.wasm +
-//       gram instantiation itself; detection below greps starter.js for the
-//       option name and skips when the JS integration has not merged.
-//   A2. In Node (no crossOriginIsolated gate) the imported guest memory is
-//       created shared; guest RAM is reachable as a SharedArrayBuffer via
-//       emulator.v86.cpu.mem8.buffer (the retargeted view of AGENTS.md §2 /
-//       design §0 "JS consumers"). If the backing is non-shared the
-//       cross-thread half is skipped with a message.
-//   A3. The public read_memory/write_memory API (v86.d.ts:986/994) stays
-//       routed through the imported memory.
+// build/v86-multimem-debug.wasm (Stage 4) is an optional artifact: the test
+// skips cleanly when it is missing (the repo's established missing-artifact
+// pattern); `make multimem-tests` runs it with the artifact as a hard
+// dependency. The Stage 4/5 interface assumptions this test was written
+// against all landed as assumed (each is asserted or gated, never silent):
+//   A1. Stage 5's `options.guest_memory_backend: "imported"` selects
+//       build/v86-multimem-debug.wasm + gram instantiation itself; the
+//       starter.js grep below is a defensive skip for checkouts where the
+//       artifact exists but the JS integration is absent.
+//   A2. In Node the imported guest memory is created shared by default:
+//       `guest_memory_shared: "auto"` follows crossOriginIsolated in
+//       browsers and SharedArrayBuffer availability in Node. Guest RAM is
+//       reachable as a SharedArrayBuffer via emulator.v86.cpu.mem8.buffer
+//       (direct view over the imported memory). If the backing is
+//       non-shared the cross-thread half is skipped with a message.
+//   A3. The public read_memory/write_memory API (v86.d.ts) stays routed
+//       through the imported memory. read_memory returns a copy when the
+//       backing is a SharedArrayBuffer (Stage 5's S4 copy-first shim);
+//       the content assertions below hold either way.
 //   A4. SeaBIOS POST does not touch the scratch region at 48 MiB of a
 //       64 MiB machine (BIOS works in low memory + top-of-ram tables).
 

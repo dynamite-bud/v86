@@ -309,11 +309,46 @@ with the memory architecture proven on one thread.
   `guest-ram-import`: accessors become extern imports, TLB drops the mem8
   addend, codegen emits memidx-1 fast paths. Targets
   `build/v86-multimem[-debug].wasm`. Existing artifacts untouched.
-- **Stage 5 — JS integration behind an option.**
-  `options.guest_memory_backend: "imported"` (independent of `cpus`);
-  starter creates the memory, instantiates gram.wasm, merges env; cpu.js
-  branches `create_memory`, adds `jit_imports["g"]`, S4 copy-first shims.
-  Default path untouched to the byte.
+- **Stage 5 — JS integration behind an option. LANDED.**
+  `options.guest_memory_backend: "linear" (default) | "imported"`
+  (independent of `cpus`), plus `options.guest_memory_shared: "auto"
+  (default) | true | false` — "auto" follows `crossOriginIsolated` in
+  browsers and SharedArrayBuffer availability in Node (which has no
+  crossOriginIsolated gate), explicit booleans exist so both artifact
+  variants are testable without COI headers. Instantiation order in
+  starter.js: (1) create the guest `WebAssembly.Memory` before anything
+  wasm — size = the same normalisation `create_memory` applies to
+  `options.memory_size` **plus one 64 KiB wasm page** for the JIT slow-path
+  scratch at [memory_size, memory_size + 0x2000), maximum == initial (RAM
+  never grows; shared memories require a maximum); (2) fetch + instantiate
+  the matching gram variant (`gram.wasm`/`gram-shared.wasm` — shared-ness of
+  its memory import must equal the actual memory) over it; (3) merge gram
+  exports + the JS-implemented `env.gram_copy_out` (typed-array copy from
+  guest memory into the instance memory, for the SVGA LFB path) into the
+  `env` handed to `wasm_fn` — custom `wasm_fn`s keep the old signature and
+  receive the merged env; (4) the default loader picks
+  `v86-multimem[-debug].wasm` (an explicit `wasm_path` still wins and must
+  then be multimem-compatible — cpu.js hard-errors on a default artifact;
+  gram artifacts are resolved next to the main artifact; no
+  v86-fallback.wasm fallback for the variant); (5) after `rust_init`, cpu.js
+  calls `set_guest_memory_shared(1)` when the backing is a
+  SharedArrayBuffer, before any JIT compile. cpu.js `create_memory` puts
+  `mem8`/`mem32s` directly over the guest memory (plain views, not the
+  `view()` proxy — the buffer can never grow or detach) and asserts the
+  starter/create_memory size agreement; `jit_imports["g"]` feeds the
+  generated modules' second memory import. The two S4 copy-first shims
+  landed: `read_memory` returns a `.slice()` when the backing is a SAB, the
+  debug memory dump copies before `Blob`; the S4 audit's remaining
+  consumers re-verified clean, with one addition S4 missed: the zstd
+  worker re-instantiates `wasm_source` with a fixed stub list, which the
+  multimem module's gram_* imports outgrew — it now stubs whatever function
+  imports the module declares. Validation (Node): Linux 4 boots to shell
+  and survives a save/restore roundtrip under shared:false and shared:true;
+  time-sliced SMP (cpus: 2, Alpine linux-lts) works unchanged over the
+  imported shared memory (`make multimem-tests`, named by Stage 6, wired
+  into all-tests); the Layer B cross-thread test runs un-gated; the default
+  artifact stays byte-identical (cmp against the Stage 1 baseline) and all
+  default-path suites stay green.
 - **Stage 6 — validation + CI.** All suites against the variant (non-shared
   mode needs no COI, headless CI works); benchmark deltas for interpreter
   and JIT workloads; `make multimem-tests`; embedder docs.
