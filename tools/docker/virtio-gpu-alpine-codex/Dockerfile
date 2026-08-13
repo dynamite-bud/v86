@@ -19,13 +19,18 @@ RUN apk add --no-cache \
     bison \
     build-base \
     flex \
+    elfutils-dev \
+    expat-dev \
     git \
     libdrm-dev \
+    libxrandr-dev \
     mesa-dev \
     meson \
     py3-mako \
     py3-packaging \
-    py3-yaml
+    py3-yaml \
+    zlib-dev \
+    zstd-dev
 COPY mesa-webgpuvirt.patch /tmp/mesa-webgpuvirt.patch
 RUN git clone --depth 1 --branch mesa-26.1.6 \
         https://gitlab.freedesktop.org/mesa/mesa.git /src/mesa && \
