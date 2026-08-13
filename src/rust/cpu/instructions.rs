@@ -7,6 +7,7 @@ use crate::cpu::fpu::*;
 use crate::cpu::global_pointers::*;
 use crate::cpu::misc_instr::*;
 use crate::cpu::string::*;
+use crate::cpu::vcpu;
 use crate::prefix;
 use crate::softfloat::F80;
 
@@ -2185,6 +2186,13 @@ pub unsafe fn instr_F4() {
     if *flags & FLAG_INTERRUPT != 0 {
         js::run_hardware_timers(*acpi_enabled, js::microtick());
         handle_irqs();
+    }
+    else if vcpu::count() > 1 {
+        // hlt with interrupts disabled on one of several vCPUs: park it —
+        // only an INIT/SIPI (or an NMI, unsupported) can revive it. SeaBIOS
+        // parks APs like this. The machine-dead event fires from the
+        // scheduler once every vCPU is parked, not here.
+        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked);
     }
     else {
         // execution can never resume (until NMIs are supported)

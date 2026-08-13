@@ -740,13 +740,23 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
     }
 
     if mode == IOAPIC_DELIVERY_INIT {
-        // TODO: the INIT half of the AP-startup state machine lands in
-        // XWAH-9 stage 3; INIT to the BSP means warm reset, intentionally
-        // not implemented. Kept as a logged no-op for every target.
-        dbg_log!(
-            "APIC: INIT to LAPIC id={:02x} ignored (AP startup/warm reset not implemented)",
-            apic.apic_id >> 24
-        );
+        if target == vcpu::current() {
+            // INIT to the executing vCPU (in practice the BSP) means warm
+            // reset, intentionally not implemented
+            dbg_log!(
+                "APIC: INIT to LAPIC id={:02x} ignored (warm reset not implemented)",
+                apic.apic_id >> 24
+            );
+        }
+        else {
+            // Latch the INIT; the scheduler resets the target to power-on
+            // values and WaitForSipi at the next slice boundary. The
+            // target is not running mid-slice, and deferring avoids
+            // resetting the live block here, under the APIC lock and
+            // mid-instruction of the sending vCPU.
+            dbg_log!("APIC: INIT to LAPIC id={:02x} latched", apic.apic_id >> 24);
+            vcpu::set_pending_init(target);
+        }
         return;
     }
 
@@ -761,15 +771,39 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
     }
 
     if mode == APIC_DELIVERY_STARTUP {
-        // Startup IPI: the vector encodes the real-mode startup page, not an
-        // interrupt vector. The SIPI half of the AP-startup state machine
-        // lands in XWAH-9 stage 3; a SIPI to the already-running BSP has no
-        // effect.
-        dbg_log!(
-            "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} ignored",
-            vector,
-            apic.apic_id >> 24
-        );
+        // Startup IPI: the vector encodes the real-mode startup page, not
+        // an interrupt vector. pending_init counts as WaitForSipi: the
+        // scheduler always applies a latched INIT before a latched SIPI.
+        if !vcpu::ap_startup_enabled() {
+            // Dropped while the firmware CPU counts are still gated; see
+            // vcpu::AP_STARTUP_ENABLED for why honoring it would break
+            // SeaBIOS's unconditional INIT+SIPI broadcast.
+            dbg_log!(
+                "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} dropped (AP startup gated)",
+                vector,
+                apic.apic_id >> 24
+            );
+            return;
+        }
+        if target != vcpu::current()
+            && (vcpu::run_state(target) == vcpu::RunState::WaitForSipi
+                || vcpu::pending_init(target))
+        {
+            dbg_log!(
+                "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} latched",
+                vector,
+                apic.apic_id >> 24
+            );
+            vcpu::set_pending_sipi(target, vector);
+        }
+        else {
+            // SIPI to a running vCPU (the sender included): no effect
+            dbg_log!(
+                "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} ignored",
+                vector,
+                apic.apic_id >> 24
+            );
+        }
         return;
     }
 
@@ -783,6 +817,10 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
     // vector: spurious wakes are harmless, missed wakes hang the guest.
     if target != vcpu::current() {
         vcpu::note_interrupt(target);
+        // The machine may be idling in the host with every vCPU halted;
+        // wake the JS run loop like pic_call_irq does. A spurious
+        // stop_idling is harmless.
+        unsafe { js::stop_idling() };
     }
 
     if register_get_bit(&apic.irr, vector) {

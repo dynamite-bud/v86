@@ -113,6 +113,18 @@ increment, and fw_cfg NB_CPUS/MAX_CPUS size the MADT — so the firmware
 count un-gating (cpu.js) is the LAST stage, only after SIPI works.
 `cpus > 1` requires `acpi: true` (LAPIC MMIO is gated on acpi_enabled).
 
+Stage-3 finding: SeaBIOS broadcasts INIT+SIPI at its AP trampoline
+(0x10000) unconditionally during POST and, when CMOS 0x5F advertises no
+further CPUs, restores the trampoline bytes without waiting. An AP honoring
+that SIPI under gated counts either executes the restored bytes (its first
+slice begins only after the sending BSP's slice ends) or bumps CountCPUs
+past the expected value and hangs the POST spin loop — real hardware fares
+no better with mismatched firmware counts. Startup IPIs are therefore
+dropped until `vcpu::enable_ap_startup()` is called; stage 4 must call it
+from cpu.js together with the firmware count un-gating. INIT stays live in
+stage 3 (the deferred save-area reset is safe and keeps APs in
+WaitForSipi).
+
 ## JS-side impacts
 
 Live cpu.js views show the current vCPU — acceptable, switches happen only
