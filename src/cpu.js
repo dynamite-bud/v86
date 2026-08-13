@@ -1112,11 +1112,16 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            this.fw_value = i32(this.smp_cpus);
+            // XWAH-9: must stay at 1 until startup IPIs actually start
+            // application processors; SeaBIOS spins forever waiting for the
+            // advertised CPUs to come up (verified empirically). smp_cpus is
+            // currently only visible to the guest through cpuid.
+            this.fw_value = i32(1);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
-            this.fw_value = i32(this.smp_cpus);
+            // XWAH-9: see FW_CFG_NB_CPUS
+            this.fw_value = i32(1);
         }
         else if(value === FW_CFG_NUMA)
         {
@@ -1695,8 +1700,10 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
     // QEMU convention: CMOS 0x5F holds the number of additional (application)
-    // processors, i.e. smp_cpus - 1
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.smp_cpus - 1);
+    // processors, i.e. smp_cpus - 1. XWAH-9: must stay at 0 until startup
+    // IPIs actually start application processors; SeaBIOS spins forever
+    // waiting for the advertised CPUs to come up (verified empirically).
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);
