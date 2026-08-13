@@ -91,19 +91,13 @@ static PIC: Mutex<Pic> = Mutex::new(Pic {
     },
 });
 
-fn get_pic() -> MutexGuard<'static, Pic> {
-    PIC.try_lock().unwrap()
-}
+fn get_pic() -> MutexGuard<'static, Pic> { PIC.try_lock().unwrap() }
 
 // called from javascript for saving/restoring state
 #[no_mangle]
-pub fn get_pic_addr_master() -> u32 {
-    &raw mut get_pic().master as u32
-}
+pub fn get_pic_addr_master() -> u32 { &raw mut get_pic().master as u32 }
 #[no_mangle]
-pub fn get_pic_addr_slave() -> u32 {
-    &raw mut get_pic().slave as u32
-}
+pub fn get_pic_addr_slave() -> u32 { &raw mut get_pic().slave as u32 }
 
 impl Pic0 {
     fn get_irq(&mut self) -> Option<u8> {
@@ -149,12 +143,8 @@ impl Pic0 {
         Some(irq_number)
     }
 
-    fn port0_read(self: &Pic0) -> u32 {
-        (if self.read_isr { self.isr } else { self.irr }) as u32
-    }
-    fn port1_read(self: &Pic0) -> u32 {
-        !self.irq_mask as u32
-    }
+    fn port0_read(self: &Pic0) -> u32 { (if self.read_isr { self.isr } else { self.irr }) as u32 }
+    fn port1_read(self: &Pic0) -> u32 { !self.irq_mask as u32 }
 }
 
 impl Pic {
@@ -198,7 +188,8 @@ impl Pic {
             dbg_assert!(v & 2 == 0, "unimplemented: single mode");
             dbg_assert!(v & 8 == 0, "unimplemented: level mode");
             dev.state = 1;
-        } else if v & 8 != 0 {
+        }
+        else if v & 8 != 0 {
             // xxx01xxx
             // ocw3
             dbg_log!("ocw3: {:x}", v);
@@ -212,7 +203,8 @@ impl Pic {
                 dev.special_mask_mode = (v & 0x20) == 0x20;
                 dbg_log!("special mask mode: {}", dev.special_mask_mode);
             }
-        } else {
+        }
+        else {
             // xxx00xxx
             // ocw2
             // end of interrupt
@@ -228,14 +220,17 @@ impl Pic {
                 if PIC_LOG {
                     dbg_log!("new isr: {:x}", dev.isr);
                 }
-            } else if eoi_type == 3 {
+            }
+            else if eoi_type == 3 {
                 // specific eoi
                 dev.isr &= !(1 << (v & 7));
-            } else if eoi_type == 6 {
+            }
+            else if eoi_type == 6 {
                 // os2 v4, freebsd
                 let priority = v & 7;
                 dbg_log!("lowest priority: {:x}", priority);
-            } else {
+            }
+            else {
                 dbg_log!("Unknown eoi: {:x} type={:x}", v, eoi_type);
                 dbg_assert!(false);
                 dev.isr &= dev.isr - 1;
@@ -257,7 +252,8 @@ impl Pic {
                 dbg_log!("icw4: {:x} autoeoi={}", v, dev.auto_eoi);
                 dbg_assert!(v & 0x10 == 0, "unimplemented: nested mode");
                 dbg_assert!(v & 1 == 1, "unimplemented: 8086/88 mode");
-            } else {
+            }
+            else {
                 // ocw1
                 dev.irq_mask = !v;
 
@@ -269,12 +265,14 @@ impl Pic {
                     self.check_irqs_slave()
                 }
             }
-        } else if dev.state == 1 {
+        }
+        else if dev.state == 1 {
             // icw2
             dev.irq_map = v;
             dbg_log!("interrupts are mapped to {:x}", dev.irq_map);
             dev.state += 1;
-        } else if dev.state == 2 {
+        }
+        else if dev.state == 2 {
             // icw3
             dev.state = 0;
             dbg_log!("icw3: {:x}", v);
@@ -285,7 +283,8 @@ impl Pic {
         let is_set = self.slave.get_irq().is_some();
         if is_set {
             self.set_irq(2)
-        } else {
+        }
+        else {
             self.clear_irq(2)
         }
     }
@@ -293,9 +292,7 @@ impl Pic {
 
 // Whether the master PIC is asserting INTR (an unmasked request is
 // pending); used to decide if a device IRQ needs to wake the BSP
-pub fn has_requested_irq() -> bool {
-    get_pic().master.get_irq().is_some()
-}
+pub fn has_requested_irq() -> bool { get_pic().master.get_irq().is_some() }
 
 // called by the cpu
 pub fn pic_acknowledge_irq() -> Option<u8> {
@@ -331,7 +328,8 @@ pub fn pic_acknowledge_irq() -> Option<u8> {
 
     if irq == 2 {
         acknowledge_irq_slave(&mut pic)
-    } else {
+    }
+    else {
         Some(pic.master.irq_map | irq)
     }
 }
@@ -390,43 +388,19 @@ pub fn clear_irq(i: u8) {
     get_pic().clear_irq(i)
 }
 
-pub fn port20_read() -> u32 {
-    get_pic().master.port0_read()
-}
-pub fn port21_read() -> u32 {
-    get_pic().master.port1_read()
-}
+pub fn port20_read() -> u32 { get_pic().master.port0_read() }
+pub fn port21_read() -> u32 { get_pic().master.port1_read() }
 
-pub fn portA0_read() -> u32 {
-    get_pic().slave.port0_read()
-}
-pub fn portA1_read() -> u32 {
-    get_pic().slave.port1_read()
-}
+pub fn portA0_read() -> u32 { get_pic().slave.port0_read() }
+pub fn portA1_read() -> u32 { get_pic().slave.port1_read() }
 
-pub fn port20_write(v: u8) {
-    get_pic().port0_write(0, v)
-}
-pub fn port21_write(v: u8) {
-    get_pic().port1_write(0, v)
-}
+pub fn port20_write(v: u8) { get_pic().port0_write(0, v) }
+pub fn port21_write(v: u8) { get_pic().port1_write(0, v) }
 
-pub fn portA0_write(v: u8) {
-    get_pic().port0_write(1, v)
-}
-pub fn portA1_write(v: u8) {
-    get_pic().port1_write(1, v)
-}
+pub fn portA0_write(v: u8) { get_pic().port0_write(1, v) }
+pub fn portA1_write(v: u8) { get_pic().port1_write(1, v) }
 
-pub fn port4D0_read() -> u32 {
-    get_pic().master.elcr as u32
-}
-pub fn port4D1_read() -> u32 {
-    get_pic().slave.elcr as u32
-}
-pub fn port4D0_write(v: u8) {
-    get_pic().master.elcr = v
-}
-pub fn port4D1_write(v: u8) {
-    get_pic().slave.elcr = v
-}
+pub fn port4D0_read() -> u32 { get_pic().master.elcr as u32 }
+pub fn port4D1_read() -> u32 { get_pic().slave.elcr as u32 }
+pub fn port4D0_write(v: u8) { get_pic().master.elcr = v }
+pub fn port4D1_write(v: u8) { get_pic().slave.elcr = v }
