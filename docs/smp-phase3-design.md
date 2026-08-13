@@ -349,7 +349,17 @@ with the memory architecture proven on one thread.
   into all-tests); the Layer B cross-thread test runs un-gated; the default
   artifact stays byte-identical (cmp against the Stage 1 baseline) and all
   default-path suites stay green.
-- **Stage 6 — validation + CI.** All suites against the variant (non-shared
+- **Stage 6 — validation + benchmarks. MEASURED.** Boot-to-shell
+  (linux3.iso, 3 runs each, Apple M4/Node 24, release artifacts): linear
+  ~1751 ms; imported non-shared ~1595 ms (parity within noise); imported
+  shared ~1960 ms (1.12x). Interpreter-only (DISABLE_JIT): linear ~3257 ms
+  vs imported shared ~5418 ms = 1.66x — above S2's 1.27x projection (the
+  boot path performs more guest-RAM accesses per instruction than the
+  model's 3.3) but within the 2x gate; steady state is ~1.1% interpreted
+  (docs/jit-profile-2026-08.md) so the JIT-on numbers dominate real
+  workloads. The S5 fetch-cache mitigation remains unpromoted. Suite
+  coverage landed with Stage 5 (multimem-tests, threads-test in
+  all-tests); remaining original item: All suites against the variant (non-shared
   mode needs no COI, headless CI works); benchmark deltas for interpreter
   and JIT workloads; `make multimem-tests`; embedder docs.
 
