@@ -72,17 +72,36 @@ const IOAPIC_RESET_STATE: Ioapic = Ioapic {
 
 static IOAPIC: Mutex<Ioapic> = Mutex::new(IOAPIC_RESET_STATE);
 
-pub fn reset() { *get_ioapic() = IOAPIC_RESET_STATE; }
+pub fn reset() {
+    *get_ioapic() = IOAPIC_RESET_STATE;
+}
 
-fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
+fn get_ioapic() -> MutexGuard<'static, Ioapic> {
+    IOAPIC.try_lock().unwrap()
+}
 
 #[no_mangle]
-pub fn get_ioapic_addr() -> u32 { &raw mut *get_ioapic() as u32 }
+pub fn get_ioapic_addr() -> u32 {
+    &raw mut *get_ioapic() as u32
+}
 
 // Takes the whole LAPIC slice: the caller (apic.rs EOI write) already holds
 // the APICS lock, and the re-evaluated interrupt may route into any LAPIC
 pub fn remote_eoi(apics: &mut [apic::Apic], vector: u8) {
     remote_eoi_internal(&mut get_ioapic(), apics, vector);
+}
+
+// Re-run delivery for every line still requesting service. Called after a
+// LAPIC LDR/DFR write: a level line that matched no destination earlier
+// (no remote IRR latched) may be deliverable now. Takes the LAPIC slice
+// like remote_eoi; the caller holds the APICS lock.
+pub fn reevaluate(apics: &mut [apic::Apic]) {
+    let ioapic = &mut *get_ioapic();
+    for i in 0..IOAPIC_IRQ_COUNT as u8 {
+        if ioapic.irr & 1 << i != 0 {
+            check_irq(ioapic, apics, i);
+        }
+    }
 }
 
 fn remote_eoi_internal(ioapic: &mut Ioapic, apics: &mut [apic::Apic], vector: u8) {
@@ -118,8 +137,7 @@ fn check_irq(ioapic: &mut Ioapic, apics: &mut [apic::Apic], irq: u8) {
             // edge: consume the request; a destination mismatch below then
             // loses the interrupt, matching real hardware
             ioapic.irr &= !mask;
-        }
-        else if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
+        } else if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
             dbg_log!("No route: level interrupt and remote IRR still set");
             return;
         }
@@ -135,8 +153,7 @@ fn check_irq(ioapic: &mut Ioapic, apics: &mut [apic::Apic], irq: u8) {
                 destination,
                 destination_mode,
             )
-        }
-        else {
+        } else {
             dbg_assert!(false, "TODO");
             false
         };
@@ -152,7 +169,9 @@ fn check_irq(ioapic: &mut Ioapic, apics: &mut [apic::Apic], irq: u8) {
     }
 }
 
-pub fn set_irq(i: u8) { set_irq_internal(&mut get_ioapic(), &mut apic::get_apics(), i) }
+pub fn set_irq(i: u8) {
+    set_irq_internal(&mut get_ioapic(), &mut apic::get_apics(), i)
+}
 
 fn set_irq_internal(ioapic: &mut Ioapic, apics: &mut [apic::Apic], i: u8) {
     if i as usize >= IOAPIC_IRQ_COUNT {
@@ -183,7 +202,9 @@ fn set_irq_internal(ioapic: &mut Ioapic, apics: &mut [apic::Apic], i: u8) {
     }
 }
 
-pub fn clear_irq(i: u8) { clear_irq_internal(&mut get_ioapic(), i) }
+pub fn clear_irq(i: u8) {
+    clear_irq_internal(&mut get_ioapic(), i)
+}
 
 fn clear_irq_internal(ioapic: &mut Ioapic, i: u8) {
     if i as usize >= IOAPIC_IRQ_COUNT {
@@ -234,8 +255,7 @@ fn read32_internal(ioapic: &mut Ioapic, addr: u32) -> u32 {
                     let value = ioapic.ioredtbl_destination[irq as usize];
                     dbg_log!("IOAPIC Read destination irq={:x} -> {:08x}", irq, value);
                     value
-                }
-                else {
+                } else {
                     let value = ioapic.ioredtbl_config[irq as usize];
                     dbg_log!("IOAPIC Read config irq={:x} -> {:08x}", irq, value);
                     value
@@ -282,8 +302,7 @@ fn write32_internal(ioapic: &mut Ioapic, apics: &mut [apic::Apic], addr: u32, va
                         value >> 24
                     );
                     ioapic.ioredtbl_destination[irq as usize] = value & 0xFF000000;
-                }
-                else {
+                } else {
                     let old_value = ioapic.ioredtbl_config[irq as usize] as u32;
                     ioapic.ioredtbl_config[irq as usize] = (value & !IOAPIC_CONFIG_READONLY_MASK)
                         | (old_value & IOAPIC_CONFIG_READONLY_MASK);

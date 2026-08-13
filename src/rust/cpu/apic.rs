@@ -38,6 +38,7 @@ const IOAPIC_CONFIG_MASKED: u32 = 0x10000;
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
+const IOAPIC_DELIVERY_LOWEST_PRIORITY: u8 = 1;
 
 // Startup IPI (SIPI); exists only in the ICR, not in IOAPIC redirection entries
 const APIC_DELIVERY_STARTUP: u8 = 6;
@@ -165,8 +166,7 @@ fn current(apics: &[Apic]) -> usize {
     dbg_assert!(i < apics.len());
     if i < apics.len() {
         i
-    }
-    else {
+    } else {
         0
     }
 }
@@ -175,7 +175,9 @@ fn current(apics: &[Apic]) -> usize {
 /// JavaScript save/restore. Only stable after set_smp_cpus has sized the
 /// table: the Vec allocates once and is never reallocated.
 #[no_mangle]
-pub fn get_apic_addr() -> u32 { get_apics().as_ptr() as u32 }
+pub fn get_apic_addr() -> u32 {
+    get_apics().as_ptr() as u32
+}
 
 /// Reset every LAPIC except vCPU 0's to power-on state; used by JavaScript
 /// (cpu.set_state_apic) when restoring a single-LAPIC state image into a
@@ -328,17 +330,14 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
             let diff_in_ticks = diff_in_ticks as u64;
             let result = if diff_in_ticks < apic.timer_initial_count as u64 {
                 apic.timer_initial_count - diff_in_ticks as u32
-            }
-            else {
+            } else {
                 let mode = apic.lvt_timer & APIC_TIMER_MODE_MASK;
                 if mode == APIC_TIMER_MODE_PERIODIC {
                     apic.timer_initial_count
                         - (diff_in_ticks % (apic.timer_initial_count as u64 + 1)) as u32
-                }
-                else if mode == APIC_TIMER_MODE_ONE_SHOT {
+                } else if mode == APIC_TIMER_MODE_ONE_SHOT {
                     0
-                }
-                else {
+                } else {
                     dbg_assert!(false, "apic unimplemented timer mode: {:x}", mode);
                     0
                 }
@@ -364,11 +363,32 @@ pub fn write32(addr: u32, value: u32) {
     let mut apics = get_apics();
     let current = current(&apics);
     match addr {
-        // EOI and ICR involve LAPICs beyond the current vCPU's own
+        // EOI, ICR and the logical-destination registers involve LAPICs
+        // beyond the current vCPU's own
         0xB0 => write_eoi(&mut apics, current, value),
+        0xD0 | 0xE0 => write_destination(&mut apics, current, addr, value),
         0x300 => write_icr0(&mut apics, current, value),
         _ => write32_internal(&mut apics[current], addr, value),
     }
+}
+
+// LDR/DFR writes change which interrupts this LAPIC accepts: IOAPIC lines
+// held asserted that found no matching destination before (and thus never
+// latched remote IRR) must be re-evaluated, or they stay wedged until the
+// guest rewrites the redirection entry
+fn write_destination(apics: &mut [Apic], current: usize, addr: u32, value: u32) {
+    match addr {
+        0xD0 => {
+            dbg_log!("Set local destination: {:08x}", value);
+            apics[current].local_destination = value & 0xFF000000;
+        },
+        0xE0 => {
+            dbg_log!("Set destination format: {:08x}", value);
+            apics[current].destination_format = value | 0xFFFFFF;
+        },
+        _ => dbg_assert!(false),
+    }
+    ioapic::reevaluate(apics);
 }
 
 // EOI is per-CPU: it retires the highest in-service vector of the current
@@ -385,8 +405,7 @@ fn write_eoi(apics: &mut [Apic], current: usize, value: u32) {
             // Send eoi to all IO APICs
             ioapic::remote_eoi(apics, highest_isr);
         }
-    }
-    else {
+    } else {
         dbg_log!("Bad eoi: No isr set");
     }
 }
@@ -434,8 +453,7 @@ fn write_icr0(apics: &mut [Apic], current: usize, value: u32) {
             destination,
             destination_mode,
         );
-    }
-    else if destination_shorthand == 1 {
+    } else if destination_shorthand == 1 {
         // self: same mode dispatch as the other shorthands, so INIT/SIPI/NMI
         // to self take the intended ignore paths instead of tripping the
         // fixed-delivery vector assert
@@ -446,14 +464,12 @@ fn write_icr0(apics: &mut [Apic], current: usize, value: u32) {
             delivery_mode,
             is_level,
         );
-    }
-    else if destination_shorthand == 2 {
+    } else if destination_shorthand == 2 {
         // all including self
         for i in 0..apics.len() {
             deliver(&mut apics[i], i, vector, delivery_mode, is_level);
         }
-    }
-    else if destination_shorthand == 3 {
+    } else if destination_shorthand == 3 {
         // all excluding self (SeaBIOS boots APs with INIT then SIPI
         // broadcast in this shorthand)
         for i in 0..apics.len() {
@@ -461,8 +477,7 @@ fn write_icr0(apics: &mut [Apic], current: usize, value: u32) {
                 deliver(&mut apics[i], i, vector, delivery_mode, is_level);
             }
         }
-    }
-    else {
+    } else {
         dbg_assert!(false);
     }
 }
@@ -485,16 +500,6 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 dbg_log!("Set tpr: {:02x}", value & 0xFF);
             }
             apic.tpr = value & 0xFF;
-        },
-
-        0xD0 => {
-            dbg_log!("Set local destination: {:08x}", value);
-            apic.local_destination = value & 0xFF000000;
-        },
-
-        0xE0 => {
-            dbg_log!("Set destination format: {:08x}", value);
-            apic.destination_format = value | 0xFFFFFF;
         },
 
         0xF0 => {
@@ -633,19 +638,16 @@ fn timer(apic: &mut Apic, target: usize, now: f64) -> f64 {
                     diff,
                 );
                 apic.timer_last_tick = now;
-            }
-            else {
+            } else {
                 apic.timer_last_tick += time_per_interrupt;
                 dbg_assert!(apic.timer_last_tick <= now);
             }
-        }
-        else if mode == APIC_TIMER_MODE_ONE_SHOT {
+        } else if mode == APIC_TIMER_MODE_ONE_SHOT {
             if APIC_LOG_VERBOSE {
                 dbg_log!("APIC timer one shot end");
             }
             apic.timer_current_count = 0;
-        }
-        else {
+        } else {
             dbg_assert!(false, "apic unimplemented timer mode: {:x}", mode);
         }
 
@@ -677,10 +679,23 @@ pub fn route(
     destination_mode: u8,
 ) -> bool {
     let mut delivered = false;
-    for i in 0..apics.len() {
-        if lapic_matches_destination(&apics[i], destination, destination_mode) {
+    if mode == IOAPIC_DELIVERY_LOWEST_PRIORITY {
+        // lowest-priority arbitration (Intel SDM vol. 3A): exactly one of
+        // the matching LAPICs receives the interrupt — the one with the
+        // lowest processor priority, ties broken by lowest APIC index
+        let target = (0..apics.len())
+            .filter(|&i| lapic_matches_destination(&apics[i], destination, destination_mode))
+            .min_by_key(|&i| (apics[i].tpr, i));
+        if let Some(i) = target {
             deliver(&mut apics[i], i, vector, mode, is_level);
             delivered = true;
+        }
+    } else {
+        for i in 0..apics.len() {
+            if lapic_matches_destination(&apics[i], destination, destination_mode) {
+                deliver(&mut apics[i], i, vector, mode, is_level);
+                delivered = true;
+            }
         }
     }
 
@@ -704,8 +719,7 @@ fn lapic_matches_destination(apic: &Apic, destination: u8, destination_mode: u8)
     if destination_mode == DESTINATION_MODE_PHYSICAL {
         // physical: the MDA is an APIC ID; 0xFF is broadcast
         destination == DESTINATION_BROADCAST || destination as u32 == apic.apic_id >> 24
-    }
-    else {
+    } else {
         // logical: the MDA is matched against LDR[31:24] under the model
         // selected by DFR[31:28]
         let ldr = (apic.local_destination >> 24) as u8;
@@ -747,8 +761,7 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
                 "APIC: INIT to LAPIC id={:02x} ignored (warm reset not implemented)",
                 apic.apic_id >> 24
             );
-        }
-        else {
+        } else {
             // Latch the INIT; the scheduler resets the target to power-on
             // values and WaitForSipi at the next slice boundary. The
             // target is not running mid-slice, and deferring avoids
@@ -795,8 +808,7 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
                 apic.apic_id >> 24
             );
             vcpu::set_pending_sipi(target, vector);
-        }
-        else {
+        } else {
             // SIPI to a running vCPU (the sender included): no effect
             dbg_log!(
                 "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} ignored",
@@ -832,8 +844,7 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
 
     if is_level {
         register_set_bit(&mut apic.tmr, vector);
-    }
-    else {
+    } else {
         register_clear_bit(&mut apic.tmr, vector);
     }
 }
@@ -903,11 +914,17 @@ fn acknowledge_irq_internal(apic: &mut Apic) -> Option<u8> {
 }
 
 // functions operating on 256-bit registers (for irr, isr, tmr)
-fn register_get_bit(v: &[u32; 8], bit: u8) -> bool { v[(bit >> 5) as usize] & 1 << (bit & 31) != 0 }
+fn register_get_bit(v: &[u32; 8], bit: u8) -> bool {
+    v[(bit >> 5) as usize] & 1 << (bit & 31) != 0
+}
 
-fn register_set_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] |= 1 << (bit & 31); }
+fn register_set_bit(v: &mut [u32; 8], bit: u8) {
+    v[(bit >> 5) as usize] |= 1 << (bit & 31);
+}
 
-fn register_clear_bit(v: &mut [u32; 8], bit: u8) { v[(bit >> 5) as usize] &= !(1 << (bit & 31)); }
+fn register_clear_bit(v: &mut [u32; 8], bit: u8) {
+    v[(bit >> 5) as usize] &= !(1 << (bit & 31));
+}
 
 fn register_get_highest_bit(v: &[u32; 8]) -> Option<u8> {
     dbg_assert!(v.as_ptr().addr() & std::mem::align_of::<u64>() - 1 == 0);
