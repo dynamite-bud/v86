@@ -276,6 +276,10 @@ for(const [variant, filename, shared] of [
     const bytes = build_module(shared);
     assert(WebAssembly.validate(bytes), `${filename} must validate`);
     const file_path = path.join(OUT_DIR, filename);
-    fs.writeFileSync(file_path, bytes);
+    // write-then-rename so concurrent readers (parallel test runs) never
+    // observe a truncated module
+    const tmp_path = file_path + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmp_path, bytes);
+    fs.renameSync(tmp_path, file_path);
     console.log(CYAN_FMT, `[+] Wrote ${filename} (${bytes.length} bytes).`);
 }
