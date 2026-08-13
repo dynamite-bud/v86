@@ -122,6 +122,111 @@ export class WgpuBackend extends VirtioGpuBackend
         return this.invoke("create_resource_2d", desc.resource_id, desc.format, desc.width, desc.height);
     }
 
+    async get3DCapabilities()
+    {
+        if(this.fatal_error || !this.initialized || !this.renderer)
+        {
+            return null;
+        }
+        this.active_calls++;
+        try
+        {
+            const values = await this.renderer["capabilities_3d"]();
+            if(!(values instanceof Uint32Array) || values.length !== 3)
+            {
+                return null;
+            }
+            return {
+                max_texture_dimension_2d: values[0],
+                max_bind_groups: values[1],
+                max_color_attachments: values[2],
+            };
+        }
+        catch(error)
+        {
+            return null;
+        }
+        finally
+        {
+            this.active_calls--;
+        }
+    }
+
+    async createContext3D(context_id)
+    {
+        return this.invoke("create_context_3d", context_id);
+    }
+
+    async destroyContext3D(context_id)
+    {
+        return this.invoke("destroy_context_3d", context_id);
+    }
+
+    async createResource3D(desc)
+    {
+        return this.invoke("create_resource_3d", desc.resource_id, desc.format,
+            desc.width, desc.height);
+    }
+
+    async attachResource3D(context_id, resource_id)
+    {
+        return this.invoke("attach_resource_3d", context_id, resource_id);
+    }
+
+    async detachResource3D(context_id, resource_id)
+    {
+        return this.invoke("detach_resource_3d", context_id, resource_id);
+    }
+
+    async transferToHost3D(upload)
+    {
+        if(!(upload.data instanceof Uint8Array))
+        {
+            throw this.handle_fatal(new TypeError("upload.data must be a Uint8Array"),
+                "transferToHost3D");
+        }
+        return this.invoke("upload_resource_2d", upload.resource_id, upload.x, upload.y,
+            upload.width, upload.height, upload.stride, upload.data);
+    }
+
+    async submit3D(context_id, commands, resource_ids)
+    {
+        if(!(commands instanceof Uint8Array) || !(resource_ids instanceof Uint32Array))
+        {
+            throw this.handle_fatal(new TypeError(
+                "3D commands and resources must be typed arrays"), "submit3D");
+        }
+        if(this.fatal_error)
+        {
+            throw this.fatal_error;
+        }
+        if(!this.initialized || !this.renderer)
+        {
+            throw this.handle_fatal(new Error("WebGPU renderer is not initialized"), "submit3D");
+        }
+
+        this.active_calls++;
+        try
+        {
+            await this.renderer["submit_3d"](context_id, commands, resource_ids);
+            return true;
+        }
+        catch(error)
+        {
+            const message = error && typeof error.message === "string" ?
+                error.message : String(error);
+            if(message.startsWith("invalid:"))
+            {
+                return false;
+            }
+            throw this.handle_fatal(error, "submit3D");
+        }
+        finally
+        {
+            this.active_calls--;
+        }
+    }
+
     async destroyResource(resource_id)
     {
         return this.invoke("destroy_resource", resource_id);

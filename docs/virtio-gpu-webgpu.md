@@ -14,10 +14,15 @@ hardening required for Linux KMS and desktop use:
 - Bounded fragmented guest-backing reads, ordered asynchronous backend submission, and fence-aware replies.
 - Reset/device-loss recovery, serializable 2D state, ready snapshots, hard resource limits, and performance counters.
 - Reproducible Linux KMS plus Xorg/Wayland desktop acceptance through direct JavaScript WebGPU and Rust/Wasm `wgpu`.
+- An opt-in capset-7 basic-render path on the Rust/Wasm backend: standard
+  contexts/resources/transfers, a bounded private submit decoder, one
+  startup-validated immutable WGSL pipeline, and a Linux/libdrm reference
+  triangle.
 
-Capsets, contexts, 3D resources/transfers, `SUBMIT_3D`, blobs, UUIDs,
-host mappings, Mesa, shader translation, virgl compatibility, and Vulkan are
-not implemented or advertised.
+The default device still exposes only standard 2D. Resource blobs, UUIDs, host
+mappings, Mesa, arbitrary guest shaders, shader translation, virgl
+compatibility, Vulkan, and 3D on the direct JavaScript backend are not
+implemented or advertised.
 
 ## Documentation Map
 
@@ -382,27 +387,31 @@ Phase 5 is implemented and guarded as follows:
    surface recovery, validation, and device-loss evidence.
 
 Phase 5 exits through the unit, source/release KMS, and four-scenario browser
-targets listed above. 3D remains explicitly unadvertised.
+targets listed above.
 
-### Future 3D status boundary
+### Experimental 3D status boundary
 
-**Implemented today:** the device advertises `VIRTIO_F_VERSION_1` and
-`VIRTIO_GPU_F_EDID`, reports `num_capsets = 0`, and implements the standard 2D
-path described above. Both browser renderers use WebGPU only to upload and
-present those 2D resources. There is no context, 3D resource, 3D transfer,
-capset, Mesa, shader, or `SUBMIT_3D` implementation; those complete commands
-return `VIRTIO_GPU_RESP_ERR_UNSPEC`. The device does not advertise
-`VIRTIO_GPU_F_VIRGL`, `VIRTIO_GPU_F_CONTEXT_INIT`, resource blobs, or a virgl
-capset.
+**Implemented today:** when `virtio_gpu.experimental_3d` is true and the
+Rust/Wasm `wgpu` backend preflight succeeds, the device advertises capset 7,
+`VIRTIO_GPU_F_VIRGL`, and `VIRTIO_GPU_F_CONTEXT_INIT`. It accepts the exact
+standard command subset and private submit ABI frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md). The Linux/libdrm reference
+utility creates one render target, submits the pinned red triangle, presents it
+through the normal scanout path, and is checked by browser pixels, ordered
+fences, teardown, and device-loss recovery. With the option off, another
+backend selected, or preflight unavailable, `num_capsets` remains zero and the
+device is the existing standard 2D implementation.
 
-Everything below is a future, experimental architecture, not a statement of
-current support. Default configuration must remain the standard 2D device. A
-phase may advertise only the bits, limits, formats, and opcodes whose gate has
-passed; naming an item in this roadmap does not make it available.
+Not implemented: arbitrary guest WGSL or SPIR-V, buffers, bindings, vertex or
+index data, texture sampling, depth/stencil, blending, readback, resource blobs,
+UUIDs, host mappings, Mesa/Gallium, virgl compatibility, or Vulkan. The direct
+JavaScript backend remains 2D-only.
 
-Implementation work for this boundary is tracked in
-[issue #1](https://github.com/dynamite-bud/v86/issues/1). Its first gate is the
-pinned Linux/libdrm capset-7 pass-through spike; Mesa remains out of scope.
+Everything beyond the frozen version-1 wire document is future architecture,
+not a statement of current support. A phase may advertise only the bits,
+limits, formats, and opcodes whose gate has passed; naming an item below does
+not make it available. Implementation work for this boundary is tracked in
+[XWAH-1](https://github.com/dynamite-bud/v86/issues/1).
 
 #### Linux/libdrm capset-7 transport gate
 
@@ -515,6 +524,11 @@ are invalid. Blobs, host mappings, and a second resource-creation ABI are not
 part of version 1.
 
 ### Capset 7, version 1
+
+The implemented Phase 6 byte contract is frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md). The broader limits and
+opcodes below describe the versioned architecture ceiling; version 1 advertises
+only the exact nonzero fields listed in that dedicated wire document.
 
 `GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 1, and maximum size
 912 bytes. `GET_CAPSET(id = 7, version = 1)` returns exactly 912 zero-initialized
@@ -635,12 +649,12 @@ The Phase 6 basic-render opcode set is deliberately small:
 | `0x0015 END_RENDER_PASS` | no payload |
 
 Shader and pipeline IDs are nonzero and unique in separate context-local
-namespaces. Version 1 stages are vertex 1 and fragment 2; IR kinds are WGSL 1
-and SPIR-V 2, and the matching capset IR bit is mandatory. The bootstrap
+namespaces. Implemented version 1 accepts only the two exact WGSL sources
+listed in the frozen wire document; guest records assign handles to the
+immutable pipeline compiled during renderer initialization. The bootstrap
 pipeline has no resource bindings or vertex inputs, uses triangle-list/sample-1
-only, and targets one capset-listed color format. New fixed-layout opcodes,
-not extensions of `CREATE_PIPELINE`, add vertex/index buffers, bindings,
-textures, and later features.
+only, and targets one capset-listed color format. Arbitrary WGSL, SPIR-V, and
+new fixed-layout opcodes require a later capset revision.
 
 Object mutation submits contain only create/destroy records and are fenced.
 The decoder validates and stages all creations before committing any of them.
@@ -657,18 +671,19 @@ ordering, fence replies, generation guards, snapshot policy, and the combined
 2D/3D resource budget. It checks the standard envelope and copies request or
 transfer bytes before any `await`; no guest-memory view crosses the boundary.
 
-Rust/Wasm owns all 3D-only state: the private decoder, context-local shader and
-pipeline tables, WebGPU buffers/textures/views/samplers, Naga translation and
-validation, command encoders, staging/readback buffers, the WebGPU device and
-queue, and renderer error scopes. JavaScript passes only owned bytes and
-already-validated standard descriptors. Rust rechecks sizes, IDs, attachment
-membership, capabilities, and its own allocation accounting before calling
-`wgpu`; WebGPU validation is a final boundary, not the primary parser.
+Rust/Wasm owns the private decoder, context-local immutable-object handle
+tables, the startup-created pipeline, WebGPU textures, command encoders, the
+WebGPU device, and its queue. Naga parses and validates the two pinned WGSL
+sources before negotiation; a 1×1 WebGPU draw probe must complete without a
+device fault. Guest `CREATE_SHADER` compares source bytes exactly and
+`CREATE_PIPELINE` assigns a handle to that immutable host pipeline, so no guest
+shader compilation promise can hold a VirtIO fence. JavaScript passes only
+owned bytes and already-validated standard descriptors. Rust rechecks sizes,
+IDs, attachment membership, capabilities, and its own allocation accounting.
 
 The 2D and 3D paths share one Rust `wgpu::Device` and `wgpu::Queue` so transfers,
 draws, scanout flushes, and fences have one order. The direct JavaScript WebGPU
-backend remains 2D-only until it independently implements the same Rust-owned
-validation contract; selecting it must therefore suppress all 3D negotiation.
+backend remains 2D-only; selecting it suppresses all 3D negotiation.
 
 ### Mesa winsys, Gallium, and shader path
 
@@ -731,11 +746,12 @@ non-finite values are deterministic validation failures.
   snapshot support requires a new snapshot format, readback/replay proof, and
   a later capset version.
 
-### Hard limits and malformed-submit behavior
+### Later-revision hard-limit ceiling
 
-These are compiled ceilings; configuration and adapter limits may only lower
-them, and the capset reports the result:
-
+The table below is an architecture ceiling for later capset revisions, not the
+implemented version-1 contract. The exact version-1 values are frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md); configuration and adapter
+limits may only lower advertised values:
 | Item | Absolute ceiling |
 | --- | ---: |
 | Standard control request / private submit | 1 MiB / 1 MiB |

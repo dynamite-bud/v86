@@ -646,7 +646,7 @@ V86.prototype.continue_init = async function(emulator, options)
         this.serial_adapter && this.serial_adapter.show && this.serial_adapter.show();
         this.virtio_console_adapter && this.virtio_console_adapter.show && this.virtio_console_adapter.show();
 
-        this.v86.init(settings);
+        await this.v86.init(settings);
 
         this.modem && this.modem.initialize();
 

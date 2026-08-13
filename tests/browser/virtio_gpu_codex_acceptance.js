@@ -12,10 +12,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 300000);
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
-const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS || "webgpu-js,wgpu")
+const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
+assert.ok(SCENARIO === "appliance" || SCENARIO === "triangle",
+    `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
+const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
+    (SCENARIO === "triangle" ? "wgpu" : "webgpu-js,wgpu"))
     .split(",")
     .map(value => value.trim())
     .filter(Boolean);
+let last_readiness_state = null;
 for(const renderer of renderers)
 {
     assert.ok(renderer === "webgpu-js" || renderer === "wgpu",
@@ -157,12 +162,20 @@ async function run_scenario(browser_ws, base_url, renderer)
         const url = new URL(
             `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
+        if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
         await cdp.call("Page.navigate", { url: url.href });
         await wait_for(async() => {
             const state = await evaluate(cdp,
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
+                `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
+                `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
+                `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
+                `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
+                `({ id, resources: Array.from(context.resources) })), ` +
+                `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
+            last_readiness_state = state;
             if(state.fatal)
             {
                 const error = new Error(state.fatal);
@@ -174,7 +187,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 const reason = /V86_APPLIANCE_FAILURE=([^\r\n]+)/.exec(state.serial)?.[1] || "unknown";
                 const serial_tail = state.serial.slice(-6000);
                 const error = new Error(
-                    `Appliance readiness contract failed: ${reason}\n${serial_tail}`);
+                    `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
+                    `GPU state: ${JSON.stringify(state.gpu)}`);
                 error.terminal = true;
                 throw error;
             }
@@ -197,6 +211,102 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_height: canvas.height,
             };
         })()`);
+        if(SCENARIO === "triangle")
+        {
+            for(const marker of [
+                "V86_GPU_TRIANGLE_RENDER_NODE=/dev/dri/renderD128",
+                "V86_GPU_TRIANGLE_GET_CAPS=PASS",
+                "V86_GPU_TRIANGLE_CONTEXT_INIT=PASS",
+                "V86_GPU_TRIANGLE_TRANSFER=PASS",
+                "V86_GPU_TRIANGLE_SUBMIT=PASS",
+                "V86_GPU_TRIANGLE_FENCE=PASS",
+                "V86_GPU_TRIANGLE_MODESET=PASS",
+                "V86_GPU_TRIANGLE_READY=PASS",
+                "V86_APPLIANCE_READY=PASS",
+            ])
+            {
+                assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
+            }
+            const rendered = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                const canvas = device.backend.canvas;
+                const rect = canvas.getBoundingClientRect();
+                return {
+                    stats: device.get_performance_stats(),
+                    scanout: device.scanouts[0],
+                    canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
+                    canvas_width: canvas.width,
+                    canvas_height: canvas.height,
+                    rect: {
+                        x: rect.left + window.scrollX,
+                        y: rect.top + window.scrollY,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                };
+            })()`);
+            const pixels = await sample_canvas_screenshot(cdp, rendered);
+            assert.ok(pixels.center[0] > 180 && pixels.center[1] < 100 &&
+                pixels.center[2] < 100, `Triangle center is not red: ${pixels.center}`);
+            assert.ok(pixels.corner[2] > pixels.corner[0] &&
+                pixels.corner[2] > pixels.corner[1],
+                `Triangle clear color is not blue: ${pixels.corner}`);
+            assert.equal(rendered.canvas_visible, true);
+            assert.equal(rendered.canvas_width, rendered.scanout.width);
+            assert.equal(rendered.canvas_height, rendered.scanout.height);
+            for(const command of ["0x202", "0x204", "0x205", "0x207"])
+            {
+                assert.ok((rendered.stats.command_counts[command] || 0) >= 1,
+                    `Missing standard virtio-gpu command ${command}`);
+            }
+            assert.equal(failures.length, 0, failures.join(" | "));
+            const loss = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                device.backend.handle_fatal(
+                    new Error("triangle acceptance injected device loss"), "acceptance");
+                return device.backend.fatal_error?.message || null;
+            })()`);
+            assert.match(loss, /triangle acceptance injected device loss/);
+            await wait_for(async() => evaluate(cdp,
+                "window.emulator.v86.cpu.devices.virtio_gpu.backend.canvas.hidden"),
+                5000, "triangle device-loss VGA fallback");
+            const recovery = await evaluate(cdp, `(async() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                device.reset();
+                await device.backend_ready;
+                const stats = device.get_performance_stats();
+                return {
+                    fatal: device.backend.fatal_error?.message || null,
+                    initialized: device.backend.initialized,
+                    capset: Boolean(device.capset_data),
+                    contexts: stats.live_3d_contexts,
+                    resources: stats.live_3d_resources,
+                    attachments: stats.context_attachments,
+                };
+            })()`);
+            assert.deepEqual(recovery, {
+                fatal: null,
+                initialized: true,
+                capset: true,
+                contexts: 0,
+                resources: 0,
+                attachments: 0,
+            });
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return {
+                renderer,
+                ready_ms: Math.round(ready_ms),
+                triangle: true,
+                center_rgba: rendered.center,
+                corner_rgba: rendered.corner,
+                submit_3d_commands: rendered.stats.command_counts["0x207"],
+                ordered_fence: state.serial.includes("V86_GPU_TRIANGLE_FENCE=PASS"),
+                loss_fallback: true,
+                loss_recovery: recovery.initialized,
+                leaked_3d_objects: recovery.contexts + recovery.resources + recovery.attachments,
+            };
+        }
         for(const marker of [
             "V86_APPLIANCE_ARCH=i686",
             "V86_APPLIANCE_UID=1000",
@@ -338,7 +448,38 @@ async function guest_command(cdp, command, success_marker, failure_marker, timeo
             throw error;
         }
         return serial.includes(success_marker);
+
     }, timeout, success_marker);
+}
+async function sample_canvas_screenshot(cdp, rendered)
+{
+    const screenshot = await cdp.call("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: true,
+        clip: {
+            ...rendered.rect,
+            scale: 1,
+        },
+    });
+    return evaluate(cdp, `(async() => {
+        const image = new Image();
+        image.src = "data:image/png;base64,${screenshot.data}";
+        await image.decode();
+        const copy = document.createElement("canvas");
+        copy.width = image.naturalWidth;
+        copy.height = image.naturalHeight;
+        const context = copy.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0);
+        const center = Array.from(context.getImageData(
+            Math.floor(copy.width / 2), Math.floor(copy.height / 2), 1, 1).data);
+        const corner_x = Math.min(copy.width - 1,
+            Math.max(0, Math.floor(8 * copy.width / ${rendered.canvas_width})));
+        const corner_y = Math.min(copy.height - 1,
+            Math.max(0, Math.floor(8 * copy.height / ${rendered.canvas_height})));
+        const corner = Array.from(context.getImageData(corner_x, corner_y, 1, 1).data);
+        return { center, corner };
+    })()`);
 }
 
 class Cdp
@@ -422,7 +563,10 @@ async function wait_for(predicate, timeout, label)
         }
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-    throw new Error(`Timed out waiting for ${label}${last_error ? `: ${last_error.message}` : ""}`);
+    const diagnostics = last_readiness_state ?
+        `\n${last_readiness_state.serial.slice(-6000)}\n` +
+        `GPU state: ${JSON.stringify(last_readiness_state.gpu)}` : "";
+    throw new Error(`Timed out waiting for ${label}${last_error ? `: ${last_error.message}` : ""}${diagnostics}`);
 }
 
 function find_chrome()

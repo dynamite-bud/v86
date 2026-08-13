@@ -411,6 +411,13 @@ virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 virtio-gpu-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_codex_acceptance.js
 
+virtio-gpu-3d-transport-test: virtio-gpu-unit-test
+	CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+		cargo test --manifest-path tools/virtio-gpu-wgpu/Cargo.toml --target wasm32-unknown-unknown
+
+virtio-gpu-3d-triangle-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
+	V86_CODEX_BROWSER_SCENARIO=triangle ./tests/browser/virtio_gpu_codex_acceptance.js
+
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
@@ -483,5 +490,5 @@ denodoc:
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-capset-probe-test virtio-gpu-browser-test virtio-gpu-ready-snapshot-test \
-	virtio-gpu-codex-browser-test virtio-gpu-kms-image virtio-gpu-desktop-image \
-	virtio-gpu-codex-image
+	virtio-gpu-codex-browser-test virtio-gpu-3d-transport-test virtio-gpu-3d-triangle-test \
+	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image

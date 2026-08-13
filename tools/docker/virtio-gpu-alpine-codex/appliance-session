@@ -42,6 +42,11 @@ if grep -qw 'v86_gpu_capset_probe=1' /proc/cmdline; then
     exec tail -f /dev/null
 fi
 
+if grep -qw 'v86_gpu_triangle=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-triangle >&3 2>&3 || fail triangle
+    exec tail -f /dev/null
+fi
+
 if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
     printf 'V86_APPLIANCE_NETWORK=UNCONFIGURED\n' >&3
 elif [ -e /run/v86-network-ready ] &&

@@ -9,22 +9,28 @@ Implemented and tested today:
 - A modern VirtIO GPU PCI device with one scanout, EDID, display events, controlled resize, and control/cursor virtqueues.
 - Standard 2D resources, fragmented guest backing, transfers, scanout/flush, cursor overlay, fences, reset, snapshots, hard limits, and performance counters.
 - A deterministic in-memory backend for Node tests.
-- Two browser presentation backends: direct JavaScript WebGPU (`webgpu-js`) and Rust/Wasm `wgpu` (`wgpu`). Both currently upload and present standard 2D resources only.
+- Two browser presentation backends: direct JavaScript WebGPU (`webgpu-js`) and Rust/Wasm `wgpu`. Both upload and present standard 2D resources.
 - Reproducible Linux KMS and Alpine XFCE guests, with Xorg and Wayland exercised through both browser backends.
-- An internal, opt-in capset-7 transport probe proving the pinned Linux/libdrm
-  `GET_CAPS` and `CONTEXT_INIT` path. It advertises no rendering capability.
+- An opt-in capset-7 basic-render path on the Rust/Wasm backend. It implements
+  the pinned Linux/libdrm context, resource, transfer, private-submit, and
+  scanout flow for one startup-validated immutable WGSL triangle pipeline.
+- Browser acceptance proves the red triangle and blue clear pixels, ordered
+  fence completion, teardown with zero leaked 3D objects, and device-loss
+  fallback/recovery.
 
 Not implemented:
 
-- Production VirtIO GPU 3D capsets, resources/transfers, `SUBMIT_3D`,
-  resource blobs/UUIDs, host mappings, Mesa/Gallium, shader translation, virgl
-  compatibility, or Vulkan.
-- The default device therefore reports `num_capsets = 0` and does not advertise
-  3D feature bits.
+- Arbitrary guest shaders, SPIR-V, resource bindings, vertex/index buffers,
+  sampled textures, depth/stencil, blending, readback, resource blobs/UUIDs,
+  host mappings, Mesa/Gallium, shader translation, virgl compatibility, Vulkan,
+  or 3D on the direct JavaScript backend.
+- The default device still reports `num_capsets = 0` and does not advertise 3D
+  feature bits. Capset 7 is available only with `experimental_3d: true` and a
+  successful Rust/Wasm backend preflight.
 
-The mandatory Linux/libdrm capset-7 gate has passed. The next XWAH-1 milestone
-is the Rust/Wasm private submit decoder and one reference WebGPU triangle; do
-not start with Mesa.
+The exact implemented byte contract is frozen in
+[`docs/webgpuvirt-wire-v1.md`](../webgpuvirt-wire-v1.md). General guest shader
+compilation requires a later capset revision.
 
 ## Data Flow
 
@@ -49,7 +55,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Abstract/test backend | `src/browser/virtio_gpu_backend.js` | Promise contract and deterministic `MemoryGpuBackend` |
 | Shared browser adapter | `src/browser/virtio_gpu_wgpu_backend.js` | Canvas/VGA lifecycle, dynamic renderer boundary, device-loss handling |
 | Direct renderer | `src/browser/virtio_gpu_webgpu_backend.js` | JavaScript `navigator.gpu` 2D textures, uploads, conversion, presentation |
-| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer; intended host for the first experimental 3D path |
+| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer plus the opt-in pinned-pipeline 3D path |
 | Browser API wiring | `src/browser/starter.js` | Backend selection, options, state integration |
 | Protocol tests | `tests/unit/virtio_gpu_protocol.js` | Wire layouts, commands, malformed input, limits, state, ordering |
 | Renderer tests | `tests/unit/virtio_gpu_webgpu_backend.js` | Direct renderer and shared browser lifecycle |
@@ -66,6 +72,10 @@ The repository build uses Make, Node.js, Rust, Python, and the Closure Compiler.
 
 - Rust stable with `wasm32-unknown-unknown`.
 - `wasm-bindgen` matching `tools/virtio-gpu-wgpu/Cargo.lock`.
+- The committed renderer lock pins `wgpu 30.0.0`
+  (`sha256:6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114`)
+  and `naga 30.0.0`
+  (`sha256:23bf0a141a9ab6f07dbb492db53245e464bc9db42f407772d9ae03d83a2c1033`).
 - A WebGPU-capable Chromium browser.
 - Docker with `linux/386` support and Python `zstandard` only when rebuilding guest images.
 - OpenJDK 17 on the executable `PATH` when rebuilding `build/libv86.mjs`. On Homebrew macOS:
@@ -114,7 +124,8 @@ Review the generated contract against the committed contract. Never commit the g
 | PCI/interrupt or ACPI behavior | `make pci-unit-test acpi-unit-test` |
 | Guest backing/file storage | `make filesystem-unit-test` |
 | Linux KMS path | `make virtio-gpu-test virtio-gpu-test-release` |
-| Capset transport or pinned Linux/libdrm gate | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test` |
+| Capset transport, private submit, or pinned Linux/libdrm path | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test virtio-gpu-3d-transport-test` |
+| Reference triangle guest or browser acceptance | `make virtio-gpu-3d-triangle-test` |
 | Browser backend, canvas lifecycle, resize, cursor, or loss | `make virtio-gpu-browser-test` |
 | Ready-state persistence | `make virtio-gpu-ready-snapshot-test` |
 | Rust renderer | `make virtio-gpu-wgpu`; run `cargo fmt --manifest-path tools/virtio-gpu-wgpu/Cargo.toml -- --check` and the applicable browser tests |
@@ -149,7 +160,7 @@ Review the generated contract against the committed contract. Never commit the g
 - [`docs/virtio-gpu-webgpu.md`](../virtio-gpu-webgpu.md): canonical implemented architecture, protocol invariants, limits, state, browser behavior, and gated 3D design.
 - [`tools/docker/virtio-gpu-alpine/Readme.md`](../../tools/docker/virtio-gpu-alpine/Readme.md): minimal KMS guest build and probe.
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../../tools/docker/virtio-gpu-alpine-desktop/Readme.md): desktop image, launch URLs, snapshots, sessions, and image verification.
-- [XWAH-1](https://github.com/dynamite-bud/v86/issues/1): bounded Phase 6 implementation handoff.
+- [XWAH-1](https://github.com/dynamite-bud/v86/issues/1): completed bounded capset-7 basic-render milestone.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
 

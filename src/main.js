@@ -89,9 +89,14 @@ v86.prototype.restart = function()
     this.cpu.reboot_internal();
 };
 
-v86.prototype.init = function(settings)
+v86.prototype.init = async function(settings)
 {
     this.cpu.init(settings, this.bus);
+    const virtio_gpu = this.cpu.devices.virtio_gpu;
+    if(virtio_gpu)
+    {
+        await virtio_gpu.backend_ready;
+    }
     this.bus.send("emulator-ready");
 };
 
