@@ -249,14 +249,10 @@ V86.prototype.continue_init = async function(emulator, options)
     // guests through cpuid only; firmware CPU counts remain 1 (SeaBIOS hangs
     // waiting for application processors that cannot start yet), so guests
     // still boot and run on a single CPU
-    settings.cpus = options.cpus === undefined ? 1 : options.cpus;
-    dbg_assert(
-        Number.isInteger(settings.cpus) && settings.cpus >= 1 && settings.cpus <= 255,
-        "options.cpus must be an integer between 1 and 255");
-    if(!Number.isInteger(settings.cpus) || settings.cpus < 1 || settings.cpus > 255)
-    {
-        settings.cpus = 1;
-    }
+    const cpus = options.cpus === undefined ? 1 : options.cpus;
+    const cpus_valid = Number.isInteger(cpus) && cpus >= 1 && cpus <= 255;
+    dbg_assert(cpus_valid, "options.cpus must be an integer between 1 and 255");
+    settings.cpus = cpus_valid ? cpus : 1;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
     if(options.virtio_gpu &&

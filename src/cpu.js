@@ -1013,7 +1013,9 @@ CPU.prototype.init = function(settings, device_bus)
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
     this.smp_cpus = settings.cpus || 1;
-    this.set_smp_cpus(this.smp_cpus);
+    // guarded like cpuid_level: keeps new js working against an older
+    // v86.wasm that lacks the export (the topology is then just not visible)
+    this.set_smp_cpus && this.set_smp_cpus(this.smp_cpus);
 
     this.acpi_enabled[0] = +settings.acpi;
 
