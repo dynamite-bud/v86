@@ -456,6 +456,14 @@ rust-test: $(RUST_FILES) build/gram.wasm build/gram-shared.wasm
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
+.PHONY: threads-test
+threads-test: build/gram.wasm build/gram-shared.wasm
+	./tests/threads/atomics-exactness.js
+	./tests/threads/mailbox-protocol.js
+	./tests/threads/multimem-instance.js
+	./tests/threads/plain-race-vs-atomic.js
+	./tests/threads/shared-view-coherence.js
+
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
@@ -470,7 +478,7 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/smp.js
 	./tests/api/smp-state.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	# Skipping:
 	# - devices-test (hangs)
 
