@@ -378,6 +378,25 @@ TextDecoder-on-SAB throws); shared memory max==initial forecloses growth
 allocation now over SAB (pre-existing tax, revisit later); two-artifact
 maintenance until Phase 4 proves the variant.
 
+**Deferred cleanups** (review 2026-08-13; deferred because both sit under
+the byte-identity constraint on the default artifact, so consolidation must
+wait for a round that re-baselines the goldens deliberately):
+
+1. `cpu.rs` slow-jit twin bodies: the `guest-ram-import`
+   `safe_read_slow_jit`/`safe_write_slow_jit` duplicate the default bodies
+   except for the scratch backing. Reviewer's suggestion: collapse each pair
+   into one body parameterized over a scratch-sink abstraction (write byte /
+   write sized / base address) that compiles to the module-linear buffer in
+   the default build and to the guest-memory scratch pages under the
+   feature — mechanical once default-artifact churn is acceptable.
+2. `wasm_builder.rs` parallel emitter/macro families: the guest-memory
+   load/store, atomic, memarg-writer and export-section variants mirror the
+   memidx-0 families. Reviewer's suggestion: fold them into
+   memidx-parameterized emitters (single family taking the target memory
+   index, with the guest wrappers as thin aliases) — same byte-identity
+   caveat, since touching the shared emitters reorders the default build's
+   generated code paths.
+
 ## Addendum: why option B is not "faster in theory" either
 
 Option B's per-access ideal (guest RAM as a plain same-memory load, mem8

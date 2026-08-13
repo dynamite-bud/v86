@@ -4979,11 +4979,33 @@ pub unsafe fn safe_read_slow_jit(
         let scratch = memory::gram_jit_scratch_base();
         dbg_assert!(scratch & 0xFFF == 0);
 
-        for s in addr_low..((addr_low | 0xFFF) + 1) {
-            memory::gram_write8(scratch + (s & 0xFFF), memory::read8(s))
+        // Scratch and guest data both live in the guest memory, so each
+        // contiguous non-mmap half is a single gram_memcpy instead of two
+        // cross-module calls per byte; only mmap halves (device reads) keep
+        // the byte loop. Each half stays within one 4K page and mmap
+        // ranges are MMAP_BLOCK_SIZE-aligned, so in_mapped_range is
+        // uniform across a half.
+        if memory::in_mapped_range(addr_low) {
+            for s in addr_low..((addr_low | 0xFFF) + 1) {
+                memory::gram_write8(scratch + (s & 0xFFF), memory::read8(s))
+            }
         }
-        for s in addr_high..(addr_high + (addr + bitsize / 8 & 0xFFF) as u32) {
-            memory::gram_write8(scratch + (0x1000 | s & 0xFFF), memory::read8(s))
+        else {
+            memory::gram_memcpy(
+                addr_low,
+                scratch + (addr_low & 0xFFF),
+                0x1000 - (addr_low & 0xFFF),
+            );
+        }
+        let high_count = (addr + bitsize / 8 & 0xFFF) as u32;
+        if memory::in_mapped_range(addr_high) {
+            for s in addr_high..(addr_high + high_count) {
+                memory::gram_write8(scratch + (0x1000 | s & 0xFFF), memory::read8(s))
+            }
+        }
+        else {
+            dbg_assert!(addr_high & 0xFFF == 0);
+            memory::gram_memcpy(addr_high, scratch + 0x1000, high_count);
         }
 
         ((scratch as i32) ^ addr) & !0xFFF
