@@ -200,6 +200,7 @@ export interface Event {
         total: number,
         loaded: number,
     };
+    "emulator-error": Error;
     "emulator-loaded": void;
     "emulator-ready": void;
     "emulator-started": void;
@@ -441,7 +442,11 @@ export interface V86Options {
      *   the matching `gram.wasm`/`gram-shared.wasm` accessor module from the
      *   same directory. `wasm_path` still overrides the main artifact path,
      *   but must then point at a multimem-compatible artifact (the gram
-     *   artifacts are expected next to it).
+     *   artifacts are expected next to it). Requires WebAssembly
+     *   multi-memory support; the constructor probes for it and throws
+     *   synchronously on engines without it. Failures after construction
+     *   (e.g. a missing gram artifact) are reported via the
+     *   `"emulator-error"` event. See docs/multicore.md.
      * @default "linear"
      */
     guest_memory_backend?: "linear" | "imported";
@@ -695,7 +700,9 @@ export interface V86Options {
      * (XWAH-9): the firmware advertises all CPUs and secondary CPUs boot,
      * multiplexed on a single host thread (no parallelism). Values above 1
      * require `acpi: true` — the local APIC is gated on acpi — and are
-     * clamped to 1 without it.
+     * clamped to 1 without it. State images saved with `cpus > 1` use state
+     * format version 7 and only restore into a machine constructed with the
+     * same `cpus` value. See docs/multicore.md.
      * @default 1
      */
     cpus?: number;
