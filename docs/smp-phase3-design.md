@@ -54,28 +54,140 @@ backing is a separate artifact behind an option.
 Browser-capability claims must be verified before committing. Each spike is a
 throwaway HTML page + Node script (scratch, servable via `make run-isolated`).
 
-- **S1 — multi-memory validation matrix.** Hand-assemble a module with two
-  imported memories, loads/stores with memidx=1 (memarg flag bit 0x40 + LEB
-  memidx), `memory.copy` across memories, and `i32.atomic.rmw.add` on
-  memidx 1. Instantiate with (a) both non-shared, (b) memory 1 shared.
-  Evidence: pass/fail per engine (Chrome ≥120 / Firefox ≥125 believed to
-  ship multi-memory; Safari uncertain; Node 24 expected pass). Also verify
-  atomics validate on a **non-shared** memory (threads-spec relaxation) —
-  decides whether non-COI mode reuses identical generated code.
-- **S2 — cross-instance call cost.** Instance A exports `read32(addr)` over
-  its memory; instance B imports and loops it vs an in-module load. Prices
-  the interpreter's guest-RAM access under option A. Gate: interpreter
-  workloads within ~2× wall time, else the code-page fetch-cache mitigation
-  (§5) is promoted into scope.
-- **S3 — shared-memory ergonomics.** Shared memory creation with/without
-  crossOriginIsolated; postMessage to a worker; growth with max==initial;
-  `Atomics.wait` in worker + `Atomics.waitAsync` on main thread (for the
-  Phase 4 mailbox). Evidence: behavior matrix.
-- **S4 — SAB-backed view API holes.** Confirm `TextDecoder.decode` throws on
-  SAB-backed views; audit Blob/crypto/ImageData paths near `cpu.mem8`.
-  Evidence: list of JS sites needing a copy-first shim.
+**Stage 0 executed 2026-08-13.** Spike scripts (throwaway, NOT in-repo):
+`/Volumes/Xorcist-SSD/tmp/xwah9-spikes/` — `s1-multimem.mjs`,
+`s2-callcost.mjs`, `s3-shared-ergonomics.mjs` + `s3-worker.mjs`,
+`s4-sab-api-holes.mjs`, and the browser probe `probe.html` +
+`serve-probe.py` (COI headers verified served; renders a DOM PASS/FAIL
+matrix plus a machine-readable `#summary-json` block for an automated pass;
+run once COI-served and once via `python3 -m http.server` for the non-COI
+column). Node results below are Node v24.18.0 / V8 13.6.233.17 on Apple M4
+(arm64); Node shares V8 with Chrome, so these predict Chrome.
+Chrome/Firefox/Safari cells stay **pending browser run** of probe.html.
+
+- **S1 — multi-memory validation matrix.** Hand-assembled module importing
+  TWO memories; memidx-1 loads/stores (memarg flags|0x40, then memidx LEB,
+  then offset LEB — the alternative order flags/offset/memidx does NOT
+  validate); `memory.copy` mem0→mem1 (0xFC 0x0A, dst=1 src=0);
+  `i32.atomic.rmw.add` on memidx 1; `atomic.fence`. Measured
+  (`WebAssembly.validate` + instantiation + executed, asserted results):
+
+  | case | Node 24 / V8 13.6 | Chrome | Firefox | Safari |
+  | --- | --- | --- | --- | --- |
+  | validate: 2 imported memories + memidx-1 load/store/copy/atomics, both non-shared | PASS | pending | pending | pending |
+  | validate: memory 1 imported shared (limits flag 0x03, min==max) | PASS | pending | pending | pending |
+  | validate: atomics targeting non-shared memidx 0 | PASS | pending | pending | pending |
+  | exec: store/load on memidx 1 + address-space isolation from memidx 0 | PASS | pending | pending | pending |
+  | exec: `memory.copy` mem0→mem1 | PASS | pending | pending | pending |
+  | exec: `i32.atomic.rmw.add` on NON-shared memidx 1 (threads-spec relaxation) | PASS | pending | pending | pending |
+  | exec: `atomic.fence` | PASS | pending | pending | pending |
+  | exec: shared memidx 1 — store/load + rmw.add + copy; JS SAB view sees wasm writes | PASS | pending | pending | pending |
+  | link negatives: shared↔non-shared import mismatch rejected both ways (LinkError) | PASS | pending | pending | pending |
+
+  **S1: PASS in V8/Node 24 — multi-memory + shared memidx-1 + atomics all
+  validate and execute**, including atomics on non-shared memory, so
+  non-COI mode reuses identical generated code. Browser matrix pending.
+- **S2 — cross-instance call cost.** Module A imports its memory 0
+  (`"e"."g"` — the gram.wasm shape) and exports `read32(addr)` = i32.load;
+  module B (own private memory) runs an N=100M wasm-side loop summing
+  `read32((i<<2)&0xFFFC)` vs an identical loop with an in-module i32.load.
+  5 runs, checksum-asserted, ns/op:
+
+  | path | guest mem non-shared | guest mem shared |
+  | --- | --- | --- |
+  | cross-instance call `read32` | min 1.494 / median 1.497 | min 1.510 / median 1.519 |
+  | in-module i32.load control | min 0.307 / median 0.308 | min 0.307 / median 0.309 |
+  | Δ call overhead per access | **1.19 ns** | **1.21 ns** |
+
+  Gate math: the no-JIT interpreter runs ~68 MIPS ≈ 14.8 ns/guest
+  instruction (docs/jit-profile-2026-08.md, branch
+  feature/XWAH-11/jit-profiling-baseline, commit 485f65e1). Access model:
+  one `read_imm8` per instruction byte (≈3 bytes/instr) + ~1 data access
+  per ~3 instructions ≈ 3.3 guest-RAM accesses/instr. Projected slowdown =
+  (14.8 + 3.3×1.21)/14.8 ≈ **1.27×** (1.33× even at 4 accesses/instr;
+  breaking the 2× gate would need ≈12 accesses/instr). Shared vs non-shared
+  memory makes no measurable difference to the call cost.
+  **S2: PASS — the ~2× gate holds with ~3× margin in V8**; the §5
+  code-page fetch cache stays OUT of scope. (ns are host-relative — Apple
+  M4 — but the gate is a ratio.)
+- **S3 — shared-memory ergonomics.** Node-verifiable cells measured, all
+  PASS: `new WebAssembly.Memory({initial,maximum,shared:true})` yields a
+  SharedArrayBuffer-backed buffer; shared without `maximum` throws
+  TypeError; with max==initial `grow(0)` returns current size and `grow(1)`
+  throws RangeError (matches "RAM never grows" §5); growing a max>initial
+  shared memory does NOT detach the old SAB (old view keeps old length);
+  `Atomics.waitAsync` exists and resolves `"ok"` after notify; a shared
+  `WebAssembly.Memory` posts to a `worker_threads` worker intact
+  (SAB-backed there), where blocking `Atomics.wait` wakes on main-thread
+  notify and reads the mailbox value — the Phase 4 mailbox pattern
+  (worker blocking wait + main-thread waitAsync) executes end-to-end in
+  V8. Node-only divergence: `Atomics.wait` on the MAIN thread is allowed
+  in Node ("not-equal" immediate return) but throws on browser main
+  threads — probe.html asserts the throw. Browser-pending:
+  `crossOriginIsolated` gating (SAB/shared-Memory availability with and
+  without COOP/COEP) — both columns covered by probe.html.
+- **S4 — SAB-backed view API holes.** Key Node finding: **Node 24 enforces
+  none of the WebIDL `[AllowShared]` restrictions** — `TextDecoder.decode`,
+  `TextEncoder#encodeInto`, `crypto.getRandomValues`, `new Blob([view])`
+  and `structuredClone` all ACCEPT SAB-backed views in Node. The throws
+  are browser-spec behavior (WebIDL BufferSource without `[AllowShared]`),
+  so Node CI cannot catch a missing shim; probe.html asserts the expected
+  browser throws (TextDecoder.decode, getRandomValues, ImageData, Blob),
+  pending browser run. JSON paths are indirect (stringify of a view is
+  harmless key/value output; parse operates on strings — decode is the
+  gate). `structuredClone(sabView)` clones sharing the SAB (legal);
+  `WebAssembly.Module` accepts shared BufferSource.
+
+  Repo audit (full `cpu.mem8`/`read_blob`/`write_blob` consumer sweep,
+  data flow verified per site): only **two** sites feed guest RAM to a
+  SAB-hostile API without an intervening copy —
+  1. `src/browser/starter.js:1589-1592` — `V86.prototype.read_memory`
+     returns the live `cpu.read_blob()` subarray to embedders (typed
+     `Uint8Array` in v86.d.ts:986); any embedder TextDecoder/Blob/fetch
+     use breaks under SAB. **Copy-first shim: return a `.slice()`.**
+     Highest-leverage single fix.
+  2. `src/browser/main.js:3083-3084` — debug "dump memory" wraps the whole
+     `mem8` view in `new Blob(...)` (via lib.js:445-453) uncopied.
+     **Copy-first shim: `mem8.slice()`.**
+  Everything else already copies: every one of the 13 `get_next_blob` call
+  sites allocates a fresh destination buffer (9p.js:286/911/999,
+  virtio_console.js:98/127, virtio_net.js:100/121,
+  virtio_balloon.js:86/101/119, virtio_gpu.js:359-361), which keeps
+  marshall.js (encode-from-string, decode-from-copy), serial/xterm,
+  networking (WebSocket.send paths), and GPU `writeTexture`/`writeBuffer`
+  clean; dma.js:350 and ide.js:2350 use guest views only as
+  `TypedArray.set` sources (legal with SAB); state.js copies guest RAM via
+  `pack_memory` (cpu.js:1096-1105) before serialization and its
+  TextDecoder path reads zstd scratch in the *module* memory, not guest
+  RAM. The VGA `ImageData` (vga.js:1177-1180, 2520-2524) is backed by
+  `svga_allocate_dest_buffer` in the main module's memory — untouched
+  under option A, and an **independent option-B killer**: `new ImageData`
+  over a shared buffer throws before a pixel is drawn, with no shim short
+  of a per-frame framebuffer copy. `structuredClone` is unused in src/ and
+  lib/. `write_blob`/`mem8.set(...)` (guest RAM as destination) is never
+  SAB-hostile.
+  **S4: two copy-first shims needed (Stage 5), both trivial; browser
+  throw-behavior cells pending probe.html run.**
 - **S5 — only if S1/S2 fail badly**: price option B for real (nightly
-  build-std attempt). Not otherwise needed.
+  build-std attempt). **Not triggered** — S1 clean, S2 passes with ~3×
+  margin.
+
+**Stage 0 verdict: GO for option A** on V8/Node 24 evidence. Everything
+option A structurally depends on is proven in V8: multi-memory modules with
+a shared memidx 1 validate and execute (S1); atomics validate on non-shared
+memory, so one generated-code shape serves COI and non-COI (S1); the
+interpreter's cross-instance accessor cost projects to ~1.27× — far inside
+the 2× gate, keeping the §5 fetch-cache mitigation out of scope (S2); the
+Phase 4 worker-mailbox primitives work end-to-end (S3); and the SAB API-hole
+surface is exactly two copy-first shims (S4). Remaining browser-pending:
+(a) the S1 multi-memory matrix in Chrome/Firefox and especially Safari —
+Safari remains the real go/no-go unknown for shipping the variant beyond
+Chromium/Gecko, but it gates only browser rollout, not Stages 1–4, which
+are Rust/wasm_builder/Node-testable; (b) S3 crossOriginIsolated gating
+cells; (c) S4 browser throw-behavior confirmations (Node provably cannot
+test these — shim regressions need a browser check, not Node CI). All are
+covered by loading `probe.html` (COI-served and plain-served) and reading
+the DOM matrix / `#summary-json`.
 
 ## 2. Option analysis
 
