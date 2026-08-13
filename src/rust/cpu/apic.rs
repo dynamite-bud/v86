@@ -178,6 +178,18 @@ fn current(apics: &[Apic]) -> usize {
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { get_apics().as_ptr() as u32 }
 
+/// Reset LAPIC i to power-on state: per the SDM, an INIT returns the LAPIC
+/// to its power-up state except the APIC ID (reset_state re-derives the ID
+/// from i). Locks the APIC table internally so the caller
+/// (process_pending_init_sipi) stays lock-free.
+pub fn reset_one(i: usize) {
+    let mut apics = get_apics();
+    dbg_assert!(i < apics.len());
+    if i < apics.len() {
+        apics[i] = reset_state(i);
+    }
+}
+
 /// Reset every LAPIC except vCPU 0's to power-on state; used by JavaScript
 /// (cpu.set_state_apic) when restoring a single-LAPIC state image into a
 /// machine with more than one vCPU.
@@ -365,21 +377,26 @@ pub fn write32(addr: u32, value: u32) {
     let mut apics = get_apics();
     let current = current(&apics);
     match addr {
-        // EOI, ICR and the logical-destination registers involve LAPICs
-        // beyond the current vCPU's own
+        // EOI, ICR and the routing registers (APIC ID, LDR, DFR) involve
+        // LAPICs beyond the current vCPU's own
         0xB0 => write_eoi(&mut apics, current, value),
-        0xD0 | 0xE0 => write_destination(&mut apics, current, addr, value),
+        0x20 | 0xD0 | 0xE0 => write_routing_register(&mut apics, current, addr, value),
         0x300 => write_icr0(&mut apics, current, value),
         _ => write32_internal(&mut apics[current], addr, value),
     }
 }
 
-// LDR/DFR writes change which interrupts this LAPIC accepts: IOAPIC lines
-// held asserted that found no matching destination before (and thus never
-// latched remote IRR) must be re-evaluated, or they stay wedged until the
-// guest rewrites the redirection entry
-fn write_destination(apics: &mut [Apic], current: usize, addr: u32, value: u32) {
+// APIC ID, LDR and DFR writes change which interrupts this LAPIC accepts:
+// IOAPIC lines held asserted that found no matching destination before (and
+// thus never latched remote IRR) must be re-evaluated, or they stay wedged
+// until the guest rewrites the redirection entry
+fn write_routing_register(apics: &mut [Apic], current: usize, addr: u32, value: u32) {
     match addr {
+        0x20 => {
+            // the APIC ID lives in bits 31:24; the register stores the raw value
+            dbg_log!("APIC write id: {:08x} (apic id {:02x})", value, value >> 24);
+            apics[current].apic_id = value;
+        },
         0xD0 => {
             dbg_log!("Set local destination: {:08x}", value);
             apics[current].local_destination = value & 0xFF000000;
@@ -469,18 +486,22 @@ fn write_icr0(apics: &mut [Apic], current: usize, value: u32) {
             is_level,
         );
     }
-    else if destination_shorthand == 2 {
-        // all including self
-        for i in 0..apics.len() {
-            deliver(&mut apics[i], i, vector, delivery_mode, is_level);
-        }
-    }
-    else if destination_shorthand == 3 {
-        // all excluding self (SeaBIOS boots APs with INIT then SIPI
-        // broadcast in this shorthand)
-        for i in 0..apics.len() {
-            if i != current {
+    else if destination_shorthand == 2 || destination_shorthand == 3 {
+        // 2: all including self; 3: all excluding self (SeaBIOS boots APs
+        // with INIT then SIPI broadcast in this shorthand)
+        let is_candidate = |i: usize| destination_shorthand == 2 || i != current;
+        if delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY {
+            // broadcast shorthands arbitrate like route(): exactly one of
+            // the candidates receives a lowest-priority interrupt
+            if let Some(i) = arbitrate_lowest_priority(apics, is_candidate) {
                 deliver(&mut apics[i], i, vector, delivery_mode, is_level);
+            }
+        }
+        else {
+            for i in 0..apics.len() {
+                if is_candidate(i) {
+                    deliver(&mut apics[i], i, vector, delivery_mode, is_level);
+                }
             }
         }
     }
@@ -491,12 +512,6 @@ fn write_icr0(apics: &mut [Apic], current: usize, value: u32) {
 
 fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
     match addr {
-        0x20 => {
-            // the APIC ID lives in bits 31:24; the register stores the raw value
-            dbg_log!("APIC write id: {:08x} (apic id {:02x})", value, value >> 24);
-            apic.apic_id = value;
-        },
-
         0x30 => {
             // version
             dbg_log!("APIC write version: {:08x}, ignored", value);
@@ -690,12 +705,9 @@ pub fn route(
 ) -> bool {
     let mut delivered = false;
     if mode == IOAPIC_DELIVERY_LOWEST_PRIORITY {
-        // lowest-priority arbitration (Intel SDM vol. 3A): exactly one of
-        // the matching LAPICs receives the interrupt — the one with the
-        // lowest processor priority, ties broken by lowest APIC index
-        let target = (0..apics.len())
-            .filter(|&i| lapic_matches_destination(&apics[i], destination, destination_mode))
-            .min_by_key(|&i| (apics[i].tpr, i));
+        let target = arbitrate_lowest_priority(apics, |i| {
+            lapic_matches_destination(&apics[i], destination, destination_mode)
+        });
         if let Some(i) = target {
             deliver(&mut apics[i], i, vector, mode, is_level);
             delivered = true;
@@ -722,6 +734,29 @@ pub fn route(
         );
     }
     delivered
+}
+
+// Lowest-priority arbitration (Intel SDM vol. 3A): among the candidate
+// LAPICs, exactly one receives the interrupt — the Runnable vCPU with the
+// lowest processor priority, ties broken by lowest APIC index. vCPUs that
+// are not Runnable (parked, or APs that never left WaitForSipi) are
+// excluded: their TPR is stuck at the power-on 0, which would win every
+// arbitration and wedge a level-triggered line behind a context that never
+// acknowledges (its remote IRR would latch forever). If no candidate is
+// Runnable, the full candidate set arbitrates instead — an interrupt must
+// not vanish because every matching vCPU is parked.
+fn arbitrate_lowest_priority(
+    apics: &[Apic],
+    is_candidate: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    (0..apics.len())
+        .filter(|&i| is_candidate(i) && vcpu::is_runnable(i))
+        .min_by_key(|&i| (apics[i].tpr, i))
+        .or_else(|| {
+            (0..apics.len())
+                .filter(|&i| is_candidate(i))
+                .min_by_key(|&i| (apics[i].tpr, i))
+        })
 }
 
 // xAPIC destination matching per the Intel SDM vol. 3A, "Determining IPI
@@ -766,9 +801,9 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
     }
 
     if mode == IOAPIC_DELIVERY_INIT {
-        if target == vcpu::current() {
-            // INIT to the executing vCPU (in practice the BSP) means warm
-            // reset, intentionally not implemented
+        if target == 0 {
+            // INIT to the BSP (vCPU 0 by architecture) means warm reset,
+            // intentionally not implemented
             dbg_log!(
                 "APIC: INIT to LAPIC id={:02x} ignored (warm reset not implemented)",
                 apic.apic_id >> 24
@@ -776,10 +811,10 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
         }
         else {
             // Latch the INIT; the scheduler resets the target to power-on
-            // values and WaitForSipi at the next slice boundary. The
-            // target is not running mid-slice, and deferring avoids
-            // resetting the live block here, under the APIC lock and
-            // mid-instruction of the sending vCPU.
+            // values and WaitForSipi at the next slice boundary, outside
+            // the APIC lock and the sender's mid-instruction context. The
+            // target may be the sender itself (AP self-INIT): consumption
+            // handles a current-vCPU target (see process_pending_init_sipi).
             dbg_log!("APIC: INIT to LAPIC id={:02x} latched", apic.apic_id >> 24);
             vcpu::set_pending_init(target);
         }

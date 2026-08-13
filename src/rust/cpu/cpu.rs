@@ -3429,10 +3429,13 @@ unsafe fn vcpu_in_hlt(i: usize) -> bool {
 // Apply latched INIT/SIPI IPIs (docs/smp-phase2-design.md §AP startup).
 // INIT resets the target's save area to power-on values via the live block
 // and parks it in WaitForSipi; a SIPI then patches the real-mode entry
-// point into the save area and makes the target Runnable. apic::deliver
-// only latches for non-current targets, and the current vCPU changes only
-// in the scheduler after this ran, so the targets are never the current
-// vCPU when their latch is consumed.
+// point into the save area and makes the target Runnable. An INIT latch's
+// target may be the current vCPU (an AP that INIT'd itself): switch_to(i)
+// is then a no-op and reset_vcpu_block resets the live block, which is
+// exactly the target's own state. A SIPI latch is never consumed with its
+// target current: apic::deliver ignores self-SIPI, so the latch was set
+// while another vCPU ran, and that vCPU (not the WaitForSipi target) is
+// still current at the next slice boundary — apply_sipi may assert this.
 unsafe fn process_pending_init_sipi() {
     let count = vcpu::count();
     let resume = vcpu::current();
@@ -3441,6 +3444,10 @@ unsafe fn process_pending_init_sipi() {
         if vcpu::take_pending_init(i) {
             vcpu::switch_to(i);
             reset_vcpu_block();
+            // per the SDM, INIT also returns the target's LAPIC to its
+            // power-up state except the APIC ID. reset_one locks the APIC
+            // table internally; no APIC lock is held here.
+            apic::reset_one(i);
             vcpu::set_run_state(i, vcpu::RunState::WaitForSipi);
             vcpu::clear_wake_pending(i);
             switched = true;
@@ -4650,19 +4657,30 @@ unsafe fn pic_call_irq(interrupt_nr: u8) {
     call_interrupt_vector(interrupt_nr as i32, false, None);
 }
 
+// Wake the BSP after any PIC state change that may newly assert INTR —
+// device IRQ raise, but also port writes (OCW1 unmask included): the
+// 8259's ExtINT line wires to the BSP (vCPU 0), which may not be the
+// current vCPU, and the machine may be idling in the host with the BSP
+// halted, so mirror apic::deliver's cross-vCPU wake. Waking only when the
+// 8259 is actually asserting INTR avoids two context switches and TLB
+// flushes per masked device IRQ for nothing; spurious wakes are harmless,
+// missed wakes hang the guest.
+unsafe fn wake_bsp_if_pic_requested() {
+    if vcpu::count() > 1 && pic::has_requested_irq() {
+        vcpu::note_interrupt(0);
+        if vcpu_in_hlt(0) {
+            js::stop_idling();
+        }
+    }
+}
+
 #[no_mangle]
 unsafe fn device_raise_irq(i: u8) {
     pic::set_irq(i);
     if *acpi_enabled {
         ioapic::set_irq(i);
     }
-    if vcpu::count() > 1 && pic::has_requested_irq() {
-        // the PIC leg wires to the BSP: wake it when the 8259 is actually
-        // asserting INTR (the ioapic route noted wakes for matched APIC
-        // targets already); waking on masked requests would force two
-        // context switches and TLB flushes per device IRQ for nothing
-        vcpu::note_interrupt(0);
-    }
+    wake_bsp_if_pic_requested();
     handle_irqs()
 }
 
@@ -4704,6 +4722,9 @@ pub fn io_port_write8(port: i32, value: i32) {
                     0x4D1 => pic::port4D1_write(value as u8),
                     _ => dbg_assert!(false),
                 };
+                // covers every port-driven PIC state change, e.g. an AP
+                // unmasking an already-requested line via OCW1
+                wake_bsp_if_pic_requested();
                 handle_irqs()
             },
             _ => js::io_port_write8(port, value),

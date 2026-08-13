@@ -73,7 +73,8 @@ deadline. `deliver(i, ..)` sets `wake_pending[i]` and calls `stop_idling()`.
 Save/restore: `get_apic_addr()` returns the contiguous array base;
 `get_state_apic` returns N structs (N=1 → byte-identical to today's
 state[46]); restore accepts a 1-struct image into LAPIC 0 + resets the rest,
-throws StateLoadError on other mismatches. No STATE_VERSION bump.
+throws StateLoadError on other mismatches. No STATE_VERSION bump for
+cpus=1 images (see §JS-side impacts for the cpus>1 version).
 
 ## Scheduler, hlt, IRQ wake
 
@@ -140,7 +141,10 @@ header + the raw N × `Vcpu` array (1216-byte save area + run_state/wake/
 INIT/SIPI latches, 1221 bytes each, repr(C) in vcpu.rs), captured via
 `vcpu_prepare_save`/`get_vcpu_state_addr/size` after `store_current_tsc`
 so the region agrees with the per-field slots; cpus=1 state images stay
-byte-identical, STATE_VERSION stays 6. Restore pre-validates the slot in
+byte-identical at STATE_VERSION 6, while an image that carries the vcpu
+slot (cpus>1) is written with version 7 — restore accepts 6 and 7, so
+builds without SMP support reject cpus>1 images cleanly at the version
+check instead of failing mid-restore. Restore pre-validates the slot in
 the same fail-fast block as the APIC blob (missing slot on a cpus>1
 machine, header/machine cpus mismatch, bad length/current index and
 out-of-range run_state discriminants all throw StateLoadError before any
@@ -150,8 +154,8 @@ block and resetting the scheduler rotation), and lets the per-field
 restores overwrite the live block — region-first so live-block fields
 without individual slots (e.g. `apic_enabled`) come from the image, while
 `set_state`'s trailing `update_state_flags`/`full_clear_tlb` cover the
-implicit switch. Documented risk: older builds silently ignore slot 93
-when restoring an experimental cpus>1 image.
+implicit switch. The version-7 header keeps older builds from silently
+ignoring slot 93: they fail the version check up front.
 
 ## Testing
 

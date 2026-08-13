@@ -7,7 +7,7 @@
 // vCPU is currently swapped in.
 
 use crate::cpu::cpu::CS;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 // The fixed CPU-state block. BLOCK_END must stay in sync with the last field
@@ -92,6 +92,11 @@ const _: () = assert!(std::mem::size_of::<Vcpu>() == BLOCK_SIZE + 5);
 static VCPUS: Mutex<Vec<Vcpu>> = Mutex::new(Vec::new());
 static mut CURRENT: usize = 0;
 
+// Mirror of VCPUS.len(), written only by init(): count() runs per
+// main_loop iteration and per device IRQ, so it must not take the VCPUS
+// lock on every call
+static VCPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 // Whether a Startup IPI may actually start an AP. Armed exclusively by
 // init() when it sizes the table with more than one vCPU, making the wasm
 // module the single authority for "SMP enabled": the firmware-visible CPU
@@ -155,6 +160,7 @@ pub fn init(n: usize) {
         });
     }
     unsafe { CURRENT = 0 };
+    VCPU_COUNT.store(vcpus.len(), Ordering::Relaxed);
     // Single authority for "SMP enabled" (see AP_STARTUP_ENABLED): sizing
     // the table is the one place that arms or disarms AP startup
     AP_STARTUP_ENABLED.store(n > 1, Ordering::Relaxed);
@@ -256,10 +262,24 @@ pub fn apply_sipi(i: usize, vector: u8) {
 
 pub fn current() -> usize { unsafe { CURRENT } }
 
-/// Number of vCPUs; 0 until set_smp_cpus has sized the table.
-pub fn count() -> usize { VCPUS.try_lock().unwrap().len() }
+/// Number of vCPUs; 0 until set_smp_cpus has sized the table. Lock-free:
+/// reads the atomic mirror of the table length, so hot callers (main_loop,
+/// device_raise_irq) never touch the VCPUS lock.
+pub fn count() -> usize { VCPU_COUNT.load(Ordering::Relaxed) }
 
 pub fn run_state(i: usize) -> RunState { VCPUS.try_lock().unwrap()[i].run_state }
+
+/// Whether vCPU i is Runnable. Indices outside the table (only possible
+/// before set_smp_cpus has sized it, while apic.rs runs on its implicit
+/// single fallback context) count as Runnable so interrupt arbitration
+/// never treats that context as parked.
+pub fn is_runnable(i: usize) -> bool {
+    VCPUS
+        .try_lock()
+        .unwrap()
+        .get(i)
+        .map_or(true, |vcpu| vcpu.run_state == RunState::Runnable)
+}
 
 pub fn set_run_state(i: usize, run_state: RunState) {
     VCPUS.try_lock().unwrap()[i].run_state = run_state
