@@ -246,3 +246,39 @@ one it speeds up:
 Whole-system: A wins or ties on the hot path, loses measurably only in the
 interpreter (S2 quantifies), and avoids B's toolchain and correctness
 overhauls.
+
+## Addendum 2: where atomics do and don't appear under option A
+
+"Atomics" means three different things here, treated differently:
+
+1. **Toolchain atomics** (`-C target-feature=+atomics`, `--shared-memory`,
+   rebuilt std): NOT used — that is the point of A. The flag exists to make
+   Rust's own memory (statics, heap, stack, mutexes, allocator) safe when
+   the module's linear memory is shared between threads. Under A each
+   worker's linear memory is private, so the stable-toolchain non-atomic
+   build stays correct.
+2. **Wasm atomic instructions on the guest memory**: used, but only from
+   modules we hand-emit, and only starting in Phase 4 when the LOCK prefix
+   becomes real: JIT modules (wasm_builder gains `i32.atomic.rmw.*` +
+   `atomic.fence` emitters with memidx 1) for LOCK-prefixed instructions,
+   implicitly-locked XCHG, and atomic page-table A/D updates; gram.wasm
+   gains `gram_atomic_*` exports so the interpreter's `safe_read_write` RMW
+   path gets the same semantics; JS `Atomics` serve the Phase-4 mailbox,
+   doorbells, and hlt parking. Ordinary guest MOVs stay plain loads/stores —
+   the wasm threads model permits racy plain accesses to shared memory;
+   only the operations x86 defines as atomic/ordering points become wasm
+   atomics.
+3. **Phase 3 itself executes zero atomic instructions** — one thread, the
+   shared memory is just a container. The only contact is spike S1
+   validating `i32.atomic.rmw` on an imported-shared memidx-1 memory NOW so
+   Phase 4 cannot discover an engine gap after the memory architecture
+   ships. Stage 2's emitters can land the atomic opcodes inertly alongside
+   the memidx loads.
+
+Forward risk for the Phase 4 list (not Phase 3 scope): x86 guests assume
+TSO memory ordering; wasm plain accesses on weakly-ordered hosts (ARM Macs
+included) are weaker. QEMU MTTCG faced exactly this; the options are
+fences/acquire-release on guest accesses (costly) or MTTCG's calculated
+default risk. Under option A this is purely a codegen decision in files we
+own (codegen.rs + the gram generator) — another reason the "we emit every
+shared-memory access ourselves" property is worth protecting.
