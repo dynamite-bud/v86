@@ -44,6 +44,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `profile` | Starts the appliance only for the automatic tty1 login. |
 | `appliance-session` | Architecture, privilege, network, DRM, process, renderer, and serial readiness/failure contract. |
 | `virtio-gpu-capset-probe.c` | Direct pinned-libdrm `GET_CAPS` and `CONTEXT_INIT` proof for private capset ID 7. |
+| `ghostty-terminal-benchmark.c` | Offline fixed ANSI/scroll workload, guest CPU accounting, keyboard synchronization, and serial run markers for the XWAH-5 baseline. |
 | `probe-world.lock` | Exact direct build-only packages for the capset probe. |
 | `probe-packages.lock` | Complete sorted capset-probe builder package closure; the build rejects drift. |
 | `xinitrc` | Openbox, llvmpipe, 1024x768 mode, Ghostty, and Codex process startup. |
@@ -172,6 +173,36 @@ V86_GPU_CAPSET7_CONTEXT_INIT=PASS capset=7
 This proves that pinned Linux and libdrm preserve provisional capset ID 7. It
 does not provide 3D resources, shaders, submits, Mesa acceleration, or a public
 emulator option. Normal boots remain the standard 2D appliance.
+
+## XWAH-5 llvmpipe Baseline
+
+The opt-in `benchmark=1` boot mode replaces the Codex child process with the
+offline `/usr/local/bin/v86-ghostty-benchmark` workload. Normal appliance boots
+remain unchanged. The benchmark emits 512 scrolling ANSI lines and a stable
+24-line terminal reference, waits for browser acknowledgement after WebGPU
+presentations quiesce, and records aggregate non-idle guest CPU ticks from
+`/proc/stat`.
+
+Run two warmups and five measured runs on port 8082:
+
+```sh
+V86_CODEX_BROWSER_OUTPUT=tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json \
+V86_CODEX_BENCHMARK_MACHINE=apple-m4-10c \
+make virtio-gpu-codex-benchmark
+```
+
+The committed Apple M4/Chrome 151 llvmpipe baseline records 91,743 ms graphical
+readiness, 1,900/3,250 ms guest CPU p50/p95, and 1,478/1,877.4 ms
+keystroke-to-first-present p50/p95. Every measured run produced the same
+`bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5`
+terminal pixel hash. Each run issued two 2D transfers and two flushes, uploaded
+and presented 6,291,456 bytes, reported zero invalid/backend commands, and
+retained zero 3D objects. The five runs reported no browser long tasks or WebGPU
+validation errors.
+
+This is the XWAH-5 comparison baseline, not a performance claim. The future
+accelerated run must use the same workload, machine/browser/build, raw-run
+schema, and terminal hash.
 
 ## Verification
 

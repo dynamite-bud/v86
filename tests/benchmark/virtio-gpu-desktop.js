@@ -629,3 +629,14 @@ function sleep(delay_ms)
 {
     return new Promise(resolve => setTimeout(resolve, delay_ms));
 }
+
+
+export {
+    capture_diagnostics,
+    machine_info,
+    publish_result,
+    sleep,
+    start_health_metrics,
+    stats,
+    wait_until,
+};

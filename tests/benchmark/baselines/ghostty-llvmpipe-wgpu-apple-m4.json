@@ -1,0 +1,480 @@
+{
+  "result": "pass",
+  "port": 8082,
+  "scenarios": [
+    {
+      "schema_version": 1,
+      "status": "pass",
+      "scenario": {
+        "appliance": "openbox-ghostty-codex",
+        "renderer": "wgpu",
+        "guest_renderer": "llvmpipe",
+        "accelerated_3d": false
+      },
+      "machine": {
+        "label": "apple-m4-10c",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+        "platform": "MacIntel",
+        "hardware_concurrency": 10,
+        "device_memory_gib": 16,
+        "device_pixel_ratio": 1,
+        "webgpu_adapter": {
+          "vendor": "apple",
+          "architecture": "metal-3"
+        },
+        "captured_at": "2026-08-13T10:42:48.809Z",
+        "url": "http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&acceptance=1786617619704&benchmark=1&benchmark_machine=apple-m4-10c"
+      },
+      "method": {
+        "workload": "Ghostty PTY consumes a fixed ANSI stream, 512 scrolling lines, and a 24-line reference frame",
+        "synchronization": "two warmups plus five keyboard-triggered runs; each run acknowledges after WebGPU presentations quiesce",
+        "readiness": "V86_APPLIANCE_READY=PASS plus V86_GHOSTTY_BENCHMARK_READY=PASS",
+        "warmup_runs": 2,
+        "measured_runs": 5,
+        "presentation_quiet_ms": 250,
+        "readiness_ms": 91743
+      },
+      "summary": {
+        "guest_cpu_ms": {
+          "count": 5,
+          "total": 12060,
+          "mean": 2412,
+          "p50": 1900,
+          "p95": 3250,
+          "max": 3250
+        },
+        "keystroke_to_present_ms": {
+          "count": 5,
+          "total": 8029.099999904633,
+          "mean": 1605.8199999809265,
+          "p50": 1478,
+          "p95": 1877.4000000953674,
+          "max": 1877.4000000953674
+        },
+        "output_to_last_present_ms": {
+          "count": 5,
+          "total": 8029.099999904633,
+          "mean": 1605.8199999809265,
+          "p50": 1478,
+          "p95": 1877.4000000953674,
+          "max": 1877.4000000953674
+        },
+        "text_throughput_mib_s": {
+          "count": 5,
+          "total": 0.1758299639431284,
+          "mean": 0.03516599278862568,
+          "p50": 0.03768174993491786,
+          "p95": 0.0390066020490745,
+          "max": 0.0390066020490745
+        },
+        "scroll_throughput_lines_s": {
+          "count": 5,
+          "total": 1692.2019045804477,
+          "mean": 338.44038091608957,
+          "p50": 362.65223274695535,
+          "p95": 375.4027174799696,
+          "max": 375.4027174799696
+        }
+      },
+      "terminal_reference_sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5",
+      "raw_runs": [
+        {
+          "run": 1,
+          "guest_cpu_ms": 3190,
+          "keystroke_to_present_ms": 1801.7999999523163,
+          "output_to_last_present_ms": 1801.7999999523163,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.03090999356492535,
+          "scroll_throughput_lines_s": 297.48029748817015,
+          "host_elapsed_ms": 3449.199999809265,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 4,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6291456,
+            "upload_bytes": 6291456,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 0,
+            "fence_wait_ms": 0,
+            "guest_copy_ms": 0.7000002861022949,
+            "upload_wait_ms": 0.2999997138977051,
+            "present_wait_ms": 0.20000028610229492,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "command_counts": {
+              "0x105": 2,
+              "0x104": 2
+            },
+            "live_resources": 3,
+            "resource_memory_bytes": 6307840,
+            "backing_entries": 216,
+            "live_3d_contexts": 0,
+            "live_3d_resources": 0,
+            "context_attachments": 0
+          },
+          "browser_health": {
+            "raf": {
+              "count": 205,
+              "rate_hz": 59.43407167207937,
+              "interval_ms": {
+                "count": 205,
+                "total_ms": 3416.7000000000116,
+                "mean_ms": 16.66682926829274,
+                "p95_ms": 18.10000000000582,
+                "max_ms": 18.70000000001164
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 68,
+                "total_ms": 144,
+                "mean_ms": 2.1176470588235294,
+                "p95_ms": 4.8999998569488525,
+                "max_ms": 5.400000095367432
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 2,
+          "guest_cpu_ms": 1900,
+          "keystroke_to_present_ms": 1478,
+          "output_to_last_present_ms": 1478,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.03768174993491786,
+          "scroll_throughput_lines_s": 362.65223274695535,
+          "host_elapsed_ms": 3471.0999999046326,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 4,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6291456,
+            "upload_bytes": 6291456,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 0,
+            "fence_wait_ms": 0,
+            "guest_copy_ms": 0.6999998092651367,
+            "upload_wait_ms": 0.3000001907348633,
+            "present_wait_ms": 0.10000014305114746,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "command_counts": {
+              "0x105": 2,
+              "0x104": 2
+            },
+            "live_resources": 3,
+            "resource_memory_bytes": 6307840,
+            "backing_entries": 216,
+            "live_3d_contexts": 0,
+            "live_3d_resources": 0,
+            "context_attachments": 0
+          },
+          "browser_health": {
+            "raf": {
+              "count": 208,
+              "rate_hz": 59.92336723393585,
+              "interval_ms": {
+                "count": 208,
+                "total_ms": 3466.5999999999767,
+                "mean_ms": 16.666346153846042,
+                "p95_ms": 18.39999999999418,
+                "max_ms": 18.60000000000582
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 69,
+                "total_ms": 140.19999933242798,
+                "mean_ms": 2.0318840482960576,
+                "p95_ms": 4.699999809265137,
+                "max_ms": 5
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 3,
+          "guest_cpu_ms": 1890,
+          "keystroke_to_present_ms": 1427.7999999523163,
+          "output_to_last_present_ms": 1427.7999999523163,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.0390066020490745,
+          "scroll_throughput_lines_s": 375.4027174799696,
+          "host_elapsed_ms": 3443,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 4,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6291456,
+            "upload_bytes": 6291456,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 0,
+            "fence_wait_ms": 0,
+            "guest_copy_ms": 0.5999999046325684,
+            "upload_wait_ms": 0.40000009536743164,
+            "present_wait_ms": 0.20000004768371582,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "command_counts": {
+              "0x105": 2,
+              "0x104": 2
+            },
+            "live_resources": 3,
+            "resource_memory_bytes": 6307840,
+            "backing_entries": 216,
+            "live_3d_contexts": 0,
+            "live_3d_resources": 0,
+            "context_attachments": 0
+          },
+          "browser_health": {
+            "raf": {
+              "count": 205,
+              "rate_hz": 59.54109787975602,
+              "interval_ms": {
+                "count": 205,
+                "total_ms": 3416.600000000006,
+                "mean_ms": 16.666341463414664,
+                "p95_ms": 18,
+                "max_ms": 18.5
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 68,
+                "total_ms": 139.89999961853027,
+                "mean_ms": 2.057352935566622,
+                "p95_ms": 4.199999809265137,
+                "max_ms": 4.700000047683716
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 4,
+          "guest_cpu_ms": 3250,
+          "keystroke_to_present_ms": 1877.4000000953674,
+          "output_to_last_present_ms": 1877.4000000953674,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.02966529583518669,
+          "scroll_throughput_lines_s": 285.50122508403774,
+          "host_elapsed_ms": 3374.2999999523163,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 4,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6291456,
+            "upload_bytes": 6291456,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 0,
+            "fence_wait_ms": 0,
+            "guest_copy_ms": 0.5000002384185791,
+            "upload_wait_ms": 0.5999999046325684,
+            "present_wait_ms": 0,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "command_counts": {
+              "0x105": 2,
+              "0x104": 2
+            },
+            "live_resources": 3,
+            "resource_memory_bytes": 6307840,
+            "backing_entries": 216,
+            "live_3d_contexts": 0,
+            "live_3d_resources": 0,
+            "context_attachments": 0
+          },
+          "browser_health": {
+            "raf": {
+              "count": 202,
+              "rate_hz": 59.86426814535001,
+              "interval_ms": {
+                "count": 202,
+                "total_ms": 3366.7000000000116,
+                "mean_ms": 16.666831683168375,
+                "p95_ms": 18.29999999998836,
+                "max_ms": 18.5
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 67,
+                "total_ms": 143.09999990463257,
+                "mean_ms": 2.1358208940989933,
+                "p95_ms": 4.5,
+                "max_ms": 6.5
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 5,
+          "guest_cpu_ms": 1830,
+          "keystroke_to_present_ms": 1444.0999999046326,
+          "output_to_last_present_ms": 1444.0999999046326,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.03856632255902401,
+          "scroll_throughput_lines_s": 371.1654317813151,
+          "host_elapsed_ms": 3358.2000000476837,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 4,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6291456,
+            "upload_bytes": 6291456,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 0,
+            "fence_wait_ms": 0,
+            "guest_copy_ms": 0.5,
+            "upload_wait_ms": 0.7000000476837158,
+            "present_wait_ms": 0.09999990463256836,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "command_counts": {
+              "0x105": 2,
+              "0x104": 2
+            },
+            "live_resources": 3,
+            "resource_memory_bytes": 6307840,
+            "backing_entries": 216,
+            "live_3d_contexts": 0,
+            "live_3d_resources": 0,
+            "context_attachments": 0
+          },
+          "browser_health": {
+            "raf": {
+              "count": 200,
+              "rate_hz": 59.555714369948234,
+              "interval_ms": {
+                "count": 200,
+                "total_ms": 3333.2999999999884,
+                "mean_ms": 16.666499999999942,
+                "p95_ms": 18.29999999998836,
+                "max_ms": 18.699999999982538
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 66,
+                "total_ms": 143.80000019073486,
+                "mean_ms": 2.178787881677801,
+                "p95_ms": 5.1000001430511475,
+                "max_ms": 6.700000047683716
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        }
+      ],
+      "failures": {
+        "backend_fatal": null,
+        "renderer_fault": null,
+        "console_or_window_messages": [],
+        "validation_message_count": 0
+      }
+    }
+  ]
+}

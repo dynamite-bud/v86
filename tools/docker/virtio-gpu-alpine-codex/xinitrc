@@ -2,6 +2,11 @@
 
 openbox --sm-disable >/tmp/v86-openbox.log 2>&1 &
 openbox_pid=$!
+benchmark_mode=false
+if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
+    benchmark_mode=true
+fi
+
 
 attempt=0
 while [ "$attempt" -lt 100 ]; do
@@ -25,7 +30,13 @@ ghostty_pid=$!
 attempt=0
 while [ "$attempt" -lt 900 ]; do
     kill -0 "$ghostty_pid" 2>/dev/null || break
-    if pidof codex >/dev/null; then
+    application_ready=false
+    if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
+        application_ready=true
+    elif ! $benchmark_mode && pidof codex >/dev/null; then
+        application_ready=true
+    fi
+    if $application_ready; then
         touch /tmp/v86-appliance-ui-ready
         wait "$ghostty_pid"
         status=$?

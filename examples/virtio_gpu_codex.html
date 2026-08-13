@@ -130,6 +130,14 @@ const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
 const relay_url = params.get("relay");
 const shader = params.get("shader") === "1";
 const triangle = params.get("triangle") === "1" || shader;
+const benchmark_enabled = params.get("benchmark") === "1";
+const benchmark_runner = benchmark_enabled ?
+    (await import("../tests/benchmark/virtio-gpu-codex.js"))
+        .create_virtio_gpu_codex_benchmark({
+            renderer,
+            machine: params.get("benchmark_machine"),
+        }) :
+    null;
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -147,6 +155,10 @@ for(const name of ["webgpu-js", "wgpu"])
     {
         url.searchParams.set("relay", relay_url);
     }
+    if(benchmark_enabled)
+    {
+        url.searchParams.set("benchmark", "1");
+    }
     link.href = url.search;
 }
 
@@ -161,7 +173,8 @@ const filesystem_size = 2 * 1024 * 1024 * 1024;
 const width = 1024;
 const height = 768;
 const relay_state = relay_url ? "configured" : "unconfigured";
-const gpu_cmdline = shader ? " v86_gpu_shader=1" : triangle ? " v86_gpu_triangle=1" : "";
+const gpu_cmdline = benchmark_enabled ? " v86_gpu_benchmark=1" :
+    shader ? " v86_gpu_shader=1" : triangle ? " v86_gpu_triangle=1" : "";
 const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
 
 const emulator = new V86({
@@ -199,11 +212,18 @@ const emulator = new V86({
 window.emulator = emulator;
 window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
-status.textContent = shader ?
-    `Booting the capset-7 version-2 guest shader (${renderer_label})…` :
-    triangle ?
-        `Booting the capset-7 reference triangle (${renderer_label})…` :
-        `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
+window.virtioGpuBenchmark = benchmark_runner;
+status.textContent = benchmark_enabled ?
+    `Booting the deterministic Ghostty benchmark (${renderer_label})…` :
+    shader ?
+        `Booting the capset-7 version-2 guest shader (${renderer_label})…` :
+        triangle ?
+            `Booting the capset-7 reference triangle (${renderer_label})…` :
+            `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
+if(benchmark_runner)
+{
+    benchmark_runner.run(emulator);
+}
 
 let serial_text = "";
 let serial_render_pending = false;
@@ -233,7 +253,9 @@ function update_readiness()
     {
         status.textContent = triangle ?
             `Reference triangle is ready (${renderer_label}).` :
-            `Codex is ready in maximized Ghostty (${renderer_label}).`;
+            benchmark_enabled ?
+                `Running the deterministic Ghostty benchmark (${renderer_label})…` :
+                `Codex is ready in maximized Ghostty (${renderer_label}).`;
         document.body.dataset.result = "pass";
         clearInterval(readiness_timer);
     }

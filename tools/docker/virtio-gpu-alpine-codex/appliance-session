@@ -73,19 +73,30 @@ export XDG_SESSION_TYPE=x11
 export LIBGL_ALWAYS_SOFTWARE=1
 export GSK_RENDERER=gl
 
-rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready
+benchmark_mode=false
+if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
+    benchmark_mode=true
+fi
+rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready \
+    /tmp/v86-appliance-benchmark-ready
 startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-appliance.log 2>&1 &
 session_pid=$!
 
 attempt=0
 while [ "$attempt" -lt 900 ]; do
     kill -0 "$session_pid" 2>/dev/null || break
+    application_ready=false
+    if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
+        application_ready=true
+    elif ! $benchmark_mode && pidof codex >/dev/null; then
+        application_ready=true
+    fi
     if [ -e /tmp/v86-appliance-gl-ready ] &&
        [ -e /tmp/v86-appliance-ui-ready ] &&
        [ -S /tmp/.X11-unix/X0 ] &&
        pidof openbox >/dev/null &&
        pidof ghostty >/dev/null &&
-       pidof codex >/dev/null; then
+       $application_ready; then
         renderer=$(sed -n 's/^OpenGL renderer string: //p' /tmp/v86-glxinfo.log | head -n 1)
         opengl_version=$(sed -n 's/^OpenGL version string: //p' /tmp/v86-glxinfo.log | head -n 1)
         printf 'V86_APPLIANCE_XORG=PASS\n' >&3
@@ -94,7 +105,11 @@ while [ "$attempt" -lt 900 ]; do
         printf 'V86_APPLIANCE_OPENBOX=PASS\n' >&3
         printf 'V86_APPLIANCE_GHOSTTY_PROCESS=PASS\n' >&3
         printf 'V86_APPLIANCE_GHOSTTY_WINDOW=PASS\n' >&3
-        printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+        if $benchmark_mode; then
+            printf 'V86_APPLIANCE_BENCHMARK_PROCESS=PASS\n' >&3
+        else
+            printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+        fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"
         exit $?

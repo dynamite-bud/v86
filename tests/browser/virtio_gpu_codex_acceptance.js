@@ -13,7 +13,9 @@ const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 3000
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
-assert.ok(["appliance", "triangle", "shader"].includes(SCENARIO),
+const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
+const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
+assert.ok(["appliance", "triangle", "shader", "benchmark"].includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
@@ -59,7 +61,16 @@ async function main()
         {
             scenarios.push(await run_in_chrome(base_url, renderer));
         }
-        console.log(JSON.stringify({ result: "pass", port: PORT, scenarios }, null, 2));
+        const result = { result: "pass", port: PORT, scenarios };
+        if(OUTPUT_PATH)
+        {
+            const output_file = path.resolve(ROOT, OUTPUT_PATH);
+            assert.ok(output_file.startsWith(ROOT + path.sep),
+                "V86_CODEX_BROWSER_OUTPUT must remain inside the repository");
+            fs.mkdirSync(path.dirname(output_file), { recursive: true });
+            fs.writeFileSync(output_file, JSON.stringify(result, null, 2) + "\n");
+        }
+        console.log(JSON.stringify(result, null, 2));
     }
     finally
     {
@@ -164,6 +175,11 @@ async function run_scenario(browser_ws, base_url, renderer)
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
         if(SCENARIO === "shader") url.searchParams.set("shader", "1");
         else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
+        else if(SCENARIO === "benchmark")
+        {
+            url.searchParams.set("benchmark", "1");
+            if(BENCHMARK_MACHINE) url.searchParams.set("benchmark_machine", BENCHMARK_MACHINE);
+        }
         await cdp.call("Page.navigate", { url: url.href });
         await wait_for(async() => {
             const state = await evaluate(cdp,
@@ -212,7 +228,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_height: canvas.height,
             };
         })()`);
-        if(SCENARIO !== "appliance")
+        if(SCENARIO === "triangle" || SCENARIO === "shader")
         {
             for(const marker of [
                 "V86_GPU_TRIANGLE_RENDER_NODE=/dev/dri/renderD128",
@@ -419,6 +435,44 @@ async function run_scenario(browser_ws, base_url, renderer)
                 loss_recovery: recovery.initialized,
                 leaked_3d_objects: recovery.contexts + recovery.resources + recovery.attachments,
             };
+        }
+        if(SCENARIO === "benchmark")
+        {
+            await wait_for(async() => {
+                const benchmark = await evaluate(cdp,
+                    "window.virtioGpuBenchmark?.result || null");
+                if(benchmark?.status === "fail")
+                {
+                    const error = new Error(benchmark.error || "Ghostty benchmark failed");
+                    error.terminal = true;
+                    throw error;
+                }
+                return benchmark?.status === "pass";
+            }, READY_TIMEOUT_MS, `${renderer} Ghostty benchmark`);
+            const benchmark = await evaluate(cdp,
+                "window.virtioGpuBenchmark.result");
+            assert.equal(benchmark.schema_version, 1);
+            assert.equal(benchmark.scenario.renderer, renderer);
+            assert.equal(benchmark.scenario.guest_renderer, "llvmpipe");
+            assert.equal(benchmark.scenario.accelerated_3d, false);
+            assert.equal(benchmark.method.warmup_runs, 2);
+            assert.equal(benchmark.method.measured_runs, 5);
+            assert.equal(benchmark.raw_runs.length, 5);
+            assert.match(benchmark.terminal_reference_sha256, /^[0-9a-f]{64}$/);
+            for(const run of benchmark.raw_runs)
+            {
+                assert.ok(run.guest_cpu_ms > 0);
+                assert.ok(run.keystroke_to_present_ms >= 0);
+                assert.ok(run.output_bytes > 0);
+                assert.ok(run.output_lines > 0);
+                assert.equal(run.terminal_reference.sha256,
+                    benchmark.terminal_reference_sha256);
+                assert.equal(run.gpu.invalid_commands, 0);
+                assert.equal(run.gpu.backend_errors, 0);
+            }
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return benchmark;
         }
         for(const marker of [
             "V86_APPLIANCE_ARCH=i686",

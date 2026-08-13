@@ -126,6 +126,45 @@ The acceptance harness verifies:
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
 
+## XWAH-5 Rendering Baseline
+
+XWAH-5 begins with an opt-in, offline Ghostty workload rather than an
+acceleration claim. `benchmark=1` launches a fixed ANSI stream inside the same
+maximized Ghostty window, performs two warmups followed by five
+keyboard-triggered measured runs, and preserves the normal 2D/llvmpipe
+appliance as the control.
+
+The browser records graphical readiness, aggregate non-idle guest CPU ticks,
+keystroke-to-first-present latency, text/scroll throughput, VirtIO GPU counters,
+frame cadence, timer delay, long tasks, WebGPU diagnostics, and a full-canvas
+SHA-256 reference. The raw Apple M4/Chrome 151 result is committed at
+`tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json`.
+
+|Metric|llvmpipe baseline|
+|---|---:|
+|Graphical readiness|91,743 ms|
+|Guest CPU p50 / p95|1,900 / 3,250 ms|
+|Keystroke-to-first-present p50 / p95|1,478 / 1,877.4 ms|
+|Scroll throughput p50|362.65 lines/s|
+|Text throughput p50|0.03768 MiB/s|
+|2D commands per run|2 transfers + 2 flushes|
+|Uploaded/presented bytes per run|6,291,456 / 6,291,456|
+|Browser long tasks|0 across five measured runs|
+|WebGPU validation/backend errors|0 / 0|
+|Terminal reference SHA-256|`bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5`|
+
+Run the same baseline with:
+
+```sh
+V86_CODEX_BROWSER_OUTPUT=tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json \
+V86_CODEX_BENCHMARK_MACHINE=apple-m4-10c \
+make virtio-gpu-codex-benchmark
+```
+
+The future `webgpuvirt` result must keep the terminal hash identical and satisfy
+XWAH-5's 20% improvement and 5% non-regression gates before appliance
+acceleration can move beyond experimental status.
+
 ## Observed Authenticated Run
 
 An authenticated run through a configured relay reached `gpt-5.6-sol` and returned a normal Codex response from `/home/codex/workspace`. It also exposed two application-level limitations:

@@ -3,11 +3,13 @@ FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af
 COPY probe-world.lock probe-packages.lock /tmp/
 RUN xargs apk add --no-cache < /tmp/probe-world.lock && \
     apk info -v | sort | cmp - /tmp/probe-packages.lock
-COPY virtio-gpu-capset-probe.c virtio-gpu-triangle.c /tmp/
+COPY ghostty-terminal-benchmark.c virtio-gpu-capset-probe.c virtio-gpu-triangle.c /tmp/
 RUN cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
     /tmp/virtio-gpu-capset-probe.c -o /virtio-gpu-capset-probe && \
     cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
-    /tmp/virtio-gpu-triangle.c -ldrm -o /virtio-gpu-triangle
+    /tmp/virtio-gpu-triangle.c -ldrm -o /virtio-gpu-triangle && \
+    cc -std=c11 -Wall -Wextra -Werror \
+    /tmp/ghostty-terminal-benchmark.c -o /ghostty-terminal-benchmark
 
 FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8
 
@@ -19,6 +21,7 @@ RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
 
 COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-triangle
+COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \
