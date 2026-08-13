@@ -63,7 +63,7 @@ matrix plus a machine-readable `#summary-json` block for an automated pass;
 run once COI-served and once via `python3 -m http.server` for the non-COI
 column). Node results below are Node v24.18.0 / V8 13.6.233.17 on Apple M4
 (arm64); Node shares V8 with Chrome, so these predict Chrome.
-Chrome/Firefox/Safari cells stay **pending browser run** of probe.html.
+Chrome cells filled from an automated probe.html run (Chrome 151, crossOriginIsolated true): all S1 validate/execute cells pass including shared memidx-1 atomics; S3 confirms waitAsync on main, the main-thread Atomics.wait TypeError, and the worker mailbox wake; S4 confirms every copy-first throw, plus one cell Node could not show: TextEncoder#encodeInto ALSO throws on SAB views in Chrome (no v86 call sites feed it guest memory; needs a shim only if one ever appears). Firefox/Safari cells stay pending.
 
 - **S1 — multi-memory validation matrix.** Hand-assembled module importing
   TWO memories; memidx-1 loads/stores (memarg flags|0x40, then memidx LEB,
@@ -74,15 +74,15 @@ Chrome/Firefox/Safari cells stay **pending browser run** of probe.html.
 
   | case | Node 24 / V8 13.6 | Chrome | Firefox | Safari |
   | --- | --- | --- | --- | --- |
-  | validate: 2 imported memories + memidx-1 load/store/copy/atomics, both non-shared | PASS | pending | pending | pending |
-  | validate: memory 1 imported shared (limits flag 0x03, min==max) | PASS | pending | pending | pending |
-  | validate: atomics targeting non-shared memidx 0 | PASS | pending | pending | pending |
-  | exec: store/load on memidx 1 + address-space isolation from memidx 0 | PASS | pending | pending | pending |
-  | exec: `memory.copy` mem0→mem1 | PASS | pending | pending | pending |
-  | exec: `i32.atomic.rmw.add` on NON-shared memidx 1 (threads-spec relaxation) | PASS | pending | pending | pending |
-  | exec: `atomic.fence` | PASS | pending | pending | pending |
-  | exec: shared memidx 1 — store/load + rmw.add + copy; JS SAB view sees wasm writes | PASS | pending | pending | pending |
-  | link negatives: shared↔non-shared import mismatch rejected both ways (LinkError) | PASS | pending | pending | pending |
+  | validate: 2 imported memories + memidx-1 load/store/copy/atomics, both non-shared | PASS | PASS (151) | pending | pending |
+  | validate: memory 1 imported shared (limits flag 0x03, min==max) | PASS | PASS (151) | pending | pending |
+  | validate: atomics targeting non-shared memidx 0 | PASS | PASS (151) | pending | pending |
+  | exec: store/load on memidx 1 + address-space isolation from memidx 0 | PASS | PASS (151) | pending | pending |
+  | exec: `memory.copy` mem0→mem1 | PASS | PASS (151) | pending | pending |
+  | exec: `i32.atomic.rmw.add` on NON-shared memidx 1 (threads-spec relaxation) | PASS | PASS (151) | pending | pending |
+  | exec: `atomic.fence` | PASS | PASS (151) | pending | pending |
+  | exec: shared memidx 1 — store/load + rmw.add + copy; JS SAB view sees wasm writes | PASS | PASS (151) | pending | pending |
+  | link negatives: shared↔non-shared import mismatch rejected both ways (LinkError) | PASS | PASS (151) | pending | pending |
 
   **S1: PASS in V8/Node 24 — multi-memory + shared memidx-1 + atomics all
   validate and execute**, including atomics on non-shared memory, so
