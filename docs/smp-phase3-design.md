@@ -210,3 +210,39 @@ TextDecoder-on-SAB throws); shared memory max==initial forecloses growth
 (acceptable: RAM never grows today); the `view()` Proxy per-access
 allocation now over SAB (pre-existing tax, revisit later); two-artifact
 maintenance until Phase 4 proves the variant.
+
+## Addendum: why option B is not "faster in theory" either
+
+Option B's per-access ideal (guest RAM as a plain same-memory load, mem8
+baked into TLB entries as today) exists only **before** making B correct for
+multiple workers. Making it correct regresses a hotter access class than the
+one it speeds up:
+
+1. B must un-fix the CPU state block and TLB: with one shared memory, the
+   block at 64..1280 and tlb_data/tlb_code are shared, so every worker needs
+   them at a per-worker base — the base-pointer/TLS refactor Phase 2
+   rejected, which turns every JIT'd state access (instruction pointer,
+   flags, register spills, and the tlb_data load on EVERY guest memory
+   access — codegen.rs:666/803/882) from absolute-constant addressing into
+   base+offset with extra register pressure.
+2. On the JIT path — dominant for sustained workloads — A is equal or
+   better: absolute TLB load + memidx-1 data access, vs B's base-relative
+   TLB load + memidx-0 data access. A memidx-1 load in engine-generated
+   machine code is the same load against a different cached base register,
+   not an indirection.
+3. B is genuinely faster only in the interpreter, where A pays a
+   cross-instance call per guest access (read_imm8 worst case). That is the
+   cold path by design; spike S2 measures it, the code-page fetch cache is
+   the scoped mitigation, and a catastrophic S2 result is the one legitimate
+   reason to revisit B (hence S5 keeps it priced).
+4. B carries negative terms of its own: one dlmalloc heap behind a lock
+   (JIT compile Vec traffic contends), the try_lock().unwrap() mutexes
+   (JIT_STATE/APICS/VCPUS/IOAPIC/PIC) become real contended locks, shared
+   statics create cache-line contention, a contended lock on the main thread
+   cannot block, and the JIT cache cannot be shared even under B (wasm
+   tables are per-instance, so table indices baked into compiled code
+   diverge) — B ends up needing per-worker JIT state through TLS anyway.
+
+Whole-system: A wins or ties on the hot path, loses measurably only in the
+interpreter (S2 quantifies), and avoids B's toolchain and correctness
+overhauls.
