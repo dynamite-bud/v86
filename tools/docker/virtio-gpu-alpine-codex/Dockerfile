@@ -3,13 +3,53 @@ FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af
 COPY probe-world.lock probe-packages.lock /tmp/
 RUN xargs apk add --no-cache < /tmp/probe-world.lock && \
     apk info -v | sort | cmp - /tmp/probe-packages.lock
-COPY ghostty-terminal-benchmark.c virtio-gpu-capset-probe.c virtio-gpu-triangle.c /tmp/
+COPY ghostty-terminal-benchmark.c virtio-gpu-capset-probe.c \
+    virtio-gpu-triangle.c virtio-gpu-triangle-spv.h /tmp/
 RUN cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
     /tmp/virtio-gpu-capset-probe.c -o /virtio-gpu-capset-probe && \
     cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
-    /tmp/virtio-gpu-triangle.c -ldrm -o /virtio-gpu-triangle && \
+    /tmp/virtio-gpu-triangle.c -ldrm -lEGL -lGLESv2 -lgbm -o /virtio-gpu-triangle && \
     cc -std=c11 -Wall -Wextra -Werror \
     /tmp/ghostty-terminal-benchmark.c -o /ghostty-terminal-benchmark
+
+FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8 AS mesa-builder
+
+ARG MESA_COMMIT=ffa422e53d59a4938b38abd5c3fc319555da31dd
+RUN apk add --no-cache \
+    bison \
+    build-base \
+    flex \
+    git \
+    libdrm-dev \
+    mesa-dev \
+    meson \
+    py3-mako \
+    py3-packaging \
+    py3-yaml
+COPY mesa-webgpuvirt.patch /tmp/mesa-webgpuvirt.patch
+RUN git clone --depth 1 --branch mesa-26.1.6 \
+        https://gitlab.freedesktop.org/mesa/mesa.git /src/mesa && \
+    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT" && \
+    git -C /src/mesa apply --check /tmp/mesa-webgpuvirt.patch && \
+    git -C /src/mesa apply /tmp/mesa-webgpuvirt.patch && \
+    meson setup /src/mesa/build-webgpuvirt /src/mesa \
+        -Dplatforms=x11 \
+        -Dgallium-drivers=virgl \
+        -Dvulkan-drivers=[] \
+        -Dglx=dri \
+        -Degl=enabled \
+        -Dgles1=disabled \
+        -Dgles2=enabled \
+        -Dllvm=disabled \
+        -Dshared-glapi=enabled \
+        -Dbuild-tests=false \
+        -Dvideo-codecs=[] && \
+    meson compile -C /src/mesa/build-webgpuvirt && \
+    DESTDIR=/opt/webgpuvirt meson install -C /src/mesa/build-webgpuvirt
+
+FROM scratch AS mesa-artifacts
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /lib/
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /lib/dri
 
 FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8
 
@@ -22,6 +62,8 @@ RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
 COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-triangle
 COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /usr/local/lib/
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /usr/local/lib/dri
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \

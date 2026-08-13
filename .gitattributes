@@ -1,2 +1,3 @@
 lib/zstd/* linguist-vendored
 lib/softfloat/* linguist-vendored
+tools/docker/virtio-gpu-alpine-codex/mesa-webgpuvirt.patch -whitespace
