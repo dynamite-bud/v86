@@ -3687,7 +3687,6 @@ pub fn report_safe_write_jit_slow(address: u32, entry: i32) {
         dbg_assert!(false);
     }
 }
-
 #[no_mangle]
 #[cfg(feature = "profiler")]
 pub fn report_safe_read_write_jit_slow(address: u32, entry: i32) {
@@ -3713,11 +3712,12 @@ pub fn report_safe_read_write_jit_slow(address: u32, entry: i32) {
         dbg_assert!(false);
     }
 }
-
+#[cfg(not(feature = "guest-ram-import"))]
 #[repr(align(0x1000))]
 struct ScratchBuffer([u8; 0x1000 * 2]);
+#[cfg(not(feature = "guest-ram-import"))]
 static mut jit_paging_scratch_buffer: ScratchBuffer = ScratchBuffer([0; 2 * 0x1000]);
-
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn safe_read_slow_jit(
     addr: i32,
     bitsize: i32,
@@ -3869,7 +3869,7 @@ pub unsafe fn readable_or_pagefault_jit(addr: i32, size: i32, eip_offset_in_page
     }
     0
 }
-
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn safe_write_slow_jit(
     addr: i32,
     bitsize: i32,
@@ -4920,5 +4920,174 @@ pub unsafe fn get_firmware_cpus() -> u32 {
     }
     else {
         1
+    }
+}
+
+// ---- guest-ram-import twins of the JIT slow paths (XWAH-9 Phase 3 Stage 4) ----
+//
+// Under `guest-ram-import` the JIT fast path loads/stores the imported guest
+// memory (memidx 1), so the scratch area that page-crossing and mmap accesses
+// are redirected to must itself be addressable there: the module-linear
+// `jit_paging_scratch_buffer` is unreachable from a memidx-1 access. These
+// twins mirror the default `safe_read_slow_jit`/`safe_write_slow_jit` above
+// exactly, except that the scratch pages live in the guest memory directly
+// after guest RAM (memory::gram_jit_scratch_base; JS creates the guest memory
+// one wasm page larger than memory_size) and are filled through the gram
+// accessors. Keep them in sync with the default bodies.
+
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn safe_read_slow_jit(
+    addr: i32,
+    bitsize: i32,
+    is_write: bool,
+    eip_offset_in_page_and_wasm_table_index: i32,
+) -> i32 {
+    let wasm_table_index = (eip_offset_in_page_and_wasm_table_index >> 16) as u16;
+    let eip_offset_in_page = eip_offset_in_page_and_wasm_table_index & 0xFFFF;
+    dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
+    dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
+
+    let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
+    let addr_low = match if is_write {
+        translate_address_write_jit(addr, wasm_table_index)
+    }
+    else {
+        translate_address_read_jit(addr)
+    } {
+        Err(()) => {
+            *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+            return 1;
+        },
+        Ok(addr) => addr,
+    };
+    if crosses_page {
+        let boundary_addr = (addr | 0xFFF) + 1;
+        let addr_high = match if is_write {
+            translate_address_write_jit(boundary_addr, wasm_table_index)
+        }
+        else {
+            translate_address_read_jit(boundary_addr)
+        } {
+            Err(()) => {
+                *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+                return 1;
+            },
+            Ok(addr) => addr,
+        };
+        // do read, write into the guest-memory scratch pages
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+
+        for s in addr_low..((addr_low | 0xFFF) + 1) {
+            memory::gram_write8(scratch + (s & 0xFFF), memory::read8(s))
+        }
+        for s in addr_high..(addr_high + (addr + bitsize / 8 & 0xFFF) as u32) {
+            memory::gram_write8(scratch + (0x1000 | s & 0xFFF), memory::read8(s))
+        }
+
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else if memory::in_mapped_range(addr_low) {
+        let scratch = memory::gram_jit_scratch_base();
+
+        match bitsize {
+            128 => memory::gram_write128(scratch + (addr_low & 0xFFF), memory::read128(addr_low)),
+            64 => memory::gram_write64(
+                scratch + (addr_low & 0xFFF),
+                memory::read64s(addr_low) as u64,
+            ),
+            32 => memory::gram_write32(scratch + (addr_low & 0xFFF), memory::read32s(addr_low)),
+            16 => memory::gram_write16(scratch + (addr_low & 0xFFF), memory::read16(addr_low)),
+            8 => memory::gram_write8(scratch + (addr_low & 0xFFF), memory::read8(addr_low)),
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else {
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
+    }
+}
+
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn safe_write_slow_jit(
+    addr: i32,
+    bitsize: i32,
+    value_low: u64,
+    value_high: u64,
+    eip_offset_in_page_and_wasm_table_index: i32,
+) -> i32 {
+    let wasm_table_index = (eip_offset_in_page_and_wasm_table_index >> 16) as u16;
+    let eip_offset_in_page = eip_offset_in_page_and_wasm_table_index & 0xFFFF;
+    dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
+    dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
+
+    let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
+    let addr_low = match translate_address_write_jit(addr, wasm_table_index) {
+        Err(()) => {
+            *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+            return 1;
+        },
+        Ok(x) => x,
+    };
+    if crosses_page {
+        let addr_high = match translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index) {
+            Err(()) => {
+                *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+                return 1;
+            },
+            Ok(x) => x,
+        };
+        // do write, return a guest-memory scratch tag for the fast path's
+        // (discarded) store
+
+        match bitsize {
+            128 => safe_write128(
+                addr,
+                reg128 {
+                    u64: [value_low, value_high],
+                },
+            )
+            .unwrap(),
+            64 => safe_write64(addr, value_low).unwrap(),
+            32 => virt_boundary_write32(
+                addr_low,
+                addr_high | (addr as u32 + 3 & 3),
+                value_low as i32,
+            ),
+            16 => virt_boundary_write16(addr_low, addr_high, value_low as i32),
+            8 => {
+                dbg_assert!(false);
+            },
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else if memory::in_mapped_range(addr_low) {
+        match bitsize {
+            128 => memory::mmap_write128(addr_low, value_low, value_high),
+            64 => memory::mmap_write64(addr_low, value_low),
+            32 => memory::mmap_write32(addr_low, value_low as i32),
+            16 => memory::mmap_write16(addr_low, (value_low & 0xFFFF) as i32),
+            8 => memory::mmap_write8(addr_low, (value_low & 0xFF) as i32),
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else {
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
 }

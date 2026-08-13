@@ -258,6 +258,26 @@ build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Carg
 	cargo rustc --release $(CARGO_FLAGS_SAFE)
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-fallback.wasm || true
 
+# multimem build (XWAH-9 Phase 3 Stage 4): guest RAM is an imported second
+# wasm memory, reached through gram.wasm's accessor exports (`make gram-wasm`)
+# and memidx-1 JIT code. Uses the same cargo artifact path as the default
+# build, so a default and a multimem build invalidate each other's cargo
+# cache; the copied build/*.wasm artifacts stay distinct.
+build/v86-multimem.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+	cargo rustc --release --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-multimem.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-multimem.wasm -o build/v86-multimem.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+
+build/v86-multimem-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
+	cargo rustc --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-multimem-debug.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
+
 debug-with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	cargo rustc --features profiler $(CARGO_FLAGS)

@@ -113,7 +113,7 @@ impl Label {
     const ZERO: Label = Label(0);
     fn next(&self) -> Label { Label(self.0.wrapping_add(1)) }
 }
-
+#[cfg_attr(feature = "guest-ram-import", allow(dead_code))]
 impl WasmBuilder {
     pub fn new() -> Self {
         let mut b = WasmBuilder {
@@ -178,7 +178,7 @@ impl WasmBuilder {
 
         self.write_memory_import();
         #[cfg(any(test, feature = "guest-ram-import"))]
-        if let Some((min_pages, max_pages, shared)) = self.guest_memory_import {
+        if let Some((min_pages, max_pages, shared)) = self.effective_guest_memory_import() {
             self.write_guest_memory_import(min_pages, max_pages, shared);
         }
         self.write_function_section();
@@ -999,6 +999,26 @@ impl WasmBuilder {
         self.guest_memory_import = Some((min_pages, max_pages, shared));
     }
 
+    /// The guest-memory import finish() actually writes. In test builds this
+    /// is whatever set_guest_memory_import configured (None = single-memory
+    /// module, so the existing builder tests keep passing). In the real
+    /// `guest-ram-import` build every generated module must import guest RAM,
+    /// so an unconfigured builder falls back to the permissive declared
+    /// limits (import subtyping accepts any actual memory whose maximum is
+    /// <= the declared maximum, exactly like gram.wasm's import) with the
+    /// runtime shared-ness flag set by JS via set_guest_memory_shared.
+    #[cfg(any(test, feature = "guest-ram-import"))]
+    fn effective_guest_memory_import(&self) -> Option<(u32, u32, bool)> {
+        #[cfg(all(feature = "guest-ram-import", not(test)))]
+        return Some(self.guest_memory_import.unwrap_or((
+            GUEST_MEMORY_IMPORT_MIN_PAGES,
+            GUEST_MEMORY_IMPORT_MAX_PAGES,
+            unsafe { GUEST_MEMORY_SHARED },
+        )));
+        #[cfg(not(all(feature = "guest-ram-import", not(test))))]
+        self.guest_memory_import
+    }
+
     #[allow(dead_code)]
     fn write_guest_memory_import(&mut self, min_pages: u32, max_pages: u32, shared: bool) {
         let old_len = self.output.len();
@@ -1044,8 +1064,9 @@ impl WasmBuilder {
         // index of the exported function
         // function space starts with imports. index of last import is import count - 1
         // the last imports however are memories (the module memory, optionally followed by the
-        // guest memory), so we subtract those
-        let memory_import_count = 1 + self.guest_memory_import.is_some() as u16;
+        // guest memory), so we subtract those. Must mirror finish()'s
+        // effective_guest_memory_import decision, not the raw field
+        let memory_import_count = 1 + self.effective_guest_memory_import().is_some() as u16;
         let next_op_idx = self.output.len();
         self.output.push(0);
         self.output.push(0); // add 2 bytes for writing 16 byte val
@@ -1323,6 +1344,159 @@ impl WasmBuilder {
 // memory 0 (XWAH-9 Phase 3, option A)
 #[allow(dead_code)]
 pub const GUEST_MEMORY_INDEX: u8 = 1;
+
+// Declared limits of the guest-memory import when the `guest-ram-import`
+// build generates JIT modules: like gram.wasm's import, declare the widest
+// range (min 0, max 4 GiB) so one declaration links against every actual
+// guest memory size (import subtyping: actual.min >= declared.min and
+// actual.max <= declared.max)
+#[cfg(all(feature = "guest-ram-import", not(test)))]
+const GUEST_MEMORY_IMPORT_MIN_PAGES: u32 = 0;
+#[cfg(all(feature = "guest-ram-import", not(test)))]
+const GUEST_MEMORY_IMPORT_MAX_PAGES: u32 = 0x10000;
+
+/// Whether the actual guest memory is shared. A wasm memory import's
+/// shared-ness must match the provided memory exactly (LinkError otherwise),
+/// and JIT modules are generated at runtime, so this is a runtime flag, not
+/// a compile-time constant. Default: non-shared.
+#[cfg(feature = "guest-ram-import")]
+static mut GUEST_MEMORY_SHARED: bool = false;
+
+/// Exported to JS: cpu.js calls this during initialisation (Stage 5) when it
+/// created the imported guest memory with `shared: true` (cross-origin
+/// isolated), before any JIT module is generated. Generated modules then
+/// declare their "e"."g" import shared to match.
+#[cfg(feature = "guest-ram-import")]
+#[no_mangle]
+pub unsafe fn set_guest_memory_shared(shared: u32) { GUEST_MEMORY_SHARED = shared != 0 }
+
+// Guest-RAM access emitters for codegen.rs' gen_safe_read/gen_safe_write/
+// gen_safe_read_write fast paths. Macros rather than methods or cfg'd
+// statements at the call sites: the macro invocation replaces the historical
+// emitter call on the same line, so the default build's post-expansion token
+// stream and the panic-Location line numbers of everything around it stay
+// identical (the same technique as memory.rs' Stage 1 gram macros), while
+// the `guest-ram-import` build swaps in the memidx-1 guest-memory emitters.
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_load8 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_u8($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_load8 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_u8_from_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_load16 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_u16($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_load16 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_u16_from_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_load32 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_i32($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_load32 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_i32_from_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_load64 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_i64($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_load64 {
+    ($builder:expr, $offset:expr) => {
+        $builder.load_unaligned_i64_from_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_store8 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_u8($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_store8 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_u8_to_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_store16 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_u16($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_store16 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_u16_to_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_store32 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_i32($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_store32 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_i32_to_guest($offset)
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_gram_store64 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_i64($offset)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_gram_store64 {
+    ($builder:expr, $offset:expr) => {
+        $builder.store_unaligned_i64_to_guest($offset)
+    };
+}
 
 #[cfg(test)]
 mod tests {
