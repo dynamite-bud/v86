@@ -7,7 +7,7 @@ INSTRUCTION_TABLES=src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
 		   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs \
 
 # Only the dependencies common to both generate_{jit,interpreter}.js
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js, $(wildcard gen/*.js))
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js gen/generate_gram_wasm.js, $(wildcard gen/*.js))
 JIT_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_jit.js
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
 ANALYZER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_analyzer.js
@@ -215,6 +215,16 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
+# guest-RAM accessor modules for the multimem build (XWAH-9 Phase 3 Stage 3);
+# Stage 5 adds them to the default artifacts
+build/gram.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant nonshared
+build/gram-shared.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant shared
+
+.PHONY: gram-wasm
+gram-wasm: build/gram.wasm build/gram-shared.wasm
+
 .PHONY: virtio-gpu-wgpu
 .NOTPARALLEL: virtio-gpu-wgpu
 virtio-gpu-wgpu: $(VIRTIO_GPU_WGPU_JS) $(VIRTIO_GPU_WGPU_WASM)
@@ -417,10 +427,11 @@ virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
-rust-test: $(RUST_FILES)
+rust-test: $(RUST_FILES) build/gram.wasm build/gram-shared.wasm
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
 	./tests/rust/verify-wasmgen-multimem-output.js
+	./tests/rust/verify-gram-wasm.js
 
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
