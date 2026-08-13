@@ -1480,4 +1480,55 @@ mod tests {
         shader.extend_from_slice(b"x\0\0\0\0\0\0\x01");
         assert!(decode(&shader).is_err());
     }
+
+    #[wasm_bindgen_test]
+    fn fuzzes_bounded_decoder_without_panics() {
+        let mut seed = 0xC0DE_15A5_u32;
+        for case in 0..1024 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let length = seed as usize % 2048;
+            let mut bytes = vec![0_u8; length];
+            for byte in &mut bytes {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *byte = seed as u8;
+            }
+            if case % 2 == 0 && length >= SUBMIT_HEADER_SIZE {
+                bytes[0..4].copy_from_slice(&SUBMIT_MAGIC.to_le_bytes());
+                bytes[4..6].copy_from_slice(
+                    &(if case % 4 == 0 { SUBMIT_V1 } else { SUBMIT_V2 }).to_le_bytes(),
+                );
+                bytes[6..8].copy_from_slice(&SUBMIT_MINOR.to_le_bytes());
+                bytes[8..12].copy_from_slice(&(length as u32).to_le_bytes());
+                bytes[20..32].fill(0);
+            }
+            if let Ok(submit) = decode(&bytes) {
+                assert!(matches!(submit.major, SUBMIT_V1 | SUBMIT_V2));
+                assert!(!submit.records.is_empty());
+                assert!(submit.records.len() <= MAX_COMMANDS);
+                assert!(submit.resources.len() <= MAX_RESOURCES);
+            }
+        }
+
+        let valid = shader_submit_version(
+            SUBMIT_V2,
+            SHADER_STAGE_VERTEX,
+            b"@vertex fn main() -> @builtin(position) vec4f { return vec4f(0.0); }",
+        );
+        for _ in 0..512 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let mut mutated = valid.clone();
+            let index = seed as usize % mutated.len();
+            mutated[index] ^= 1 << (seed % 8);
+            let _ = decode(&mutated);
+        }
+
+        assert!(decode(&vec![0; MAX_SUBMIT_BYTES]).is_err());
+        assert!(decode(&vec![0; MAX_SUBMIT_BYTES + 1]).is_err());
+    }
 }
