@@ -22,17 +22,25 @@ const DELIVERY_MODES: [&str; 8] = [
     "Reserved (3)",
     "NMI (4)",
     "INIT (5)",
-    "Reserved (6)",
+    "Startup (6)",
     "ExtINT (7)",
 ];
 
 const DESTINATION_MODES: [&str; 2] = ["physical", "logical"];
+
+const DESTINATION_MODE_PHYSICAL: u8 = 0;
+
+// In physical destination mode, destination 0xFF addresses all LAPICs
+const DESTINATION_BROADCAST: u8 = 0xFF;
 
 const IOAPIC_CONFIG_MASKED: u32 = 0x10000;
 
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
+
+// Startup IPI (SIPI); exists only in the ICR, not in IOAPIC redirection entries
+const APIC_DELIVERY_STARTUP: u8 = 6;
 
 // keep in sync with cpu.js
 #[allow(dead_code)]
@@ -77,7 +85,9 @@ pub struct Apic {
     lvt_thermal_sensor: u32,
 }
 
-static APIC: Mutex<Apic> = Mutex::new(Apic {
+// Power-on register values (Intel SDM vol. 3A, "Local APIC State After
+// Power-Up or Reset"); also applied on guest reboot via reset()
+const APIC_RESET_STATE: Apic = Apic {
     apic_id: 0,
     timer_divider: 0,
     timer_divider_shift: 1,
@@ -101,7 +111,11 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
     local_destination: 0,
     error: 0,
     read_error: 0,
-});
+};
+
+static APIC: Mutex<Apic> = Mutex::new(APIC_RESET_STATE);
+
+pub fn reset() { *get_apic() = APIC_RESET_STATE; }
 
 pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
 
@@ -285,7 +299,8 @@ pub fn write32(addr: u32, value: u32) {
 fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
     match addr {
         0x20 => {
-            dbg_log!("APIC write id: {:08x}", value >> 8);
+            // the APIC ID lives in bits 31:24; the register stores the raw value
+            dbg_log!("APIC write id: {:08x} (apic id {:02x})", value, value >> 24);
             apic.apic_id = value;
         },
 
@@ -372,15 +387,24 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 );
             }
             else if destination_shorthand == 1 {
-                // self
-                deliver(apic, vector, IOAPIC_DELIVERY_FIXED, is_level);
+                // self: same mode dispatch as the other shorthands, so
+                // INIT/SIPI/NMI to self take the intended ignore paths
+                // instead of tripping the fixed-delivery vector assert
+                deliver(apic, vector, delivery_mode, is_level);
             }
             else if destination_shorthand == 2 {
                 // all including self
                 deliver(apic, vector, delivery_mode, is_level);
             }
             else if destination_shorthand == 3 {
-                // all but self
+                // All excluding self: deliver to every LAPIC except this one.
+                // The LAPIC set holds only the local APIC today, so the target
+                // set is empty; XWAH-9 phase 2 adds the AP LAPICs.
+                dbg_log!(
+                    "APIC drop: 'all excluding self' IPI vector={:02x} delivery_mode={}: no other LAPICs present",
+                    vector,
+                    DELIVERY_MODES[delivery_mode as usize],
+                );
             }
             else {
                 dbg_assert!(false);
@@ -532,16 +556,62 @@ fn timer(apic: &mut Apic, now: f64) -> f64 {
     apic.timer_last_tick + time_per_interrupt - now
 }
 
+// Send an interrupt with an ICR- or IOAPIC-style destination to all matching
+// local APICs: compute the set of target LAPICs, then deliver to each. The set
+// holds at most the single local LAPIC today; XWAH-9 phase 2 replaces the
+// singleton with one LAPIC per vCPU. Returns whether any LAPIC accepted the
+// interrupt, so callers such as the IOAPIC only commit side effects (remote
+// IRR) for interrupts that were actually delivered.
 pub fn route(
     apic: &mut Apic,
     vector: u8,
     mode: u8,
     is_level: bool,
-    _destination: u8,
-    _destination_mode: u8,
-) {
-    // TODO
-    deliver(apic, vector, mode, is_level);
+    destination: u8,
+    destination_mode: u8,
+) -> bool {
+    if lapic_matches_destination(apic, destination, destination_mode) {
+        deliver(apic, vector, mode, is_level);
+        return true;
+    }
+
+    // common once guests send INIT/SIPI to APs that don't exist yet
+    dbg_log!(
+        "APIC drop: no LAPIC matches destination={:02x} ({}) vector={:02x} delivery_mode={}",
+        destination,
+        DESTINATION_MODES[destination_mode as usize],
+        vector,
+        DELIVERY_MODES[mode as usize],
+    );
+    false
+}
+
+// xAPIC destination matching per the Intel SDM vol. 3A, "Determining IPI
+// Destination" (message destination address, MDA)
+fn lapic_matches_destination(apic: &Apic, destination: u8, destination_mode: u8) -> bool {
+    if destination_mode == DESTINATION_MODE_PHYSICAL {
+        // physical: the MDA is an APIC ID; 0xFF is broadcast
+        destination == DESTINATION_BROADCAST || destination as u32 == apic.apic_id >> 24
+    }
+    else {
+        // logical: the MDA is matched against LDR[31:24] under the model
+        // selected by DFR[31:28]
+        let ldr = (apic.local_destination >> 24) as u8;
+        match apic.destination_format >> 28 {
+            // flat model: the MDA is a bitmask of target LDRs
+            0xF => destination & ldr != 0,
+            // cluster model: MDA[7:4] selects the cluster (0xF addresses all
+            // clusters), MDA[3:0] is a bitmask matched against LDR[27:24]
+            0x0 => {
+                (destination >> 4 == 0xF || destination >> 4 == ldr >> 4)
+                    && destination & ldr & 0xF != 0
+            },
+            model => {
+                dbg_log!("APIC: reserved DFR model {:x}, no destination match", model);
+                false
+            },
+        }
+    }
 }
 
 fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
@@ -550,12 +620,36 @@ fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {
     }
 
     if mode == IOAPIC_DELIVERY_INIT {
-        // TODO
+        // TODO: INIT to the BSP itself means warm reset, intentionally not
+        // implemented yet: kept as a no-op (as before), but logged. INIT to
+        // not-yet-existing APs never reaches this point; route() drops it
+        // while only one LAPIC exists.
+        dbg_log!(
+            "APIC: INIT to LAPIC id={:02x} ignored (warm reset not implemented)",
+            apic.apic_id >> 24
+        );
         return;
     }
 
     if mode == IOAPIC_DELIVERY_NMI {
-        // TODO
+        // TODO: v86 has no NMI support in the interrupt core (see hlt), so a
+        // routed NMI is dropped at delivery
+        dbg_log!(
+            "APIC: NMI to LAPIC id={:02x} dropped (NMI unsupported)",
+            apic.apic_id >> 24
+        );
+        return;
+    }
+
+    if mode == APIC_DELIVERY_STARTUP {
+        // Startup IPI: the vector encodes the real-mode startup page, not an
+        // interrupt vector. AP startup lands with multi-vCPU support (XWAH-9
+        // phase 2); a SIPI to the already-running BSP has no effect.
+        dbg_log!(
+            "APIC: Startup IPI vector={:02x} to LAPIC id={:02x} ignored",
+            vector,
+            apic.apic_id >> 24
+        );
         return;
     }
 

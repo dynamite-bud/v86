@@ -394,6 +394,7 @@ CPU.prototype.wasm_patch = function()
     this.store_current_tsc = get_import("store_current_tsc");
 
     this.set_cpuid_level = get_import("set_cpuid_level");
+    this.set_smp_cpus = get_import("set_smp_cpus");
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
@@ -1011,6 +1012,11 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
+    this.smp_cpus = settings.cpus || 1;
+    // guarded like cpuid_level: keeps new js working against an older
+    // v86.wasm that lacks the export (the topology is then just not visible)
+    this.set_smp_cpus && this.set_smp_cpus(this.smp_cpus);
+
     this.acpi_enabled[0] = +settings.acpi;
 
     this.reset_cpu();
@@ -1108,10 +1114,15 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
+            // XWAH-9: must stay at 1 until startup IPIs actually start
+            // application processors; SeaBIOS spins forever waiting for the
+            // advertised CPUs to come up (verified empirically). smp_cpus is
+            // currently only visible to the guest through cpuid.
             this.fw_value = i32(1);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
+            // XWAH-9: see FW_CFG_NB_CPUS
             this.fw_value = i32(1);
         }
         else if(value === FW_CFG_NUMA)
@@ -1690,6 +1701,10 @@ CPU.prototype.fill_cmos = function(rtc, settings)
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
+    // QEMU convention: CMOS 0x5F holds the number of additional (application)
+    // processors, i.e. smp_cpus - 1. XWAH-9: must stay at 0 until startup
+    // IPIs actually start application processors; SeaBIOS spins forever
+    // waiting for the advertised CPUs to come up (verified empirically).
     rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
 
     // Used by bochs BIOS to skip the boot menu delay.

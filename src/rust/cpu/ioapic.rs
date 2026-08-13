@@ -60,14 +60,19 @@ struct Ioapic {
     irq_value: u32,
 }
 
-static IOAPIC: Mutex<Ioapic> = Mutex::new(Ioapic {
+// Power-on register values; also applied on guest reboot via reset()
+const IOAPIC_RESET_STATE: Ioapic = Ioapic {
     ioredtbl_config: [IOAPIC_CONFIG_MASKED; IOAPIC_IRQ_COUNT],
     ioredtbl_destination: [0; IOAPIC_IRQ_COUNT],
     ioregsel: 0,
     ioapic_id: IOAPIC_ID,
     irr: 0,
     irq_value: 0,
-});
+};
+
+static IOAPIC: Mutex<Ioapic> = Mutex::new(IOAPIC_RESET_STATE);
+
+pub fn reset() { *get_ioapic() = IOAPIC_RESET_STATE; }
 
 fn get_ioapic() -> MutexGuard<'static, Ioapic> { IOAPIC.try_lock().unwrap() }
 
@@ -108,18 +113,16 @@ fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
             config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == IOAPIC_CONFIG_TRIGGER_MODE_LEVEL;
 
         if config & IOAPIC_CONFIG_TRIGGER_MODE_LEVEL == 0 {
+            // edge: consume the request; a destination mismatch below then
+            // loses the interrupt, matching real hardware
             ioapic.irr &= !mask;
         }
-        else {
-            ioapic.ioredtbl_config[irq as usize] |= IOAPIC_CONFIG_REMOTE_IRR;
-
-            if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
-                dbg_log!("No route: level interrupt and remote IRR still set");
-                return;
-            }
+        else if config & IOAPIC_CONFIG_REMOTE_IRR != 0 {
+            dbg_log!("No route: level interrupt and remote IRR still set");
+            return;
         }
 
-        if delivery_mode == IOAPIC_DELIVERY_FIXED
+        let delivered = if delivery_mode == IOAPIC_DELIVERY_FIXED
             || delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY
         {
             apic::route(
@@ -129,10 +132,18 @@ fn check_irq(ioapic: &mut Ioapic, apic: &mut apic::Apic, irq: u8) {
                 is_level,
                 destination,
                 destination_mode,
-            );
+            )
         }
         else {
             dbg_assert!(false, "TODO");
+            false
+        };
+
+        if is_level && delivered {
+            // remote IRR latches only on accepted delivery; latching on a
+            // dropped interrupt would wedge the line until the guest rewrites
+            // the redirection entry, since only an EOI clears remote IRR
+            ioapic.ioredtbl_config[irq as usize] |= IOAPIC_CONFIG_REMOTE_IRR;
         }
 
         ioapic.ioredtbl_config[irq as usize] &= !IOAPIC_CONFIG_DELIVS;

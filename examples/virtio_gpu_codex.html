@@ -128,6 +128,9 @@ import { V86 } from "../build/libv86.mjs";
 const params = new URLSearchParams(location.search);
 const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
 const relay_url = params.get("relay");
+// Experimental (XWAH-9): the SMP topology is visible to the guest through
+// cpuid only; the guest still boots and runs on a single CPU
+const cpus = Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -165,6 +168,7 @@ const emulator = new V86({
     wasm_path: "../build/v86.wasm",
     memory_size,
     vga_memory_size,
+    cpus,
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {
@@ -195,7 +199,7 @@ const emulator = new V86({
 window.emulator = emulator;
 window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
-status.textContent = `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
+status.textContent = `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label}, ${cpus} cpu${cpus > 1 ? "s" : ""})…`;
 
 let serial_text = "";
 let serial_render_pending = false;

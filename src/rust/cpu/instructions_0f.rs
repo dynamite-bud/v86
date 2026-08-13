@@ -1204,6 +1204,10 @@ pub unsafe fn instr_0F30() {
                 high == 0,
                 "Changing APIC address (high 32 bits) not supported"
             );
+            // BSP (bit 8) is read-only and ignored on write per the SDM;
+            // guests commonly write back the value they read (now including
+            // BSP), so it is masked out of the address check along with
+            // EXTD/EN
             let address = low & !(IA32_APIC_BASE_BSP | IA32_APIC_BASE_EXTD | IA32_APIC_BASE_EN);
             dbg_assert!(
                 (address == 0 && !*acpi_enabled) // windows me
@@ -1286,7 +1290,8 @@ pub unsafe fn instr_0F32() {
         IA32_PLATFORM_ID => {},
         IA32_APIC_BASE => {
             if *acpi_enabled {
-                low = APIC_MEM_ADDRESS as i32;
+                // the single CPU is the bootstrap processor
+                low = APIC_MEM_ADDRESS as i32 | IA32_APIC_BASE_BSP;
                 if *apic_enabled {
                     low |= IA32_APIC_BASE_EN
                 }
@@ -3244,7 +3249,12 @@ pub unsafe fn instr_0FA2() {
 
         1 => {
             eax = 3 | 7 << 4 | 6 << 8; // pentium3
-            ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
+
+            // XWAH-9: bits 31:24 are the initial APIC ID of the current CPU;
+            // always 0 (BSP) until per-CPU APIC IDs arrive
+            let initial_apic_id = 0;
+            // initial apic id, logical cpu count, clflush size
+            ebx = initial_apic_id << 24 | (smp_cpus << 16) as i32 | 8 << 8;
             ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
             let vme = 0 << 1;
             if config::VMWARE_HYPERVISOR_PORT {
@@ -3255,6 +3265,9 @@ pub unsafe fn instr_0FA2() {
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
 
+            if smp_cpus > 1 {
+                edx |= 1 << 28; // htt
+            }
             if *acpi_enabled
             //&& this.apic_enabled[0])
             {
@@ -3272,21 +3285,24 @@ pub unsafe fn instr_0FA2() {
 
         4 => {
             // from my local machine
+            // XWAH-9: eax bits 31:26 report (max addressable cores per package - 1);
+            // the field is 6 bits wide, so it saturates at 63
+            let cores_field = ((smp_cpus - 1).min(63) << 26) as i32;
             match read_reg32(ECX) {
                 0 => {
-                    eax = 0x00000121;
+                    eax = 0x00000121 | cores_field;
                     ebx = 0x01c0003f;
                     ecx = 0x0000003f;
                     edx = 0x00000001;
                 },
                 1 => {
-                    eax = 0x00000122;
+                    eax = 0x00000122 | cores_field;
                     ebx = 0x01c0003f;
                     ecx = 0x0000003f;
                     edx = 0x00000001;
                 },
                 2 => {
-                    eax = 0x00000143;
+                    eax = 0x00000143 | cores_field;
                     ebx = 0x05c0003f;
                     ecx = 0x00000fff;
                     edx = 0x00000001;
@@ -3309,6 +3325,38 @@ pub unsafe fn instr_0FA2() {
                 ebx = 1 << 9; // enhanced REP MOVSB/STOSB
                 ecx = 0;
                 edx = 0;
+            }
+        },
+
+        0xB => {
+            // XWAH-9: extended topology enumeration (Intel SDM vol. 2A);
+            // Linux prefers this leaf over leaves 1/4 when cpuid_level >= 0xB
+            // x2APIC ID of the current logical processor; always 0 (BSP) until
+            // per-CPU APIC IDs arrive
+            let x2apic_id = 0;
+            match read_reg32(ECX) as u32 {
+                0 => {
+                    // SMT level: one logical processor per core
+                    eax = 0; // bits to shift x2APIC ID right to get the next-level ID
+                    ebx = 1; // logical processors at this level
+                    ecx = 1 << 8 | 0; // level type 1 (SMT) | level number
+                    edx = x2apic_id;
+                },
+                1 => {
+                    // core level: all logical processors in the package
+                    eax = (32 - (smp_cpus - 1).leading_zeros()) as i32; // ceil(log2(smp_cpus))
+                    ebx = smp_cpus as i32;
+                    ecx = 2 << 8 | 1; // level type 2 (core) | level number
+                    edx = x2apic_id;
+                },
+                subleaf => {
+                    // no further levels: eax = ebx = 0, level type 0
+                    // (invalid); only ECX[7:0] echoes the input subleaf
+                    eax = 0;
+                    ebx = 0;
+                    ecx = (subleaf & 0xFF) as i32;
+                    edx = x2apic_id;
+                },
             }
         },
 
@@ -3352,7 +3400,7 @@ pub unsafe fn instr_0FA2() {
         },
     }
 
-    if level == 4 || level == 7 {
+    if level == 4 || level == 7 || level == 0xB {
         dbg_log!(
             "cpuid: eax={:08x} ecx={:02x}",
             read_reg32(EAX),

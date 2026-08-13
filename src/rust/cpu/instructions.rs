@@ -2142,7 +2142,9 @@ pub unsafe fn instr_F0() {
     // TODO
     // This triggers UD when used with
     // some instructions that don't write to memory
+    *prefixes |= prefix::PREFIX_LOCK;
     run_prefix_instruction();
+    *prefixes = 0;
 }
 
 #[no_mangle]

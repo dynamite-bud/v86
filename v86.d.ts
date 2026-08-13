@@ -665,6 +665,15 @@ export interface V86Options {
     cpuid_level?: number;
 
     /**
+     * Number of emulated CPUs (1 to 255). Experimental: the SMP topology is
+     * currently visible to guests through cpuid only; firmware CPU counts
+     * remain 1 until secondary CPUs can actually start (XWAH-9), so guests
+     * boot and run on a single CPU.
+     * @default 1
+     */
+    cpus?: number;
+
+    /**
      * Turn off the x86-to-wasm jit
      * @default false
      */
