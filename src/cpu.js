@@ -75,6 +75,44 @@ export function CPU(bus, wm, stop_idling)
 
     this.wasm_memory = memory;
 
+    // XWAH-9 Phase 3 Stage 5: under guest_memory_backend "imported" guest
+    // RAM is a separate WebAssembly.Memory (created by starter.js before
+    // instantiation) rather than a region of the module's linear memory
+    this.guest_memory = this.wm.guest_memory || null;
+
+    // Whether the imported guest memory is SharedArrayBuffer-backed,
+    // plumbed by starter.js alongside guest_memory itself: the starter
+    // chose the shared-ness, so nothing here sniffs the buffer's type (the
+    // SharedArrayBuffer global can be hidden while shared memory still
+    // works). Consumers: set_guest_memory_shared below, the read_memory
+    // copy-first shim (starter.js) and the debug memory dump
+    // (browser/main.js).
+    this.guest_memory_shared = !!this.wm.guest_memory_shared;
+
+    if(this.guest_memory)
+    {
+        if(!this.wm.exports["set_guest_memory_shared"])
+        {
+            // only multimem builds export this; a default artifact would
+            // silently allocate guest RAM in its own linear memory instead
+            throw new Error("guest_memory_backend \"imported\" requires the multimem wasm artifact " +
+                "(build/v86-multimem[-debug].wasm), but the loaded module is a default build");
+        }
+        // global-hiding-proof cross-check of the plumbed flag against the
+        // actual backing
+        dbg_assert(
+            (Object.prototype.toString.call(this.guest_memory.buffer) ===
+                "[object SharedArrayBuffer]") === this.guest_memory_shared,
+            "guest_memory_shared flag must match the guest memory's backing");
+        if(this.guest_memory_shared)
+        {
+            // must precede the first JIT compile: generated modules declare
+            // their "e"."g" guest-memory import shared to match the actual
+            // memory (LinkError otherwise)
+            this.wm.exports["set_guest_memory_shared"](1);
+        }
+    }
+
     this.memory_size = view(Uint32Array, memory, 812, 1);
 
     this.mem8 = new Uint8Array(0);
@@ -333,6 +371,14 @@ CPU.prototype.create_jit_imports = function()
     const jit_imports = Object.create(null);
 
     jit_imports["m"] = this.wm.exports["memory"];
+
+    if(this.wm.guest_memory)
+    {
+        // multimem build: JIT-generated modules are two-memory modules that
+        // import guest RAM as "e"."g" (memidx 1) next to the instance
+        // memory "e"."m" (src/rust/wasmgen/wasm_builder.rs)
+        jit_imports["g"] = this.wm.guest_memory;
+    }
 
     for(const name of Object.keys(this.wm.exports))
     {
@@ -775,6 +821,19 @@ CPU.prototype.set_state = function(state)
         }
     }
 
+    // same pre-mutation block (XWAH-9 Phase 3): under the imported backend
+    // guest RAM is a WebAssembly.Memory created with maximum == initial —
+    // it can never grow, so a state image with more RAM than the machine
+    // must fail before anything is restored (the linear backend's
+    // long-standing behavior is a console.warn further down)
+    if(this.guest_memory && state[0] > this.mem8.length)
+    {
+        throw new StateLoadError(
+            "State image memory size " + state[0] + " exceeds the allocated " +
+            "guest memory (" + this.mem8.length + "); the imported guest " +
+            "memory cannot grow");
+    }
+
     // the restored machine may be live: allow a later full halt to fire
     // the machine-dead event again
     this.rearm_cpu_event_halt && this.rearm_cpu_event_halt();
@@ -1083,11 +1142,43 @@ CPU.prototype.pack_memory = function()
 
     const page_count = this.mem8.length >> 12;
     const nonzero_pages = [];
-    for(let page = 0; page < page_count; page++)
+    if(this.guest_memory)
     {
-        if(!this.is_memory_zeroed(page << 12, 0x1000))
+        // imported backend: is_memory_zeroed would cross the wasm instance
+        // boundary once per page, and every 8-byte probe inside it crosses
+        // again into gram.wasm (memory.rs is_memory_zeroed via
+        // gram_read64_aligned) — millions of cross-instance calls per
+        // save. Scan the same pages in one tight JS loop over the guest
+        // memory instead; tests/api/multimem.js asserts this path agrees
+        // with the wasm export.
+        const mem32 = this.mem32s;
+        for(let page = 0; page < page_count; page++)
         {
-            nonzero_pages.push(page);
+            const start = page << 10;
+            const end = start + 1024;
+            let is_zero = true;
+            for(let i = start; i < end; i++)
+            {
+                if(mem32[i] !== 0)
+                {
+                    is_zero = false;
+                    break;
+                }
+            }
+            if(!is_zero)
+            {
+                nonzero_pages.push(page);
+            }
+        }
+    }
+    else
+    {
+        for(let page = 0; page < page_count; page++)
+        {
+            if(!this.is_memory_zeroed(page << 12, 0x1000))
+            {
+                nonzero_pages.push(page);
+            }
         }
     }
 
@@ -1182,6 +1273,32 @@ CPU.prototype.create_memory = function(size, minimum_size)
     this.memory_size[0] = size;
 
     const memory_offset = this.allocate_memory(size);
+
+    if(this.guest_memory)
+    {
+        // imported backend: guest RAM is the imported guest memory and
+        // guest-physical addresses are 0-based offsets into it
+        dbg_assert(memory_offset === 0, "imported guest RAM is 0-based");
+
+        const buffer = this.guest_memory.buffer;
+        // starter.js created the memory one wasm page larger than the
+        // (identically normalised) memory size: the JIT slow-path scratch
+        // pages live at [size, size + 0x2000) (memory.rs
+        // gram_jit_scratch_base)
+        if(size + 0x2000 > buffer.byteLength)
+        {
+            throw new Error("Imported guest memory too small: memory_size=" + size +
+                " + jit scratch does not fit in " + buffer.byteLength + " bytes");
+        }
+        dbg_assert(size + 0x10000 === buffer.byteLength,
+            "starter.js and create_memory disagree about the guest memory size");
+
+        // direct views, not the view() proxy: the guest memory is created
+        // with maximum == initial, so its buffer can never grow or detach
+        this.mem8 = new Uint8Array(buffer, 0, size);
+        this.mem32s = new Uint32Array(buffer, 0, size >> 2);
+        return;
+    }
 
     this.mem8 = view(Uint8Array, this.wasm_memory, memory_offset, size);
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
@@ -2066,14 +2183,32 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
         }
     });
 
-    if(DEBUG)
-    {
-        result.catch(e => {
-            console.log(e);
+    // never silent (DEBUG or not): a swallowed rejection here would wedge
+    // the JIT — codegen_finalize_finished never runs, the page stays
+    // pending forever. The starter's multi-memory capability probe makes
+    // this near-unreachable for the imported-guest-memory build, but if it
+    // fires, log the module's import list (the usual failure shape is a
+    // LinkError on the "e"."g" guest-memory import) and rethrow
+    // asynchronously so the error surfaces as an uncaught exception.
+    result.catch(e => {
+        let import_list = "unavailable (module does not compile)";
+        try
+        {
+            import_list = WebAssembly.Module.imports(new WebAssembly.Module(code))
+                .map(i => i["module"] + "." + i["name"] + " (" + i["kind"] + ")")
+                .join(", ");
+        }
+        catch(_e) {}
+        console.error(
+            "Failed to instantiate JIT-generated module (wasm_table_index=" +
+            wasm_table_index + ", start=" + h(start >>> 0) + "), imports: " +
+            import_list, e);
+        if(DEBUG)
+        {
             debugger;
-            throw e;
-        });
-    }
+        }
+        setTimeout(() => { throw e; }, 0);
+    });
 };
 
 CPU.prototype.log_uncompiled_code = function(start, end)

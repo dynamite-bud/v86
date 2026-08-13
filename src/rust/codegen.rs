@@ -102,7 +102,7 @@ pub fn gen_page_switch_check(
     ctx.builder.free_local(address_local);
 
     ctx.builder
-        .const_i32(next_block_addr as i32 + unsafe { memory::mem8 } as i32);
+        .const_i32(unsafe { crate::phys_to_tag!(next_block_addr) } as i32);
     ctx.builder.ne_i32();
 
     if cfg!(debug_assertions) {
@@ -747,28 +747,28 @@ fn gen_safe_read(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.load_u8(0);
+            crate::jit_gram_load8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.load_unaligned_u16(0);
+            crate::jit_gram_load16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.load_unaligned_i32(0);
+            crate::jit_gram_load32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {
             let where_to_write = where_to_write.unwrap();
             let virt_address_local = ctx.builder.set_new_local();
             ctx.builder.const_i32(0);
             ctx.builder.get_local(&virt_address_local);
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
             ctx.builder.store_unaligned_i64(where_to_write);
 
             ctx.builder.const_i32(0);
             ctx.builder.get_local(&virt_address_local);
-            ctx.builder.load_unaligned_i64(8);
+            crate::jit_gram_load64!(ctx.builder, 8);
             ctx.builder.store_unaligned_i64(where_to_write + 8);
 
             ctx.builder.free_local(virt_address_local);
@@ -783,7 +783,7 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
     // In functions that need to use this value we need to fix it by substracting memory::mem
     // this is done in order to remove one instruction from the fast path of memory accesses (no need to add
     // memory::mem anymore ).
-    // We need to account for this in gen_page_switch_check and we compare with next_block_addr + memory::mem8
+    // We need to account for this in gen_page_switch_check and we compare with phys_to_tag!(next_block_addr)
     // We cannot the same while processing an AbsoluteEip flow control change so there we need to fix the value
     // by subscracting memory::mem. Overall, since AbsoluteEip is encountered less often than memory accesses so
     // this ends up improving perf.
@@ -976,26 +976,26 @@ fn gen_safe_write(
 
             let virt_address_local = ctx.builder.tee_new_local();
             ctx.builder.get_local_i64(local1);
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
 
             ctx.builder.get_local(&virt_address_local);
             ctx.builder.get_local_i64(local2);
-            ctx.builder.store_unaligned_i64(8);
+            crate::jit_gram_store64!(ctx.builder, 8);
             ctx.builder.free_local(virt_address_local);
         },
     }
     match bits {
         BitSize::BYTE => {
-            ctx.builder.store_u8(0);
+            crate::jit_gram_store8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.store_unaligned_u16(0);
+            crate::jit_gram_store16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.store_unaligned_i32(0);
+            crate::jit_gram_store32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {}, // handled above
     }
@@ -1116,16 +1116,16 @@ pub fn gen_safe_read_write(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.load_u8(0);
+            crate::jit_gram_load8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.load_unaligned_u16(0);
+            crate::jit_gram_load16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.load_unaligned_i32(0);
+            crate::jit_gram_load32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
         },
         BitSize::DQWORD => assert!(false), // not used
     }
@@ -1215,16 +1215,16 @@ pub fn gen_safe_read_write(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.store_u8(0);
+            crate::jit_gram_store8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.store_unaligned_u16(0);
+            crate::jit_gram_store16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.store_unaligned_i32(0);
+            crate::jit_gram_store32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {
             dbg_assert!(false);

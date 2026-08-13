@@ -3080,8 +3080,18 @@ function init_ui(profile, settings, emulator)
 
     $("memory_dump").onclick = function()
     {
-        const mem8 = emulator.v86.cpu.mem8;
-        dump_file(new Uint8Array(mem8.buffer, mem8.byteOffset, mem8.length), "v86memory.bin");
+        const cpu = emulator.v86.cpu;
+        const mem8 = cpu.mem8;
+        // copy first when guest RAM is a shared imported memory: Blob()
+        // rejects SharedArrayBuffer-backed views (docs/smp-phase3-design.md
+        // §1 S4). guest_memory_shared is the flag the starter plumbed
+        // through wm — no buffer sniffing (the SharedArrayBuffer global can
+        // be hidden while shared memory still works)
+        const contents =
+            cpu.guest_memory_shared
+            ? mem8.slice()
+            : new Uint8Array(mem8.buffer, mem8.byteOffset, mem8.length);
+        dump_file(contents, "v86memory.bin");
         $("memory_dump").blur();
     };
 

@@ -1,5 +1,5 @@
 import { v86 } from "../main.js";
-import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
+import { LOG_CPU, MMAP_BLOCK_SIZE, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
 import { dbg_assert, dbg_trace, dbg_log, set_log_level } from "../log.js";
 import * as print_stats from "./print_stats.js";
@@ -24,6 +24,30 @@ import { MemoryFileStorage, ServerFileStorageWrapper } from "./filestorage.js";
 import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
 
+// Multi-memory capability probe (XWAH-9 Phase 3): a minimal hand-assembled
+// two-memory module — imports "e"."m" and "e"."g" (the JIT modules' shape,
+// wasm_builder.rs) and performs one memidx-1 i32.load. Engines without the
+// multi-memory proposal reject it at validation, so guest_memory_backend
+// "imported" can fail loudly at construction instead of wedging at the
+// first JIT compile (byte layout cribbed from
+// tests/rust/verify-wasmgen-multimem-output.js's module contract; memarg
+// encoding: flags|0x40, then memidx LEB, then offset LEB).
+// Exported for tests/api/multimem-negative.js.
+export const MULTIMEM_PROBE_MODULE = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6D, // \0asm magic
+    0x01, 0x00, 0x00, 0x00, // version 1
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: one type, () -> ()
+    0x02, 0x0F, 0x02, // import section, two imports:
+    0x01, 0x65, 0x01, 0x6D, 0x02, 0x00, 0x00, // "e" "m" memory {min 0}
+    0x01, 0x65, 0x01, 0x67, 0x02, 0x00, 0x00, // "e" "g" memory {min 0}
+    0x03, 0x02, 0x01, 0x00, // function section: one function of type 0
+    0x0A, 0x0B, 0x01, 0x09, 0x00, // code section: one body, no locals
+    0x41, 0x00, // i32.const 0
+    0x28, 0x42, 0x01, 0x00, // i32.load align=2|0x40 memidx=1 offset=0
+    0x1A, // drop
+    0x0B, // end
+]);
+
 /**
  * Constructor for emulator instances.
  *
@@ -34,6 +58,8 @@ import { FS } from "../../lib/filesystem.js";
       disable_keyboard: (boolean|undefined),
       cpus: (number|undefined),
       wasm_fn: (Function|undefined),
+      guest_memory_backend: (string|undefined),
+      guest_memory_shared: (string|boolean|undefined),
       screen: ({
           scale: (number|undefined),
       } | undefined),
@@ -62,6 +88,85 @@ export function V86(options)
     var wasm_memory;
 
     const wasm_table = new WebAssembly.Table({ element: "anyfunc", initial: WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
+
+    // NOTE: Experimental (XWAH-9 Phase 3 Stage 5): guest_memory_backend
+    // "imported" loads the multimem build (v86-multimem[-debug].wasm), in
+    // which guest RAM is a separate WebAssembly.Memory created here and
+    // imported by gram.wasm (interpreter accessors) and by JIT-generated
+    // modules (docs/smp-phase3-design.md §2 option A). The default "linear"
+    // backend is byte-for-byte untouched.
+    const guest_memory_backend =
+        options.guest_memory_backend === undefined ? "linear" : options.guest_memory_backend;
+    dbg_assert(guest_memory_backend === "linear" || guest_memory_backend === "imported",
+        "options.guest_memory_backend must be \"linear\" or \"imported\"");
+
+    // Sub-option: whether the imported guest memory is shared
+    // (SharedArrayBuffer-backed). "auto" = crossOriginIsolated in browsers;
+    // in Node there is no crossOriginIsolated gate, so "auto" follows
+    // SharedArrayBuffer availability (i.e. shared). Explicit true/false is
+    // meant for testing both artifact variants without COI headers.
+    const guest_memory_shared_option =
+        options.guest_memory_shared === undefined ? "auto" : options.guest_memory_shared;
+    dbg_assert(guest_memory_shared_option === "auto" || typeof guest_memory_shared_option === "boolean",
+        "options.guest_memory_shared must be \"auto\", true or false");
+
+    let guest_memory = null;
+    let guest_memory_is_shared = false;
+
+    if(guest_memory_backend === "imported")
+    {
+        // Capability probe before committing to the backend: JIT-generated
+        // modules of the multimem build are true multi-memory modules, so an
+        // engine without multi-memory support could instantiate the (single
+        // -memory) main artifact and gram.wasm fine, then silently fail
+        // every JIT compile. Fail at construction instead.
+        if(!WebAssembly.validate(MULTIMEM_PROBE_MODULE))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires WebAssembly " +
+                "multi-memory support (JIT-generated modules import guest RAM as a " +
+                "second memory), which this engine lacks");
+        }
+
+        guest_memory_is_shared = guest_memory_shared_option === "auto"
+            ? (typeof globalThis.crossOriginIsolated !== "undefined"
+                ? Boolean(globalThis.crossOriginIsolated)
+                : typeof SharedArrayBuffer !== "undefined")
+            : guest_memory_shared_option;
+
+        // Mirror of CPU.create_memory's size normalisation (cpu.js) — the
+        // memory must exist before the module instantiates, long before
+        // CPU.init runs; create_memory asserts the two calculations agree.
+        // The minimum_size mirrors CPU.init's `settings.initrd ? 64M : 1M`
+        // under the conditions continue_init will produce: settings.initrd
+        // is populated from options.initrd unconditionally, but from
+        // bzimage_initrd_from_filesystem only when there is no initial
+        // state (see done() in continue_init — the filesystem-sourced
+        // initrd is skipped when a state image overrides boot).
+        let guest_memory_size = options.memory_size || 64 * 1024 * 1024;
+        const minimum_size =
+            options.initrd || (options.bzimage_initrd_from_filesystem && !options.initial_state)
+                ? 64 * 1024 * 1024 : 1024 * 1024;
+        if(guest_memory_size < minimum_size)
+        {
+            guest_memory_size = minimum_size;
+        }
+        else if((guest_memory_size | 0) < 0)
+        {
+            guest_memory_size = Math.pow(2, 31) - MMAP_BLOCK_SIZE;
+        }
+        guest_memory_size = ((guest_memory_size - 1) | (MMAP_BLOCK_SIZE - 1)) + 1 | 0;
+
+        // One wasm page more than guest RAM: the JIT slow-path scratch pages
+        // live at [memory_size, memory_size + 0x2000) in the guest memory
+        // (src/rust/cpu/memory.rs gram_jit_scratch_base). maximum must be
+        // present (shared memories require one; gram.wasm's and the JIT
+        // modules' import declarations rely on it) and equals initial: guest
+        // RAM never grows.
+        const guest_pages = guest_memory_size / (64 * 1024) + 1;
+        guest_memory = new WebAssembly.Memory(guest_memory_is_shared
+            ? { "initial": guest_pages, "maximum": guest_pages, "shared": true }
+            : { "initial": guest_pages, "maximum": guest_pages });
+    }
 
     const wasm_shared_funcs = {
         "cpu_exception_hook": n => this.cpu_exception_hook(n),
@@ -110,32 +215,46 @@ export function V86(options)
         "__indirect_function_table": wasm_table,
     };
 
+    /* global __dirname */
+
+    // Artifact directory rule, shared by the default loader and the gram
+    // loader below: an explicit options.wasm_path names the main artifact
+    // verbatim (it wins also under guest_memory_backend "imported", where it
+    // must then point at a multimem-compatible build — cpu.js verifies), and
+    // gram artifacts are expected next to the main artifact.
+    const wasm_dirname = () =>
+        options.wasm_path ? options.wasm_path.substring(0, options.wasm_path.lastIndexOf("/") + 1) :
+        typeof window === "undefined" && typeof __dirname === "string" ? __dirname + "/" :
+        "build/";
+
     let wasm_fn = options.wasm_fn;
 
     if(!wasm_fn)
     {
         wasm_fn = env =>
         {
-            /* global __dirname */
-
             return new Promise(resolve => {
                 let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
+                if(guest_memory)
+                {
+                    // multimem build variant (XWAH-9): guest RAM is imported.
+                    // No fallback artifact — v86-fallback.wasm is a
+                    // single-memory build without the gram import ABI.
+                    v86_bin = DEBUG ? "v86-multimem-debug.wasm" : "v86-multimem.wasm";
+                    v86_bin_fallback = null;
+                }
+
                 if(options.wasm_path)
                 {
                     v86_bin = options.wasm_path;
-                    v86_bin_fallback = v86_bin.replace("v86.wasm", "v86-fallback.wasm");
-                }
-                else if(typeof window === "undefined" && typeof __dirname === "string")
-                {
-                    v86_bin = __dirname + "/" + v86_bin;
-                    v86_bin_fallback = __dirname + "/" + v86_bin_fallback;
+                    v86_bin_fallback = v86_bin_fallback && v86_bin.replace("v86.wasm", "v86-fallback.wasm");
                 }
                 else
                 {
-                    v86_bin = "build/" + v86_bin;
-                    v86_bin_fallback = "build/" + v86_bin_fallback;
+                    v86_bin = wasm_dirname() + v86_bin;
+                    v86_bin_fallback = v86_bin_fallback && wasm_dirname() + v86_bin_fallback;
                 }
 
                 load_file(v86_bin, {
@@ -149,6 +268,10 @@ export function V86(options)
                         }
                         catch(err)
                         {
+                            if(!v86_bin_fallback)
+                            {
+                                throw err;
+                            }
                             load_file(v86_bin_fallback, {
                                     done: async bytes => {
                                         const { instance } = await WebAssembly.instantiate(bytes, env);
@@ -175,15 +298,89 @@ export function V86(options)
         };
     }
 
-    wasm_fn({ "env": wasm_shared_funcs })
+    // Instantiation order under guest_memory_backend "imported"
+    // (docs/smp-phase3-design.md §2 option A): the guest memory already
+    // exists (above); instantiate the matching gram variant over it, merge
+    // its accessor exports plus the JS-implemented gram_copy_out into env,
+    // and only then instantiate the main module (default or custom wasm_fn
+    // alike — a custom wasm_fn receives the merged env unchanged in shape).
+    const build_env = async () =>
+    {
+        if(!guest_memory)
+        {
+            return { "env": wasm_shared_funcs };
+        }
+
+        const gram_bin = wasm_dirname() + (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm");
+        // load_file's failure paths only console.error and may never call
+        // done (in Node the readFile rejection additionally surfaces
+        // through the returned promise, caught here), so check what
+        // arrived: a missing or invalid gram artifact must fail the init
+        // chain loudly (see the .catch below) instead of hanging it
+        let gram_bytes = null;
+        try
+        {
+            gram_bytes = await new Promise((resolve, reject) =>
+            {
+                Promise.resolve(load_file(gram_bin, { done: resolve })).catch(reject);
+            });
+        }
+        catch(e)
+        {
+            console.error(e);
+        }
+        if(!gram_bytes || !WebAssembly.validate(gram_bytes))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires " +
+                (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm") +
+                " next to the multimem artifact (make gram-wasm), but " + gram_bin +
+                " is missing or not a valid WebAssembly module");
+        }
+        // shared-ness of gram.wasm's memory import must match guest_memory
+        // exactly (LinkError otherwise), hence the two artifact variants
+        const gram = await WebAssembly.instantiate(gram_bytes, { "env": { "guest_memory": guest_memory } });
+
+        const env = Object.assign(Object.create(null), wasm_shared_funcs, gram.instance.exports);
+        // guest RAM -> instance memory copy (svga LFB path): neither
+        // single-memory module can address both memories, so JS provides it
+        // (src/rust/cpu/memory.rs gram_ext)
+        env["gram_copy_out"] = (src_addr, dst, count) =>
+        {
+            new Uint8Array(wasm_memory.buffer, dst, count)
+                .set(new Uint8Array(guest_memory.buffer, src_addr, count));
+        };
+        return { "env": env };
+    };
+
+    build_env()
+        .then(env => wasm_fn(env))
         .then((exports) => {
             wasm_memory = exports.memory;
             exports["rust_init"]();
 
-            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
+            const emulator = this.v86 = new v86(this.emulator_bus, {
+                exports,
+                wasm_table,
+                guest_memory,
+                // plumbed alongside guest_memory itself so the CPU and the
+                // copy-first shims never have to sniff the buffer's type
+                // (the SharedArrayBuffer global can be hidden while shared
+                // memory still works)
+                guest_memory_shared: guest_memory_is_shared,
+            });
             cpu = emulator.cpu;
 
-            this.continue_init(emulator, options);
+            return this.continue_init(emulator, options);
+        })
+        .catch(e => {
+            // a swallowed rejection here would leave the emulator silently
+            // half-constructed (no "emulator-loaded", no error): log
+            // prominently, notify listeners (same channel as the
+            // "download-error" precedent above), and rethrow asynchronously
+            // so embedders get an uncaught error instead of a silent hang
+            console.error("Failed to initialize the emulator:", e);
+            this.emulator_bus && this.emulator_bus.send("emulator-error", e);
+            setTimeout(() => { throw e; }, 0);
         });
 
     this.zstd_worker = null;
@@ -746,7 +943,25 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                     };
                     env["dbg_trace_from_wasm"] = () => console.trace();
 
-                    wasm = new WebAssembly.Instance(new WebAssembly.Module(e.data), { "env": env });
+                    const module = new WebAssembly.Module(e.data);
+
+                    // stub the multimem build's gram_* guest-RAM accessors:
+                    // zstd decompression is self-contained in the module's
+                    // own memory, so they are the only imports legitimately
+                    // absent here and none of them are expected to be
+                    // called. Anything else unknown must keep producing a
+                    // hard LinkError at instantiation.
+                    for(const import_entry of WebAssembly.Module.imports(module))
+                    {
+                        const name = import_entry["name"];
+                        if(import_entry["module"] === "env" && import_entry["kind"] === "function" &&
+                            name.startsWith("gram_") && !env[name])
+                        {
+                            env[name] = () => console.error("zstd worker unexpectedly called " + name);
+                        }
+                    }
+
+                    wasm = new WebAssembly.Instance(module, { "env": env });
                     return;
                 }
 
@@ -1588,7 +1803,19 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
  */
 V86.prototype.read_memory = function(offset, length)
 {
-    return this.v86.cpu.read_blob(offset, length);
+    const cpu = this.v86.cpu;
+    const blob = cpu.read_blob(offset, length);
+    if(cpu.guest_memory_shared)
+    {
+        // Guest RAM is a shared imported memory (guest_memory_backend
+        // "imported" + shared): browsers reject SharedArrayBuffer-backed
+        // views in TextDecoder/Blob/fetch etc. (docs/smp-phase3-design.md
+        // §1 S4), so hand embedders a copy instead of the live view.
+        // guest_memory_shared is the flag the starter plumbed through wm —
+        // no buffer sniffing (the SharedArrayBuffer global can be hidden).
+        return blob.slice();
+    }
+    return blob;
 };
 
 /**

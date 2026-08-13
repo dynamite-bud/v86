@@ -7,7 +7,7 @@ INSTRUCTION_TABLES=src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
 		   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs \
 
 # Only the dependencies common to both generate_{jit,interpreter}.js
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js, $(wildcard gen/*.js))
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js gen/generate_gram_wasm.js, $(wildcard gen/*.js))
 JIT_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_jit.js
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
 ANALYZER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_analyzer.js
@@ -215,6 +215,17 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
+# guest-RAM accessor modules for the multimem build (XWAH-9 Phase 3 Stage 3).
+# Stage 5's guest_memory_backend "imported" loads them next to the main
+# artifact at runtime; shipping them with release bundles is Stage 6
+build/gram.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant nonshared
+build/gram-shared.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant shared
+
+.PHONY: gram-wasm
+gram-wasm: build/gram.wasm build/gram-shared.wasm
+
 .PHONY: virtio-gpu-wgpu
 .NOTPARALLEL: virtio-gpu-wgpu
 virtio-gpu-wgpu: $(VIRTIO_GPU_WGPU_JS) $(VIRTIO_GPU_WGPU_WASM)
@@ -247,6 +258,26 @@ build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Carg
 	mkdir -p build/
 	cargo rustc --release $(CARGO_FLAGS_SAFE)
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-fallback.wasm || true
+
+# multimem build (XWAH-9 Phase 3 Stage 4): guest RAM is an imported second
+# wasm memory, reached through gram.wasm's accessor exports (`make gram-wasm`)
+# and memidx-1 JIT code. Uses the same cargo artifact path as the default
+# build, so a default and a multimem build invalidate each other's cargo
+# cache; the copied build/*.wasm artifacts stay distinct.
+build/v86-multimem.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+	cargo rustc --release --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-multimem.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-multimem.wasm -o build/v86-multimem.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+
+build/v86-multimem-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
+	cargo rustc --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-multimem-debug.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
 
 debug-with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -417,12 +448,36 @@ virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
-rust-test: $(RUST_FILES)
+rust-test: $(RUST_FILES) build/gram.wasm build/gram-shared.wasm
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
+	./tests/rust/verify-wasmgen-multimem-output.js
+	./tests/rust/verify-gram-wasm.js
 
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
+
+.PHONY: threads-test
+threads-test: build/gram.wasm build/gram-shared.wasm
+	./tests/threads/atomics-exactness.js
+	./tests/threads/mailbox-protocol.js
+	./tests/threads/multimem-instance.js
+	./tests/threads/plain-race-vs-atomic.js
+	./tests/threads/shared-view-coherence.js
+
+# multimem variant (XWAH-9 Phase 3 Stage 5, named by design doc §4 Stage 6):
+# the imported-guest-memory backend end-to-end — real guests through the
+# public API plus the Layer B cross-thread test (which threads-test skips
+# unless the multimem artifact happens to exist; here it is a hard
+# dependency). NOTE: the multimem and default builds share the cargo
+# artifact path (see build/v86-multimem.wasm above), so this target
+# invalidates a previous default build's cargo cache and vice versa — the
+# copied build/*.wasm artifacts stay distinct.
+.PHONY: multimem-tests
+multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
+	./tests/api/multimem-negative.js
+	./tests/api/multimem.js
+	./tests/threads/multimem-instance.js
 
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js
@@ -438,9 +493,13 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/smp.js
 	./tests/api/smp-state.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test multimem-tests
 	# Skipping:
 	# - devices-test (hangs)
+	# multimem-tests runs last: its build/v86-multimem-debug.wasm dependency
+	# shares the cargo artifact path with the default build (see the
+	# build/v86-multimem.wasm comment), so ordering it after every
+	# default-artifact consumer avoids extra cargo cache invalidations
 
 eslint:
 	eslint src tests gen lib examples tools
