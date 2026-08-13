@@ -8,6 +8,10 @@ process.on("unhandledRejection", error => { throw error; });
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+V86.prototype.zstd_decompress_worker = async function(decompressed_size, source)
+{
+    return this.zstd_decompress(decompressed_size, source);
+};
 
 const emulator = new V86({
     bios: { url: __dirname + "/../../bios/seabios.bin" },
