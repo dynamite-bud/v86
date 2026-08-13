@@ -1,6 +1,13 @@
 name: Build webgpuvirt Mesa artifacts
 
 on:
+  push:
+    branches:
+      - feature/XWAH-5/ghostty-webgpuvirt
+    paths:
+      - .github/workflows/mesa-webgpuvirt-build.yml
+      - tools/docker/virtio-gpu-alpine-codex/Dockerfile
+      - tools/docker/virtio-gpu-alpine-codex/mesa-webgpuvirt.patch
   workflow_dispatch:
 
 permissions:
