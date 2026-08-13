@@ -395,17 +395,21 @@ CPU.prototype.wasm_patch = function()
     this.store_current_tsc = get_import("store_current_tsc");
 
     this.set_cpuid_level = get_import("set_cpuid_level");
-    this.set_smp_cpus = get_import("set_smp_cpus");
-    this.get_firmware_cpus = get_import("get_firmware_cpus");
-    this.rearm_cpu_event_halt = get_import("rearm_cpu_event_halt");
+
+    // SMP exports (XWAH-9): optional because wasm builds that predate
+    // set_smp_cpus legitimately lack them — every caller guards on
+    // presence and falls back to single-CPU behavior
+    this.set_smp_cpus = get_optional_import("set_smp_cpus");
+    this.get_firmware_cpus = get_optional_import("get_firmware_cpus");
+    this.rearm_cpu_event_halt = get_optional_import("rearm_cpu_event_halt");
 
     // per-vCPU save/restore region (XWAH-9, docs/smp-phase2-design.md
     // §JS-side impacts); missing on wasm builds that predate set_smp_cpus
-    this.get_vcpu_state_addr = get_import("get_vcpu_state_addr");
-    this.get_vcpu_state_size = get_import("get_vcpu_state_size");
-    this.get_current_vcpu = get_import("get_current_vcpu");
-    this.vcpu_prepare_save = get_import("vcpu_prepare_save");
-    this.vcpu_finish_restore = get_import("vcpu_finish_restore");
+    this.get_vcpu_state_addr = get_optional_import("get_vcpu_state_addr");
+    this.get_vcpu_state_size = get_optional_import("get_vcpu_state_size");
+    this.get_current_vcpu = get_optional_import("get_current_vcpu");
+    this.vcpu_prepare_save = get_optional_import("vcpu_prepare_save");
+    this.vcpu_finish_restore = get_optional_import("vcpu_finish_restore");
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
@@ -668,8 +672,13 @@ CPU.prototype.get_state_ioapic = function()
 CPU.prototype.set_state = function(state)
 {
     const VCPU_STATE_HEADER_SIZE = 8; // [u32 smp_cpus][u32 current_vcpu]
-    const VCPU_STRUCT_SIZE = 1216 + 5; // keep in sync with vcpu.rs
-    const VCPU_RUN_STATE_OFFSET = 1216; // Vcpu.run_state, keep in sync with vcpu.rs
+    // Per-vCPU struct size and trailing-field offsets, derived from the
+    // wasm module when state[93] is present. The Rust layout (vcpu.rs,
+    // repr(C) Vcpu) is the authority: [u8; 1216] save_area, then the
+    // run_state/wake_pending/pending_init/pending_sipi bytes and the free
+    // pending_sipi_vector u8.
+    let vcpu_struct_size = 0;
+    let vcpu_run_state_offset = 0;
 
     if(state[46] instanceof Uint8Array)
     {
@@ -717,6 +726,10 @@ CPU.prototype.set_state = function(state)
         {
             throw new StateLoadError("Unexpected vcpu state: " + state[93]);
         }
+        vcpu_struct_size = this.get_vcpu_state_size() / this.smp_cpus;
+        dbg_assert(Number.isInteger(vcpu_struct_size),
+            "vcpu state size not divisible by cpu count");
+        vcpu_run_state_offset = vcpu_struct_size - 5;
         const header = new DataView(
             state[93].buffer, state[93].byteOffset, VCPU_STATE_HEADER_SIZE);
         const image_cpus = header.getUint32(0, true);
@@ -728,7 +741,7 @@ CPU.prototype.set_state = function(state)
                 ", but the machine has cpus=" + this.smp_cpus);
         }
         if(vcpu_current >= image_cpus ||
-            state[93].length !== VCPU_STATE_HEADER_SIZE + this.smp_cpus * VCPU_STRUCT_SIZE)
+            state[93].length !== VCPU_STATE_HEADER_SIZE + this.smp_cpus * vcpu_struct_size)
         {
             throw new StateLoadError(
                 "Unexpected vcpu state length " + state[93].length +
@@ -736,14 +749,28 @@ CPU.prototype.set_state = function(state)
         }
         for(let i = 0; i < this.smp_cpus; i++)
         {
-            // an out-of-range run_state discriminant would be undefined
-            // behavior once Rust reads the struct back
-            const run_state =
-                state[93][VCPU_STATE_HEADER_SIZE + i * VCPU_STRUCT_SIZE + VCPU_RUN_STATE_OFFSET];
+            // an out-of-range run_state discriminant or a bool byte other
+            // than 0/1 would be undefined behavior once Rust reads the
+            // struct back (run_state, then the wake_pending/pending_init/
+            // pending_sipi bools; the trailing pending_sipi_vector is a
+            // free u8)
+            const struct_start = VCPU_STATE_HEADER_SIZE + i * vcpu_struct_size;
+            const run_state = state[93][struct_start + vcpu_run_state_offset];
             if(run_state > 2)
             {
                 throw new StateLoadError(
                     "Unexpected run state " + run_state + " for vcpu " + i);
+            }
+            for(let offset = vcpu_run_state_offset + 1;
+                offset < vcpu_run_state_offset + 4; offset++)
+            {
+                const bool_byte = state[93][struct_start + offset];
+                if(bool_byte > 1)
+                {
+                    throw new StateLoadError(
+                        "Unexpected bool byte " + bool_byte + " at struct offset " +
+                        offset + " for vcpu " + i);
+                }
             }
         }
     }
@@ -766,9 +793,9 @@ CPU.prototype.set_state = function(state)
         // save_area[current] trivially consistent with the live block.
         // The full_clear_tlb/update_state_flags calls at the end of this
         // function cover the implicit vcpu switch.
-        dbg_assert(this.get_vcpu_state_size() === this.smp_cpus * VCPU_STRUCT_SIZE);
+        dbg_assert(this.get_vcpu_state_size() === this.smp_cpus * vcpu_struct_size);
         new Uint8Array(
-            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.smp_cpus * VCPU_STRUCT_SIZE)
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.smp_cpus * vcpu_struct_size)
             .set(state[93].subarray(VCPU_STATE_HEADER_SIZE));
         this.vcpu_finish_restore(vcpu_current);
     }
