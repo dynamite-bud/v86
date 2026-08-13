@@ -284,11 +284,21 @@ artifacts remain byte-identical.** Threading itself is Phase 4; Phase 3 ends
 with the memory architecture proven on one thread.
 
 - **Stage 0 — spikes S1–S4** (evidence recorded here; go/no-go on option A).
-- **Stage 1 — guest-RAM abstraction in Rust (inert).** `gram_read*/write*/
-  copy/fill/base_tag()/tag_to_phys()/phys_to_tag()` layer; default build
-  `#[inline(always)]` over mem8 arithmetic (LTO makes it vanish). Port the
-  17 raw sites + memory.rs bodies. Gate: expect goldens unchanged, suites
-  green, artifact `cmp` before/after.
+- **Stage 1 — guest-RAM abstraction in Rust (inert). LANDED.** gram layer
+  inside memory.rs: `#[inline(always)]` fn accessors for memory.rs's own
+  helper bodies, and `#[macro_export]` macros (`gram_base_tag!`,
+  `phys_to_tag!`, `tag_to_phys!`, `tag_page_to_phys_page!`, `gram_read8!`)
+  for the 16 raw sites outside the module. Empirical correction to the
+  original sketch: plain fn wrappers are NOT byte-identical — new
+  cross-module references change rustc's mono-item collection order,
+  renumbering symbol disambiguators and flipping LLVM's order-sensitive
+  function merging (+2,872 bytes of churn with semantically identical IR).
+  Macros keep the compiler input token-identical, so the default build is
+  byte-identical by construction; hunks are line-neutral to preserve
+  panic-Location records. Stage 4 flips the macro bodies to extern-import
+  calls under `guest-ram-import`. Gate results: goldens unchanged, artifact
+  cmp byte-identical against a determinism-verified baseline, all suites
+  green including SMP acceptance.
 - **Stage 2 — wasm_builder multi-memory emitters (inert).** memidx-aware
   load/store + `write_guest_memory_import`; unit-tested by assembling and
   validating modules.

@@ -1974,7 +1974,7 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
         entry = do_page_walk(address, true, user, true, true)?.get();
     }
     let has_code = entry & TLB_HAS_CODE != 0;
-    let phys_addr = (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32;
+    let phys_addr = crate::tag_to_phys!((entry & !0xFFF ^ address) as u32);
     let page = Page::page_of(phys_addr);
     if !has_code {
         return Ok(phys_addr);
@@ -2018,7 +2018,7 @@ pub unsafe fn translate_address(
     {
         entry = do_page_walk(address, for_writing, user, jit, side_effects)?.get();
     }
-    Ok((entry & !0xFFF ^ address) as u32 - memory::mem8 as u32)
+    Ok(crate::tag_to_phys!((entry & !0xFFF ^ address) as u32))
 }
 
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
@@ -2028,7 +2028,7 @@ pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPage
         entry = do_page_walk(address, true, user, false, true)?.get();
     }
     Ok((
-        (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32,
+        crate::tag_to_phys!((entry & !0xFFF ^ address) as u32),
         entry & TLB_HAS_CODE == 0,
     ))
 }
@@ -2238,12 +2238,12 @@ pub unsafe fn do_page_walk(
         | if global && 0 != cr4 & CR4_PGE { TLB_GLOBAL } else { 0 }
         | if has_code { TLB_HAS_CODE } else { 0 };
 
-    let tlb_entry = (high + memory::mem8 as u32) as i32 ^ page << 12 | info_bits as i32;
+    let tlb_entry = crate::phys_to_tag!(high) as i32 ^ page << 12 | info_bits as i32;
 
     dbg_assert!((high ^ (page as u32) << 12) & 0xFFF == 0);
     if side_effects {
-        // bake in the addition with memory::mem8 to save an instruction from the fast path
-        // of memory accesses
+        // bake in the addition with gram_base_tag! (phys_to_tag!) to save an
+        // instruction from the fast path of memory accesses
         tlb_data[page as usize] = tlb_entry;
 
         jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
@@ -2418,9 +2418,9 @@ pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             if physical_page == tlb_physical_page {
                 unsafe {
                     tlb_data[page as usize] =
@@ -2441,9 +2441,9 @@ pub fn tlb_set_has_code_multiple(physical_pages: &HashSet<Page>, has_code: bool)
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             if physical_pages.contains(&tlb_physical_page) {
                 unsafe {
                     tlb_data[page as usize] =
@@ -2470,7 +2470,7 @@ pub fn check_tlb_invariants() {
             continue;
         }
 
-        let target = (entry ^ page << 12) as u32 - unsafe { memory::mem8 } as u32;
+        let target = unsafe { crate::tag_to_phys!((entry ^ page << 12) as u32) };
         dbg_assert!(!memory::in_mapped_range(target));
 
         let entry_has_code = entry & TLB_HAS_CODE != 0;
@@ -2490,7 +2490,7 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
         *last_virt_eip = eip & !0xFFF
     }
     dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
-    let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
+    let data8 = crate::gram_read8!(*eip_phys ^ eip);
     *instruction_pointer = eip + 1;
     return Ok(data8);
 }
@@ -3211,7 +3211,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 
         i += 1;
         let start_eip = *instruction_pointer;
-        let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
+        let opcode = crate::gram_read8!(phys_addr);
         *instruction_pointer += 1;
         dbg_assert!(*prefixes == 0);
         run_instruction(opcode | (*is_32 as i32) << 8);
@@ -3803,7 +3803,7 @@ pub unsafe fn safe_read_slow_jit(
         ((scratch as i32) ^ addr) & !0xFFF
     }
     else {
-        ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
 }
 
@@ -3834,7 +3834,7 @@ pub unsafe fn get_phys_eip_slow_jit(addr: i32) -> i32 {
         Err(()) => 1,
         Ok(addr_low) => {
             dbg_assert!(!memory::in_mapped_range(addr_low as u32)); // same assumption as in read_imm8
-            ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+            (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
         },
     }
 }
@@ -3946,7 +3946,7 @@ pub unsafe fn safe_write_slow_jit(
         ((scratch as i32) ^ addr) & !0xFFF
     }
     else {
-        ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
 }
 

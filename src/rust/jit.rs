@@ -193,9 +193,9 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
         let page = unsafe { cpu::valid_tlb_entries[i as usize] };
         let entry = unsafe { cpu::tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             let w = match unsafe { cpu::tlb_code[page as usize] } {
                 None => None,
                 Some(c) => unsafe { Some(c.as_ref().wasm_table_index) },
@@ -1109,9 +1109,9 @@ pub fn codegen_finalize_finished(
         let page = unsafe { cpu::valid_tlb_entries[i as usize] };
         let entry = unsafe { cpu::tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             if let Some(info) = pages.get(&tlb_physical_page) {
                 set_tlb_code(
                     Page::of_u32(page as u32),
@@ -2283,9 +2283,9 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
                 let page = unsafe { cpu::valid_tlb_entries[i as usize] };
                 let entry = unsafe { cpu::tlb_data[page as usize] };
                 if 0 != entry {
-                    let tlb_physical_page = Page::of_u32(
-                        (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-                    );
+                    let tlb_physical_page = Page::of_u32(unsafe {
+                        crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+                    });
                     match unsafe { cpu::tlb_code[page as usize] } {
                         None => {},
                         Some(c) => unsafe {
