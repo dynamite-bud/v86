@@ -55,9 +55,17 @@ pub enum RunState {
     Parked = 2,
 }
 
-// Layout is part of the future JS save/restore contract exposed through
-// get_vcpu_state_addr/get_vcpu_state_size; keep in sync with cpu.js once
-// that lands (stage 5).
+// CPU.set_state rejects state images whose run_state bytes exceed the last
+// discriminant before they are written into the Vcpu structs (an invalid
+// discriminant would be undefined behavior to read back). Keep in sync with
+// the run-state validation in cpu.js.
+const _: () = assert!(RunState::Parked as u8 == 2);
+
+// Layout is part of the JS save/restore contract exposed through
+// get_vcpu_state_addr/get_vcpu_state_size: CPU.get_state captures this
+// array raw into the trailing state slot and CPU.set_state validates it
+// against the same offsets. Keep in sync with the VCPU_STRUCT_SIZE/
+// VCPU_RUN_STATE_OFFSET constants in cpu.js.
 #[repr(C)]
 pub struct Vcpu {
     pub save_area: [u8; BLOCK_SIZE],
@@ -279,6 +287,27 @@ pub unsafe fn vcpu_prepare_save() {
     }
     let current = CURRENT;
     save_block(live_block(), &mut vcpus[current].save_area);
+}
+
+/// Complete a JS snapshot restore (CPU.set_state) after it has written the
+/// state image's raw per-vCPU region over the array behind
+/// get_vcpu_state_addr: make `current` — the vCPU that was live when the
+/// image was saved — current again and load its save area into the live
+/// block, then restart the scheduler rotation at the BSP. The outgoing
+/// live block is deliberately not saved first: it belongs to the
+/// pre-restore machine. The caller subsequently overwrites live-block
+/// fields from the per-field state slots (same bytes — get_state runs
+/// vcpu_prepare_save before capturing the region) and finishes with
+/// update_state_flags and full_clear_tlb, which also upholds the
+/// switch_to TLB contract for this switch.
+#[no_mangle]
+pub unsafe fn vcpu_finish_restore(current: u32) {
+    let current = current as usize;
+    let vcpus = VCPUS.try_lock().unwrap();
+    dbg_assert!(current < vcpus.len());
+    CURRENT = current;
+    load_block(&vcpus[current].save_area, live_block());
+    crate::cpu::cpu::reset_vcpu_rotation();
 }
 
 #[cfg(test)]

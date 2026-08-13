@@ -134,12 +134,24 @@ APs in WaitForSipi).
 
 Live cpu.js views show the current vCPU — acceptable, switches happen only
 inside `main_loop`, so synchronous device callbacks and post-tick reads see
-one consistent vCPU. Save/restore: new trailing `state[93]` slot only when
-`smp_cpus > 1` (`[u32 smp_cpus][u32 current]` + N × `[meta + 1216B block]`,
-via new `vcpu_prepare_save`/`get_vcpu_state_addr/size` exports); cpus=1
-state images stay byte-identical, STATE_VERSION stays 6. Documented risk:
-older builds silently ignore slot 93 when restoring an experimental
-cpus>1 image.
+one consistent vCPU. Save/restore (stage 5, as landed): new trailing
+`state[93]` slot only when `smp_cpus > 1` — `[u32 smp_cpus][u32 current]`
+header + the raw N × `Vcpu` array (1216-byte save area + run_state/wake/
+INIT/SIPI latches, 1221 bytes each, repr(C) in vcpu.rs), captured via
+`vcpu_prepare_save`/`get_vcpu_state_addr/size` after `store_current_tsc`
+so the region agrees with the per-field slots; cpus=1 state images stay
+byte-identical, STATE_VERSION stays 6. Restore pre-validates the slot in
+the same fail-fast block as the APIC blob (missing slot on a cpus>1
+machine, header/machine cpus mismatch, bad length/current index and
+out-of-range run_state discriminants all throw StateLoadError before any
+mutation), then writes the region back first, lets `vcpu_finish_restore`
+make the image's current vCPU live (loading its save area into the live
+block and resetting the scheduler rotation), and lets the per-field
+restores overwrite the live block — region-first so live-block fields
+without individual slots (e.g. `apic_enabled`) come from the image, while
+`set_state`'s trailing `update_state_flags`/`full_clear_tlb` cover the
+implicit switch. Documented risk: older builds silently ignore slot 93
+when restoring an experimental cpus>1 image.
 
 ## Testing
 
@@ -155,16 +167,17 @@ Alpine linux-lts i386 kernel (verify CONFIG_SMP=y) or a new SMP buildroot.
 
 ## Stages
 
-1. **vCPU scaffolding (inert)** — vcpu.rs (block save/load with fixups,
-   switch_to, run states, exports), set_smp_cpus allocation, reset_cpu
-   decomposition, cargo tests.
-2. **LAPIC multiplication (inert)** — APICS vector, per-context MMIO/ack/
-   timer, route/deliver fan-out with wake plumbing, ioapic threading,
-   per-vCPU CPUID/MSR identity, JS apic state for N.
-3. **Scheduler + hlt + INIT/SIPI execution** — main_loop round-robin with
-   verbatim cpus=1 fast path, Parked semantics, SIPI state machine.
-4. **Firmware un-gating + SMP tests** — fw_cfg/CMOS counts served by
-   `get_firmware_cpus` (single wasm authority, see §AP startup), acpi
+1. **vCPU scaffolding (inert)** (landed) — vcpu.rs (block save/load with
+   fixups, switch_to, run states, exports), set_smp_cpus allocation,
+   reset_cpu decomposition, cargo tests.
+2. **LAPIC multiplication (inert)** (landed) — APICS vector, per-context
+   MMIO/ack/timer, route/deliver fan-out with wake plumbing, ioapic
+   threading, per-vCPU CPUID/MSR identity, JS apic state for N.
+3. **Scheduler + hlt + INIT/SIPI execution** (landed) — main_loop
+   round-robin with verbatim cpus=1 fast path, Parked semantics, SIPI
+   state machine.
+4. **Firmware un-gating + SMP tests** (landed) — fw_cfg/CMOS counts served
+   by `get_firmware_cpus` (single wasm authority, see §AP startup), acpi
    requirement enforced in starter.js (clamp to 1 + dbg_assert without
    acpi), tests/api/smp.js against the Alpine 9p fixture (skips when the
    image is missing). Stage-4 finding: SeaBIOS's legacy ACPI build reads
@@ -174,7 +187,10 @@ Alpine linux-lts i386 kernel (verify CONFIG_SMP=y) or a new SMP buildroot.
    `smptest.flat` needs a 32-bit gcc to build (unavailable on the primary
    dev host) — CI follow-up: build.sh the flats, teach run.mjs a cpus
    argument, wire a Makefile target.
-5. **Save/restore for N>1 + docs.**
+5. **Save/restore for N>1 + docs** (landed) — trailing `state[93]` slot,
+   fail-fast pre-validation, `vcpu_finish_restore` export (details in
+   §JS-side impacts), tests/api/smp-state.js roundtrip + mismatch
+   coverage.
 
 ## Risks
 

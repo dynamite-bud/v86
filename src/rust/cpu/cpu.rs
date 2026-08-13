@@ -3319,6 +3319,12 @@ pub unsafe fn main_loop() -> f64 {
 // main_loop invocations so a vCPU running when the frame budget expires
 // cannot starve the others (docs/smp-phase2-design.md §Scheduler).
 static mut VCPU_ROTATION: usize = 0;
+
+/// Restart the round-robin at the BSP. Any value would be schedulable
+/// (pick_vcpu reduces modulo the vCPU count), but a snapshot restore
+/// (vcpu::vcpu_finish_restore) resets it so the pre-restore rotation does
+/// not leak into the restored machine's scheduling.
+pub unsafe fn reset_vcpu_rotation() { VCPU_ROTATION = 0 }
 // The machine-dead event has been delivered to JS; rearmed by reset_cpu
 static mut HALT_EVENT_SENT: bool = false;
 

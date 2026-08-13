@@ -399,6 +399,14 @@ CPU.prototype.wasm_patch = function()
     this.get_firmware_cpus = get_import("get_firmware_cpus");
     this.rearm_cpu_event_halt = get_import("rearm_cpu_event_halt");
 
+    // per-vCPU save/restore region (XWAH-9, docs/smp-phase2-design.md
+    // §JS-side impacts); missing on wasm builds that predate set_smp_cpus
+    this.get_vcpu_state_addr = get_import("get_vcpu_state_addr");
+    this.get_vcpu_state_size = get_import("get_vcpu_state_size");
+    this.get_current_vcpu = get_import("get_current_vcpu");
+    this.vcpu_prepare_save = get_import("vcpu_prepare_save");
+    this.vcpu_finish_restore = get_import("vcpu_finish_restore");
+
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
 
@@ -578,6 +586,28 @@ CPU.prototype.get_state = function()
     state[91] = this.devices.parallel1;
     state[92] = this.devices.virtio_gpu;
 
+    if(this.smp_cpus > 1)
+    {
+        // Trailing vcpu slot (XWAH-9, docs/smp-phase2-design.md §JS-side
+        // impacts): [u32 smp_cpus][u32 current_vcpu] header followed by
+        // the raw per-vCPU array (N × Vcpu: save area, run state, wake and
+        // INIT/SIPI latches; layout in vcpu.rs). Only assigned when
+        // smp_cpus > 1 so cpus=1 state images stay byte-identical. Built
+        // last: vcpu_prepare_save syncs the live block — including
+        // current_tsc, written by store_current_tsc above — into the
+        // current vCPU's save area, making the region agree with the
+        // per-field slots captured from the live block.
+        this.vcpu_prepare_save();
+        const region = new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.get_vcpu_state_size());
+        const vcpu_state = new Uint8Array(8 + region.length);
+        const header = new DataView(vcpu_state.buffer, 0, 8);
+        header.setUint32(0, this.smp_cpus, true);
+        header.setUint32(4, this.get_current_vcpu(), true);
+        vcpu_state.set(region, 8);
+        state[93] = vcpu_state;
+    }
+
     return state;
 };
 
@@ -637,6 +667,10 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    const VCPU_STATE_HEADER_SIZE = 8; // [u32 smp_cpus][u32 current_vcpu]
+    const VCPU_STRUCT_SIZE = 1216 + 5; // keep in sync with vcpu.rs
+    const VCPU_RUN_STATE_OFFSET = 1216; // Vcpu.run_state, keep in sync with vcpu.rs
+
     if(state[46] instanceof Uint8Array)
     {
         // validate before any state is applied: throwing mid-restore would
@@ -653,9 +687,91 @@ CPU.prototype.set_state = function(state)
         }
     }
 
+    // validate the trailing vcpu slot in the same pre-mutation block: a
+    // cpus mismatch in either direction must fail before anything is
+    // restored (XWAH-9, docs/smp-phase2-design.md §JS-side impacts)
+    let vcpu_current = -1; // >= 0 exactly when state[93] passed validation
+    if(state[93] === undefined || state[93] === null)
+    {
+        // note: an unset trailing array slot deserializes as undefined
+        // today, but would round-trip through JSON as null if a later
+        // slot is ever added behind it
+        if(this.smp_cpus > 1)
+        {
+            throw new StateLoadError(
+                "State image has no vcpu contexts (expected " +
+                this.smp_cpus + "); was it saved with cpus=1 or by an " +
+                "older version?");
+        }
+    }
+    else
+    {
+        if(!this.vcpu_finish_restore)
+        {
+            throw new StateLoadError(
+                "State image has vcpu contexts, but the wasm module " +
+                "predates vcpu save/restore");
+        }
+        if(!(state[93] instanceof Uint8Array) ||
+            state[93].length < VCPU_STATE_HEADER_SIZE)
+        {
+            throw new StateLoadError("Unexpected vcpu state: " + state[93]);
+        }
+        const header = new DataView(
+            state[93].buffer, state[93].byteOffset, VCPU_STATE_HEADER_SIZE);
+        const image_cpus = header.getUint32(0, true);
+        vcpu_current = header.getUint32(4, true);
+        if(image_cpus !== this.smp_cpus)
+        {
+            throw new StateLoadError(
+                "State image was saved with cpus=" + image_cpus +
+                ", but the machine has cpus=" + this.smp_cpus);
+        }
+        if(vcpu_current >= image_cpus ||
+            state[93].length !== VCPU_STATE_HEADER_SIZE + this.smp_cpus * VCPU_STRUCT_SIZE)
+        {
+            throw new StateLoadError(
+                "Unexpected vcpu state length " + state[93].length +
+                " or current vcpu " + vcpu_current);
+        }
+        for(let i = 0; i < this.smp_cpus; i++)
+        {
+            // an out-of-range run_state discriminant would be undefined
+            // behavior once Rust reads the struct back
+            const run_state =
+                state[93][VCPU_STATE_HEADER_SIZE + i * VCPU_STRUCT_SIZE + VCPU_RUN_STATE_OFFSET];
+            if(run_state > 2)
+            {
+                throw new StateLoadError(
+                    "Unexpected run state " + run_state + " for vcpu " + i);
+            }
+        }
+    }
+
     // the restored machine may be live: allow a later full halt to fire
     // the machine-dead event again
     this.rearm_cpu_event_halt && this.rearm_cpu_event_halt();
+
+    if(vcpu_current >= 0)
+    {
+        // Canonical vcpu restore order: write the image's whole per-vCPU
+        // region first and make its current vCPU live again
+        // (vcpu_finish_restore loads that save area into the live block and
+        // resets the scheduler rotation), then let the per-field restores
+        // below overwrite the live block. The final live block equals the
+        // saved one either way — get_state ran vcpu_prepare_save, so the
+        // region's current save area and the per-field slots hold the same
+        // bytes — but region-first also restores live-block fields that
+        // have no individual state slot (e.g. apic_enabled) and keeps
+        // save_area[current] trivially consistent with the live block.
+        // The full_clear_tlb/update_state_flags calls at the end of this
+        // function cover the implicit vcpu switch.
+        dbg_assert(this.get_vcpu_state_size() === this.smp_cpus * VCPU_STRUCT_SIZE);
+        new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.smp_cpus * VCPU_STRUCT_SIZE)
+            .set(state[93].subarray(VCPU_STATE_HEADER_SIZE));
+        this.vcpu_finish_restore(vcpu_current);
+    }
 
     this.memory_size[0] = state[0];
 
