@@ -84,27 +84,22 @@ const _: () = assert!(std::mem::size_of::<Vcpu>() == BLOCK_SIZE + 5);
 static VCPUS: Mutex<Vec<Vcpu>> = Mutex::new(Vec::new());
 static mut CURRENT: usize = 0;
 
-// Whether a Startup IPI may actually start an AP. Must stay false until the
-// firmware CPU counts are un-gated (XWAH-9 stage 4): SeaBIOS rel-1.16.x
-// unconditionally broadcasts INIT+SIPI at its AP trampoline (0x10000)
-// during POST and, believing CMOS 0x5F advertises no further CPUs, restores
-// the trampoline bytes immediately — an AP honoring that SIPI would either
-// execute the restored garbage (its slice starts after the BSP's ends) or
-// bump SeaBIOS's CountCPUs past the expected value and hang the POST spin
-// loop. Real hardware behaves just as badly with such mismatched firmware
-// counts, so the SIPI is dropped while the counts are gated.
+// Whether a Startup IPI may actually start an AP. Armed exclusively by
+// init() when it sizes the table with more than one vCPU, making the wasm
+// module the single authority for "SMP enabled": the firmware-visible CPU
+// counts (cpu::get_firmware_cpus, read by cpu.js for fw_cfg NB_CPUS/
+// MAX_CPUS and CMOS 0x5F) report more than one CPU exactly when a SIPI is
+// honored, whatever JavaScript calls or doesn't. The two must never
+// disagree: SeaBIOS rel-1.16.x unconditionally broadcasts INIT+SIPI at its
+// AP trampoline (0x10000) during POST and, when CMOS 0x5F advertises no
+// further CPUs, restores the trampoline bytes without waiting — an AP
+// honoring that SIPI would either execute the restored garbage (its slice
+// starts after the BSP's ends) or bump SeaBIOS's CountCPUs past the
+// expected value and hang the POST spin loop. Real hardware behaves just
+// as badly with such mismatched firmware counts.
 static AP_STARTUP_ENABLED: AtomicBool = AtomicBool::new(false);
 
-pub fn ap_startup_enabled() -> bool {
-    AP_STARTUP_ENABLED.load(Ordering::Relaxed)
-}
-
-/// Allow Startup IPIs to start APs; called by JavaScript (cpu.js) when it
-/// advertises the real CPU count to the firmware (XWAH-9 stage 4).
-#[no_mangle]
-pub fn enable_ap_startup() {
-    AP_STARTUP_ENABLED.store(true, Ordering::Relaxed)
-}
+pub fn ap_startup_enabled() -> bool { AP_STARTUP_ENABLED.load(Ordering::Relaxed) }
 
 // Copy the live CPU-state block into a save area. Pure over caller-provided
 // buffers so native unit tests never touch the real wasm offsets.
@@ -152,6 +147,9 @@ pub fn init(n: usize) {
         });
     }
     unsafe { CURRENT = 0 };
+    // Single authority for "SMP enabled" (see AP_STARTUP_ENABLED): sizing
+    // the table is the one place that arms or disarms AP startup
+    AP_STARTUP_ENABLED.store(n > 1, Ordering::Relaxed);
 }
 
 /// Switch the live CPU-state block to vCPU i: save the block into the
@@ -178,29 +176,19 @@ pub unsafe fn switch_to(i: usize) {
 
 /// Mark an interrupt for vCPU i so the scheduler (stage 3) knows a halted
 /// vCPU has a reason to wake. Spurious wakes are harmless.
-pub fn note_interrupt(i: usize) {
-    VCPUS.try_lock().unwrap()[i].wake_pending = true
-}
+pub fn note_interrupt(i: usize) { VCPUS.try_lock().unwrap()[i].wake_pending = true }
 
-pub fn wake_pending(i: usize) -> bool {
-    VCPUS.try_lock().unwrap()[i].wake_pending
-}
+pub fn wake_pending(i: usize) -> bool { VCPUS.try_lock().unwrap()[i].wake_pending }
 
-pub fn clear_wake_pending(i: usize) {
-    VCPUS.try_lock().unwrap()[i].wake_pending = false
-}
+pub fn clear_wake_pending(i: usize) { VCPUS.try_lock().unwrap()[i].wake_pending = false }
 
 /// Latch an INIT IPI for vCPU i. The scheduler performs the actual reset at
 /// the next slice boundary: the target is never running mid-slice, and
 /// resetting it there avoids doing so under the APIC lock and
 /// mid-instruction of the sending vCPU.
-pub fn set_pending_init(i: usize) {
-    VCPUS.try_lock().unwrap()[i].pending_init = true
-}
+pub fn set_pending_init(i: usize) { VCPUS.try_lock().unwrap()[i].pending_init = true }
 
-pub fn pending_init(i: usize) -> bool {
-    VCPUS.try_lock().unwrap()[i].pending_init
-}
+pub fn pending_init(i: usize) -> bool { VCPUS.try_lock().unwrap()[i].pending_init }
 
 pub fn take_pending_init(i: usize) -> bool {
     let mut vcpus = VCPUS.try_lock().unwrap();
@@ -221,7 +209,8 @@ pub fn take_pending_sipi(i: usize) -> Option<u8> {
     let vcpu = &mut vcpus[i];
     if std::mem::take(&mut vcpu.pending_sipi) {
         Some(vcpu.pending_sipi_vector)
-    } else {
+    }
+    else {
         None
     }
 }
@@ -238,9 +227,7 @@ pub fn clear_pending(i: usize) {
 /// in_hlt of vCPU i as stored in its save area. Only meaningful for
 /// non-current vCPUs; for the current one the live block is authoritative
 /// (read *global_pointers::in_hlt instead).
-pub fn saved_in_hlt(i: usize) -> bool {
-    VCPUS.try_lock().unwrap()[i].save_area[IN_HLT_OFFSET] != 0
-}
+pub fn saved_in_hlt(i: usize) -> bool { VCPUS.try_lock().unwrap()[i].save_area[IN_HLT_OFFSET] != 0 }
 
 /// Apply a Startup IPI to vCPU i's save area: real-mode entry at
 /// vector<<12 with CS selector vector<<8 and IP 0; everything else keeps
@@ -259,40 +246,28 @@ pub fn apply_sipi(i: usize, vector: u8) {
         .copy_from_slice(&0i32.to_le_bytes());
 }
 
-pub fn current() -> usize {
-    unsafe { CURRENT }
-}
+pub fn current() -> usize { unsafe { CURRENT } }
 
 /// Number of vCPUs; 0 until set_smp_cpus has sized the table.
-pub fn count() -> usize {
-    VCPUS.try_lock().unwrap().len()
-}
+pub fn count() -> usize { VCPUS.try_lock().unwrap().len() }
 
-pub fn run_state(i: usize) -> RunState {
-    VCPUS.try_lock().unwrap()[i].run_state
-}
+pub fn run_state(i: usize) -> RunState { VCPUS.try_lock().unwrap()[i].run_state }
 
 pub fn set_run_state(i: usize, run_state: RunState) {
     VCPUS.try_lock().unwrap()[i].run_state = run_state
 }
 
 #[no_mangle]
-pub fn get_current_vcpu() -> u32 {
-    current() as u32
-}
+pub fn get_current_vcpu() -> u32 { current() as u32 }
 
 /// Address of the contiguous per-vCPU array (N × Vcpu, save area first in
 /// each element) for future JS save/restore. Only stable after set_smp_cpus
 /// has sized the table: the Vec allocates once and is never reallocated.
 #[no_mangle]
-pub fn get_vcpu_state_addr() -> u32 {
-    VCPUS.try_lock().unwrap().as_ptr() as u32
-}
+pub fn get_vcpu_state_addr() -> u32 { VCPUS.try_lock().unwrap().as_ptr() as u32 }
 
 #[no_mangle]
-pub fn get_vcpu_state_size() -> u32 {
-    (count() * std::mem::size_of::<Vcpu>()) as u32
-}
+pub fn get_vcpu_state_size() -> u32 { (count() * std::mem::size_of::<Vcpu>()) as u32 }
 
 /// Sync the live block into the current vCPU's save area so the region
 /// returned by get_vcpu_state_addr is complete for saving.
@@ -385,7 +360,8 @@ mod tests {
                     "shared byte at offset {}",
                     offset
                 );
-            } else {
+            }
+            else {
                 assert_eq!(
                     block[offset], incoming[offset],
                     "vcpu byte at offset {}",
@@ -430,8 +406,10 @@ mod tests {
         let _lock = STATE_LOCK.lock().unwrap();
         init(2);
 
-        // AP startup stays gated until stage 4 flips it from cpu.js
-        assert!(!ap_startup_enabled());
+        // A multi-vCPU table arms AP startup; nothing else does (the
+        // shared static keeps every stateful test at n=2, so the disarmed
+        // n=1 case is only asserted structurally: init is the sole writer)
+        assert!(ap_startup_enabled());
 
         // INIT latches once and take consumes it
         assert!(!pending_init(1));

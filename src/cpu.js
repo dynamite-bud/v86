@@ -396,6 +396,7 @@ CPU.prototype.wasm_patch = function()
 
     this.set_cpuid_level = get_import("set_cpuid_level");
     this.set_smp_cpus = get_import("set_smp_cpus");
+    this.get_firmware_cpus = get_import("get_firmware_cpus");
     this.rearm_cpu_event_halt = get_import("rearm_cpu_event_halt");
 
     this.device_raise_irq = get_import("device_raise_irq");
@@ -1170,20 +1171,27 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            // XWAH-9: must stay at 1 until startup IPIs actually start
-            // application processors; SeaBIOS spins forever waiting for the
-            // advertised CPUs to come up (verified empirically). smp_cpus is
-            // currently only visible to the guest through cpuid.
-            this.fw_value = i32(1);
+            // XWAH-9: the wasm module is the single authority for the
+            // firmware-visible CPU count — get_firmware_cpus reports
+            // smp_cpus exactly when startup IPIs actually start application
+            // processors, and 1 otherwise (SeaBIOS spins forever waiting
+            // for advertised CPUs that cannot come up, verified
+            // empirically). Older wasm without the export has no vcpu
+            // contexts and always boots one CPU.
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
             // XWAH-9: see FW_CFG_NB_CPUS
-            this.fw_value = i32(1);
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_NUMA)
         {
-            this.fw_value = new Uint8Array(16);
+            // u64 NUMA node count (0), then one u64 node id per CPU:
+            // SeaBIOS reads 8 * (1 + max_cpus) bytes when it builds the
+            // ACPI tables (all zero — no NUMA topology)
+            const max_cpus = this.get_firmware_cpus ? this.get_firmware_cpus() : 1;
+            this.fw_value = new Uint8Array(8 * (1 + max_cpus));
         }
         else if(value === FW_CFG_FILE_DIR)
         {
@@ -1758,10 +1766,12 @@ CPU.prototype.fill_cmos = function(rtc, settings)
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
     // QEMU convention: CMOS 0x5F holds the number of additional (application)
-    // processors, i.e. smp_cpus - 1. XWAH-9: must stay at 0 until startup
-    // IPIs actually start application processors; SeaBIOS spins forever
-    // waiting for the advertised CPUs to come up (verified empirically).
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
+    // processors, i.e. smp_cpus - 1. XWAH-9: sourced from the wasm module
+    // like fw_cfg NB_CPUS/MAX_CPUS, the single authority that reports more
+    // than one CPU exactly when startup IPIs actually start application
+    // processors (SeaBIOS spins forever waiting for advertised CPUs that
+    // cannot come up, verified empirically).
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.get_firmware_cpus ? this.get_firmware_cpus() - 1 : 0);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);

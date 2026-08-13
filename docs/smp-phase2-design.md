@@ -119,11 +119,16 @@ further CPUs, restores the trampoline bytes without waiting. An AP honoring
 that SIPI under gated counts either executes the restored bytes (its first
 slice begins only after the sending BSP's slice ends) or bumps CountCPUs
 past the expected value and hangs the POST spin loop — real hardware fares
-no better with mismatched firmware counts. Startup IPIs are therefore
-dropped until `vcpu::enable_ap_startup()` is called; stage 4 must call it
-from cpu.js together with the firmware count un-gating. INIT stays live in
-stage 3 (the deferred save-area reset is safe and keeps APs in
-WaitForSipi).
+no better with mismatched firmware counts. Firmware counts above 1 and
+SIPI honoring must therefore never disagree, so the wasm module is the
+single authority for both (stage 4): `vcpu::init` arms `AP_STARTUP_ENABLED`
+exactly when it sizes the table with more than one vCPU, and cpu.js sources
+fw_cfg NB_CPUS/MAX_CPUS and CMOS 0x5F from the `get_firmware_cpus()`
+export, which reports `smp_cpus` when AP startup is armed and 1 otherwise —
+JavaScript can neither un-gate the counts without arming SIPIs nor the
+reverse, and an older wasm without the export keeps both at 1. INIT was
+already live in stage 3 (the deferred save-area reset is safe and keeps
+APs in WaitForSipi).
 
 ## JS-side impacts
 
@@ -158,8 +163,17 @@ Alpine linux-lts i386 kernel (verify CONFIG_SMP=y) or a new SMP buildroot.
    per-vCPU CPUID/MSR identity, JS apic state for N.
 3. **Scheduler + hlt + INIT/SIPI execution** — main_loop round-robin with
    verbatim cpus=1 fast path, Parked semantics, SIPI state machine.
-4. **Firmware un-gating + SMP tests** — fw_cfg/CMOS counts, acpi
-   requirement, smptest.flat, tests/api/smp.js + SMP kernel fixture.
+4. **Firmware un-gating + SMP tests** — fw_cfg/CMOS counts served by
+   `get_firmware_cpus` (single wasm authority, see §AP startup), acpi
+   requirement enforced in starter.js (clamp to 1 + dbg_assert without
+   acpi), tests/api/smp.js against the Alpine 9p fixture (skips when the
+   image is missing). Stage-4 finding: SeaBIOS's legacy ACPI build reads
+   8×(1+max_cpus) bytes from FW_CFG_NUMA (u64 node count + one u64 node id
+   per CPU); the fw_cfg handler sizes its all-zero reply accordingly (the
+   old fixed 16 bytes covered exactly one CPU). kvm-unit-tests
+   `smptest.flat` needs a 32-bit gcc to build (unavailable on the primary
+   dev host) — CI follow-up: build.sh the flats, teach run.mjs a cpus
+   argument, wire a Makefile target.
 5. **Save/restore for N>1 + docs.**
 
 ## Risks

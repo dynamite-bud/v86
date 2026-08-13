@@ -435,6 +435,7 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/reboot.js
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
+	./tests/api/smp.js
 
 all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
 	# Skipping:
