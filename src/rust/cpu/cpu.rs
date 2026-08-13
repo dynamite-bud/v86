@@ -4600,6 +4600,12 @@ pub unsafe fn reset_cpu() {
 
     full_clear_tlb();
 
+    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
+    // interrupts) must return to power-on values on reboot; stale values
+    // would misroute interrupts now that destinations are matched honestly
+    apic::reset();
+    ioapic::reset();
+
     *protected_mode = false;
 
     // http://www.sandpile.org/x86/initial.htm

@@ -85,7 +85,9 @@ pub struct Apic {
     lvt_thermal_sensor: u32,
 }
 
-static APIC: Mutex<Apic> = Mutex::new(Apic {
+// Power-on register values (Intel SDM vol. 3A, "Local APIC State After
+// Power-Up or Reset"); also applied on guest reboot via reset()
+const APIC_RESET_STATE: Apic = Apic {
     apic_id: 0,
     timer_divider: 0,
     timer_divider_shift: 1,
@@ -109,7 +111,11 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
     local_destination: 0,
     error: 0,
     read_error: 0,
-});
+};
+
+static APIC: Mutex<Apic> = Mutex::new(APIC_RESET_STATE);
+
+pub fn reset() { *get_apic() = APIC_RESET_STATE; }
 
 pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
 
@@ -381,8 +387,10 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
                 );
             }
             else if destination_shorthand == 1 {
-                // self
-                deliver(apic, vector, IOAPIC_DELIVERY_FIXED, is_level);
+                // self: same mode dispatch as the other shorthands, so
+                // INIT/SIPI/NMI to self take the intended ignore paths
+                // instead of tripping the fixed-delivery vector assert
+                deliver(apic, vector, delivery_mode, is_level);
             }
             else if destination_shorthand == 2 {
                 // all including self
@@ -551,7 +559,9 @@ fn timer(apic: &mut Apic, now: f64) -> f64 {
 // Send an interrupt with an ICR- or IOAPIC-style destination to all matching
 // local APICs: compute the set of target LAPICs, then deliver to each. The set
 // holds at most the single local LAPIC today; XWAH-9 phase 2 replaces the
-// singleton with one LAPIC per vCPU.
+// singleton with one LAPIC per vCPU. Returns whether any LAPIC accepted the
+// interrupt, so callers such as the IOAPIC only commit side effects (remote
+// IRR) for interrupts that were actually delivered.
 pub fn route(
     apic: &mut Apic,
     vector: u8,
@@ -559,24 +569,21 @@ pub fn route(
     is_level: bool,
     destination: u8,
     destination_mode: u8,
-) {
-    let mut any_match = false;
-
+) -> bool {
     if lapic_matches_destination(apic, destination, destination_mode) {
-        any_match = true;
         deliver(apic, vector, mode, is_level);
+        return true;
     }
 
-    if !any_match {
-        // common once guests send INIT/SIPI to APs that don't exist yet
-        dbg_log!(
-            "APIC drop: no LAPIC matches destination={:02x} ({}) vector={:02x} delivery_mode={}",
-            destination,
-            DESTINATION_MODES[destination_mode as usize],
-            vector,
-            DELIVERY_MODES[mode as usize],
-        );
-    }
+    // common once guests send INIT/SIPI to APs that don't exist yet
+    dbg_log!(
+        "APIC drop: no LAPIC matches destination={:02x} ({}) vector={:02x} delivery_mode={}",
+        destination,
+        DESTINATION_MODES[destination_mode as usize],
+        vector,
+        DELIVERY_MODES[mode as usize],
+    );
+    false
 }
 
 // xAPIC destination matching per the Intel SDM vol. 3A, "Determining IPI
