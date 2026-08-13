@@ -24,6 +24,30 @@ import { MemoryFileStorage, ServerFileStorageWrapper } from "./filestorage.js";
 import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
 
+// Multi-memory capability probe (XWAH-9 Phase 3): a minimal hand-assembled
+// two-memory module — imports "e"."m" and "e"."g" (the JIT modules' shape,
+// wasm_builder.rs) and performs one memidx-1 i32.load. Engines without the
+// multi-memory proposal reject it at validation, so guest_memory_backend
+// "imported" can fail loudly at construction instead of wedging at the
+// first JIT compile (byte layout cribbed from
+// tests/rust/verify-wasmgen-multimem-output.js's module contract; memarg
+// encoding: flags|0x40, then memidx LEB, then offset LEB).
+// Exported for tests/api/multimem-negative.js.
+export const MULTIMEM_PROBE_MODULE = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6D, // \0asm magic
+    0x01, 0x00, 0x00, 0x00, // version 1
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: one type, () -> ()
+    0x02, 0x0F, 0x02, // import section, two imports:
+    0x01, 0x65, 0x01, 0x6D, 0x02, 0x00, 0x00, // "e" "m" memory {min 0}
+    0x01, 0x65, 0x01, 0x67, 0x02, 0x00, 0x00, // "e" "g" memory {min 0}
+    0x03, 0x02, 0x01, 0x00, // function section: one function of type 0
+    0x0A, 0x0B, 0x01, 0x09, 0x00, // code section: one body, no locals
+    0x41, 0x00, // i32.const 0
+    0x28, 0x42, 0x01, 0x00, // i32.load align=2|0x40 memidx=1 offset=0
+    0x1A, // drop
+    0x0B, // end
+]);
+
 /**
  * Constructor for emulator instances.
  *
@@ -91,6 +115,18 @@ export function V86(options)
 
     if(guest_memory_backend === "imported")
     {
+        // Capability probe before committing to the backend: JIT-generated
+        // modules of the multimem build are true multi-memory modules, so an
+        // engine without multi-memory support could instantiate the (single
+        // -memory) main artifact and gram.wasm fine, then silently fail
+        // every JIT compile. Fail at construction instead.
+        if(!WebAssembly.validate(MULTIMEM_PROBE_MODULE))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires WebAssembly " +
+                "multi-memory support (JIT-generated modules import guest RAM as a " +
+                "second memory), which this engine lacks");
+        }
+
         guest_memory_is_shared = guest_memory_shared_option === "auto"
             ? (typeof globalThis.crossOriginIsolated !== "undefined"
                 ? Boolean(globalThis.crossOriginIsolated)
@@ -100,9 +136,16 @@ export function V86(options)
         // Mirror of CPU.create_memory's size normalisation (cpu.js) — the
         // memory must exist before the module instantiates, long before
         // CPU.init runs; create_memory asserts the two calculations agree.
+        // The minimum_size mirrors CPU.init's `settings.initrd ? 64M : 1M`
+        // under the conditions continue_init will produce: settings.initrd
+        // is populated from options.initrd unconditionally, but from
+        // bzimage_initrd_from_filesystem only when there is no initial
+        // state (see done() in continue_init — the filesystem-sourced
+        // initrd is skipped when a state image overrides boot).
         let guest_memory_size = options.memory_size || 64 * 1024 * 1024;
         const minimum_size =
-            options.initrd || options.bzimage_initrd_from_filesystem ? 64 * 1024 * 1024 : 1024 * 1024;
+            options.initrd || (options.bzimage_initrd_from_filesystem && !options.initial_state)
+                ? 64 * 1024 * 1024 : 1024 * 1024;
         if(guest_memory_size < minimum_size)
         {
             guest_memory_size = minimum_size;
@@ -269,7 +312,30 @@ export function V86(options)
         }
 
         const gram_bin = wasm_dirname() + (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm");
-        const gram_bytes = await new Promise(resolve => load_file(gram_bin, { done: resolve }));
+        // load_file's failure paths only console.error and may never call
+        // done (in Node the readFile rejection additionally surfaces
+        // through the returned promise, caught here), so check what
+        // arrived: a missing or invalid gram artifact must fail the init
+        // chain loudly (see the .catch below) instead of hanging it
+        let gram_bytes = null;
+        try
+        {
+            gram_bytes = await new Promise((resolve, reject) =>
+            {
+                Promise.resolve(load_file(gram_bin, { done: resolve })).catch(reject);
+            });
+        }
+        catch(e)
+        {
+            console.error(e);
+        }
+        if(!gram_bytes || !WebAssembly.validate(gram_bytes))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires " +
+                (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm") +
+                " next to the multimem artifact (make gram-wasm), but " + gram_bin +
+                " is missing or not a valid WebAssembly module");
+        }
         // shared-ness of gram.wasm's memory import must match guest_memory
         // exactly (LinkError otherwise), hence the two artifact variants
         const gram = await WebAssembly.instantiate(gram_bytes, { "env": { "guest_memory": guest_memory } });
@@ -292,10 +358,29 @@ export function V86(options)
             wasm_memory = exports.memory;
             exports["rust_init"]();
 
-            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table, guest_memory });
+            const emulator = this.v86 = new v86(this.emulator_bus, {
+                exports,
+                wasm_table,
+                guest_memory,
+                // plumbed alongside guest_memory itself so the CPU and the
+                // copy-first shims never have to sniff the buffer's type
+                // (the SharedArrayBuffer global can be hidden while shared
+                // memory still works)
+                guest_memory_shared: guest_memory_is_shared,
+            });
             cpu = emulator.cpu;
 
-            this.continue_init(emulator, options);
+            return this.continue_init(emulator, options);
+        })
+        .catch(e => {
+            // a swallowed rejection here would leave the emulator silently
+            // half-constructed (no "emulator-loaded", no error): log
+            // prominently, notify listeners (same channel as the
+            // "download-error" precedent above), and rethrow asynchronously
+            // so embedders get an uncaught error instead of a silent hang
+            console.error("Failed to initialize the emulator:", e);
+            this.emulator_bus && this.emulator_bus.send("emulator-error", e);
+            setTimeout(() => { throw e; }, 0);
         });
 
     this.zstd_worker = null;
@@ -860,14 +945,17 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
 
                     const module = new WebAssembly.Module(e.data);
 
-                    // stub whatever else the module imports (e.g. the
-                    // multimem build's gram_* guest-RAM accessors): zstd
-                    // decompression is self-contained in the module's own
-                    // memory, so none of these are expected to be called
+                    // stub the multimem build's gram_* guest-RAM accessors:
+                    // zstd decompression is self-contained in the module's
+                    // own memory, so they are the only imports legitimately
+                    // absent here and none of them are expected to be
+                    // called. Anything else unknown must keep producing a
+                    // hard LinkError at instantiation.
                     for(const import_entry of WebAssembly.Module.imports(module))
                     {
                         const name = import_entry["name"];
-                        if(import_entry["module"] === "env" && import_entry["kind"] === "function" && !env[name])
+                        if(import_entry["module"] === "env" && import_entry["kind"] === "function" &&
+                            name.startsWith("gram_") && !env[name])
                         {
                             env[name] = () => console.error("zstd worker unexpectedly called " + name);
                         }
@@ -1715,13 +1803,16 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
  */
 V86.prototype.read_memory = function(offset, length)
 {
-    const blob = this.v86.cpu.read_blob(offset, length);
-    if(typeof SharedArrayBuffer !== "undefined" && blob.buffer instanceof SharedArrayBuffer)
+    const cpu = this.v86.cpu;
+    const blob = cpu.read_blob(offset, length);
+    if(cpu.guest_memory_shared)
     {
         // Guest RAM is a shared imported memory (guest_memory_backend
         // "imported" + shared): browsers reject SharedArrayBuffer-backed
         // views in TextDecoder/Blob/fetch etc. (docs/smp-phase3-design.md
         // §1 S4), so hand embedders a copy instead of the live view.
+        // guest_memory_shared is the flag the starter plumbed through wm —
+        // no buffer sniffing (the SharedArrayBuffer global can be hidden).
         return blob.slice();
     }
     return blob;

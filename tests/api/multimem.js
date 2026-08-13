@@ -120,6 +120,25 @@ async function run_linux4(shared)
     assert.deepEqual(Array.from(cpu.mem8.subarray(SCRATCH_ADDR, SCRATCH_ADDR + 4)),
         [0xAA, 0x55, 0x12, 0xED], "write_memory visible in the imported memory");
 
+    // Zero-page-scan agreement: under the imported backend pack_memory
+    // scans pages with a JS loop over the guest memory instead of the wasm
+    // is_memory_zeroed export (whose per-8-byte gram accessor calls made a
+    // save cross the instance boundary millions of times — cpu.js
+    // pack_memory). Assert the two verdicts agree on a sample of pages
+    // (a full sweep through the export is the very call storm the JS path
+    // avoids); the roundtrip below then proves the packed image restores.
+    await emulator.stop(); // don't race the running guest between the scans
+    {
+        const { bitmap } = cpu.pack_memory();
+        const page_count = cpu.mem8.length >> 12;
+        for(let page = 0; page < page_count; page += 61)
+        {
+            assert.equal(!bitmap.get(page), !!cpu.is_memory_zeroed(page << 12, 0x1000),
+                "JS zero-page scan must agree with the wasm export at page " + page);
+        }
+    }
+    emulator.run();
+
     // save/restore roundtrip over the imported backend
     console.log("Saving: %s", name);
     const state = await emulator.save_state();

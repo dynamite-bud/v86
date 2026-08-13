@@ -475,6 +475,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 # copied build/*.wasm artifacts stay distinct.
 .PHONY: multimem-tests
 multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
+	./tests/api/multimem-negative.js
 	./tests/api/multimem.js
 	./tests/threads/multimem-instance.js
 
