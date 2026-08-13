@@ -420,6 +420,7 @@ virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
+	./tests/rust/verify-wasmgen-multimem-output.js
 
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test

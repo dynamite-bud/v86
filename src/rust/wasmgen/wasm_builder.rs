@@ -79,14 +79,14 @@ pub struct WasmBuilder {
 
     import_table_size: usize, // the current import table size (to avoid reading 2 byte leb)
     import_count: u16,        // same as above
-
     initial_static_size: usize, // size of module after initialization, rest is drained on reset
-
+    // if set, finish() imports guest RAM as a second memory: (min_pages, max_pages, shared)
+    #[cfg(any(test, feature = "guest-ram-import"))]
+    guest_memory_import: Option<(u32, u32, bool)>,
     // label for referencing block/if/loop constructs directly via branch instructions
     next_label: Label,
     label_stack: Vec<Label>,
     label_to_depth: HashMap<Label, usize>,
-
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
     local_count: u8,
@@ -126,9 +126,9 @@ impl WasmBuilder {
 
             import_table_size: 2,
             import_count: 0,
-
             initial_static_size: 0,
-
+            #[cfg(any(test, feature = "guest-ram-import"))]
+            guest_memory_import: None,
             label_to_depth: HashMap::new(),
             label_stack: Vec::new(),
             next_label: Label::ZERO,
@@ -177,21 +177,21 @@ impl WasmBuilder {
         dbg_assert!(self.label_stack.is_empty());
 
         self.write_memory_import();
+        #[cfg(any(test, feature = "guest-ram-import"))]
+        if let Some((min_pages, max_pages, shared)) = self.guest_memory_import {
+            self.write_guest_memory_import(min_pages, max_pages, shared);
+        }
         self.write_function_section();
         self.write_export_section();
-
         // write code section preamble
         self.output.push(op::SC_CODE);
-
         let idx_code_section_size = self.output.len(); // we will write to this location later
         self.output.push(0);
         self.output.push(0); // write temp val for now using 4 bytes
         self.output.push(0);
         self.output.push(0);
-
         self.output.push(1); // number of function bodies: just 1
-
-        // same as above but for body size of the function
+                             // same as above but for body size of the function
         let idx_fn_body_size = self.output.len();
         self.output.push(0);
         self.output.push(0);
@@ -519,6 +519,7 @@ impl WasmBuilder {
         self.output.push(FunctionType::FN1.to_u8());
     }
 
+    #[cfg(not(any(test, feature = "guest-ram-import")))]
     pub fn write_export_section(&mut self) {
         self.output.push(op::SC_EXPORT);
         self.output.push(1 + 1 + 1 + 1 + 2); // size of this section
@@ -536,7 +537,6 @@ impl WasmBuilder {
         self.output.push(0); // add 2 bytes for writing 16 byte val
         write_fixed_leb16_at_idx(&mut self.output, next_op_idx, self.import_count - 1);
     }
-
     fn get_fn_idx(&mut self, fn_name: &str, type_index: FunctionType) -> u16 {
         match self.get_import_index(fn_name) {
             Some(idx) => idx,
@@ -976,13 +976,363 @@ impl WasmBuilder {
     pub fn unreachable(&mut self) { self.instruction_body.push(op::OP_UNREACHABLE) }
 
     pub fn instruction_body_length(&self) -> u32 { self.instruction_body.len() as u32 }
+
+    // ---- XWAH-9 Phase 3 (option A): multi-memory emitters, inert in the default build ----
+    // Nothing below is called by the shipping JIT; it exists for the Stage 4
+    // `guest-ram-import` build and is exercised by the unit tests. It is
+    // deliberately placed at the end of the file (below every panic site
+    // above) so the default artifact stays byte-identical: panic Location
+    // records embed the line numbers of the code above.
+
+    /// Make finish() import guest RAM as a second memory "e"."g" (memory index
+    /// GUEST_MEMORY_INDEX), directly after the module memory import "e"."m".
+    /// Shared and non-shared variants both declare a maximum: shared memories
+    /// require one, and engines reject shared/non-shared import mismatches at
+    /// link time, so the non-COI path needs the explicit non-shared form.
+    /// Builder-level configuration: it deliberately survives reset(). When
+    /// never called, module output is byte-identical to the single-memory form.
+    #[cfg(any(test, feature = "guest-ram-import"))]
+    #[allow(dead_code)]
+    pub fn set_guest_memory_import(&mut self, min_pages: u32, max_pages: u32, shared: bool) {
+        dbg_assert!(min_pages <= max_pages);
+        dbg_assert!(max_pages <= 0x10000); // wasm32 limit of 4 GiB
+        self.guest_memory_import = Some((min_pages, max_pages, shared));
+    }
+
+    #[allow(dead_code)]
+    fn write_guest_memory_import(&mut self, min_pages: u32, max_pages: u32, shared: bool) {
+        let old_len = self.output.len();
+
+        self.output.push(1);
+        self.output.push('e' as u8);
+        self.output.push(1);
+        self.output.push('g' as u8);
+
+        self.output.push(op::EXT_MEMORY);
+
+        if shared {
+            self.output.push(op::MEM_LIMITS_SHARED_HAS_MAX);
+        }
+        else {
+            self.output.push(op::MEM_LIMITS_HAS_MAX);
+        }
+        write_leb_u32(&mut self.output, min_pages);
+        write_leb_u32(&mut self.output, max_pages);
+
+        let entry_size = self.output.len() - old_len;
+
+        let new_import_count = self.import_count + 1;
+        self.set_import_count(new_import_count);
+
+        let new_table_size = self.import_table_size + entry_size;
+        self.set_import_table_size(new_table_size);
+    }
+
+    // guest-memory-aware twin of the cfg(not(...)) write_export_section above,
+    // kept in sync with it: when the guest memory import is present, the
+    // exported function index has to skip one more memory import
+    #[cfg(any(test, feature = "guest-ram-import"))]
+    pub fn write_export_section(&mut self) {
+        self.output.push(op::SC_EXPORT);
+        self.output.push(1 + 1 + 1 + 1 + 2); // size of this section
+        self.output.push(1); // count of table: just one function exported
+
+        self.output.push(1); // length of exported function name
+        self.output.push('f' as u8); // function name
+        self.output.push(op::EXT_FUNCTION);
+
+        // index of the exported function
+        // function space starts with imports. index of last import is import count - 1
+        // the last imports however are memories (the module memory, optionally followed by the
+        // guest memory), so we subtract those
+        let memory_import_count = 1 + self.guest_memory_import.is_some() as u16;
+        let next_op_idx = self.output.len();
+        self.output.push(0);
+        self.output.push(0); // add 2 bytes for writing 16 byte val
+        write_fixed_leb16_at_idx(
+            &mut self.output,
+            next_op_idx,
+            self.import_count - memory_import_count,
+        );
+    }
+
+    // Guest-memory (memory index GUEST_MEMORY_INDEX) variants of the emitters
+    // used by the gen_safe_read/gen_safe_write fast paths. The aligned
+    // load/store emitters have no guest variants: they only ever address
+    // per-instance state (registers, tlb_data, scratch), which stays memory 0
+
+    fn write_guest_memarg(&mut self, align: u8, byte_offset: u32) {
+        self.instruction_body.push(align | op::MEM_MULTI_MEMORY);
+        self.instruction_body.push(GUEST_MEMORY_INDEX); // 1-byte leb
+        write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn load_u8_from_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32LOAD8U);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn load_unaligned_u16_from_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32LOAD16U);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn load_unaligned_i32_from_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32LOAD);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn load_unaligned_i64_from_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I64LOAD);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn store_u8_to_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32STORE8);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn store_unaligned_u16_to_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32STORE16);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn store_unaligned_i32_to_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I32STORE);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn store_unaligned_i64_to_guest(&mut self, byte_offset: u32) {
+        self.instruction_body.push(op::OP_I64STORE);
+        self.write_guest_memarg(op::MEM_NO_ALIGN, byte_offset);
+    }
+
+    // Atomic instructions (threads proposal, 0xFE-prefixed), memory-index
+    // parametrized. Inert until Phase 4 makes the x86 LOCK prefix real; the
+    // i32 rmw family below covers the LOCK-able x86 ops (ADD, SUB/DEC/NEG,
+    // AND, OR, XOR, XCHG/XADD, CMPXCHG) at 8/16/32 bit. Atomic accesses
+    // require exact natural alignment, so the align field is fixed per width
+
+    fn write_atomic_memarg(&mut self, align: u8, memidx: u8, byte_offset: u32) {
+        if memidx == 0 {
+            self.instruction_body.push(align);
+        }
+        else {
+            dbg_assert!(memidx < 0x80);
+            self.instruction_body.push(align | op::MEM_MULTI_MEMORY);
+            self.instruction_body.push(memidx); // 1-byte leb
+        }
+        write_leb_u32(&mut self.instruction_body, byte_offset);
+    }
+
+    fn atomic_op(&mut self, subopcode: u8, align: u8, memidx: u8, byte_offset: u32) {
+        self.instruction_body.push(op::OP_ATOMIC_PREFIX);
+        self.instruction_body.push(subopcode);
+        self.write_atomic_memarg(align, memidx, byte_offset);
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_fence(&mut self) {
+        self.instruction_body.push(op::OP_ATOMIC_PREFIX);
+        self.instruction_body.push(op::OP_ATOMICFENCE);
+        self.instruction_body.push(0); // reserved, must be zero
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_add_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(op::OP_I32ATOMICRMWADD, op::MEM_ALIGN32, memidx, byte_offset);
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_add_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16ADDU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_add_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8ADDU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_sub_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(op::OP_I32ATOMICRMWSUB, op::MEM_ALIGN32, memidx, byte_offset);
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_sub_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16SUBU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_sub_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8SUBU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_and_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(op::OP_I32ATOMICRMWAND, op::MEM_ALIGN32, memidx, byte_offset);
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_and_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16ANDU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_and_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8ANDU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_or_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(op::OP_I32ATOMICRMWOR, op::MEM_ALIGN32, memidx, byte_offset);
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_or_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16ORU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_or_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8ORU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xor_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(op::OP_I32ATOMICRMWXOR, op::MEM_ALIGN32, memidx, byte_offset);
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xor_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16XORU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xor_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8XORU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xchg_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMWXCHG,
+            op::MEM_ALIGN32,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xchg_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16XCHGU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_xchg_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8XCHGU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn atomic_rmw_cmpxchg_i32(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMWCMPXCHG,
+            op::MEM_ALIGN32,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_cmpxchg_u16(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW16CMPXCHGU,
+            op::MEM_ALIGN16,
+            memidx,
+            byte_offset,
+        );
+    }
+    #[allow(dead_code)]
+    pub fn atomic_rmw_cmpxchg_u8(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I32ATOMICRMW8CMPXCHGU,
+            op::MEM_NO_ALIGN,
+            memidx,
+            byte_offset,
+        );
+    }
 }
+
+// By convention guest RAM is the second memory of generated modules (imported
+// as "e"."g" via set_guest_memory_import), the module's own memory being
+// memory 0 (XWAH-9 Phase 3, option A)
+#[allow(dead_code)]
+pub const GUEST_MEMORY_INDEX: u8 = 1;
 
 #[cfg(test)]
 mod tests {
-    use super::{FunctionType, WasmBuilder, WASM_MODULE_ARGUMENT_COUNT};
+    use super::{FunctionType, WasmBuilder, GUEST_MEMORY_INDEX, WASM_MODULE_ARGUMENT_COUNT};
     use std::fs::File;
     use std::io::Write;
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
 
     #[test]
     fn import_table_management() {
@@ -1043,5 +1393,266 @@ mod tests {
 
         let mut f = File::create("build/dummy_output.wasm").expect("creating dummy_output.wasm");
         f.write_all(&m.output).expect("write dummy_output.wasm");
+    }
+
+    #[test]
+    fn guest_load_store_encoding() {
+        let mut m = WasmBuilder::new();
+
+        let cases: &[(fn(&mut WasmBuilder, u32), u8)] = &[
+            (WasmBuilder::load_u8_from_guest, 0x2d),
+            (WasmBuilder::load_unaligned_u16_from_guest, 0x2f),
+            (WasmBuilder::load_unaligned_i32_from_guest, 0x28),
+            (WasmBuilder::load_unaligned_i64_from_guest, 0x29),
+            (WasmBuilder::store_u8_to_guest, 0x3a),
+            (WasmBuilder::store_unaligned_u16_to_guest, 0x3b),
+            (WasmBuilder::store_unaligned_i32_to_guest, 0x36),
+            (WasmBuilder::store_unaligned_i64_to_guest, 0x37),
+        ];
+        for &(emit, opcode) in cases {
+            let start = m.instruction_body.len();
+            emit(&mut m, 16);
+            // memarg: flags (align 0 | multi-memory bit), memidx 1, offset 16
+            assert_eq!(&m.instruction_body[start..], &[opcode, 0x40, 0x01, 0x10]);
+        }
+
+        // multi-byte leb offset
+        let start = m.instruction_body.len();
+        m.load_unaligned_i32_from_guest(8192);
+        assert_eq!(
+            &m.instruction_body[start..],
+            &[0x28, 0x40, 0x01, 0x80, 0x40]
+        );
+    }
+
+    #[test]
+    fn atomic_encoding() {
+        let mut m = WasmBuilder::new();
+
+        let start = m.instruction_body.len();
+        m.atomic_fence();
+        assert_eq!(&m.instruction_body[start..], &[0xfe, 0x03, 0x00]);
+
+        // (emitter, 0xFE-prefixed subopcode, natural alignment)
+        let cases: &[(fn(&mut WasmBuilder, u8, u32), u8, u8)] = &[
+            (WasmBuilder::atomic_rmw_add_i32, 0x1e, 2),
+            (WasmBuilder::atomic_rmw_add_u16, 0x21, 1),
+            (WasmBuilder::atomic_rmw_add_u8, 0x20, 0),
+            (WasmBuilder::atomic_rmw_sub_i32, 0x25, 2),
+            (WasmBuilder::atomic_rmw_sub_u16, 0x28, 1),
+            (WasmBuilder::atomic_rmw_sub_u8, 0x27, 0),
+            (WasmBuilder::atomic_rmw_and_i32, 0x2c, 2),
+            (WasmBuilder::atomic_rmw_and_u16, 0x2f, 1),
+            (WasmBuilder::atomic_rmw_and_u8, 0x2e, 0),
+            (WasmBuilder::atomic_rmw_or_i32, 0x33, 2),
+            (WasmBuilder::atomic_rmw_or_u16, 0x36, 1),
+            (WasmBuilder::atomic_rmw_or_u8, 0x35, 0),
+            (WasmBuilder::atomic_rmw_xor_i32, 0x3a, 2),
+            (WasmBuilder::atomic_rmw_xor_u16, 0x3d, 1),
+            (WasmBuilder::atomic_rmw_xor_u8, 0x3c, 0),
+            (WasmBuilder::atomic_rmw_xchg_i32, 0x41, 2),
+            (WasmBuilder::atomic_rmw_xchg_u16, 0x44, 1),
+            (WasmBuilder::atomic_rmw_xchg_u8, 0x43, 0),
+            (WasmBuilder::atomic_rmw_cmpxchg_i32, 0x48, 2),
+            (WasmBuilder::atomic_rmw_cmpxchg_u16, 0x4b, 1),
+            (WasmBuilder::atomic_rmw_cmpxchg_u8, 0x4a, 0),
+        ];
+        for &(emit, subopcode, align) in cases {
+            // on the guest memory: flags align|0x40, then memidx, then offset
+            let start = m.instruction_body.len();
+            emit(&mut m, GUEST_MEMORY_INDEX, 8);
+            let expected = [0xfe, subopcode, align | 0x40, 0x01, 0x08];
+            assert_eq!(&m.instruction_body[start..], &expected);
+
+            // on memory 0: plain memarg without the multi-memory flag
+            let start = m.instruction_body.len();
+            emit(&mut m, 0, 8);
+            assert_eq!(
+                &m.instruction_body[start..],
+                &[0xfe, subopcode, align, 0x08]
+            );
+        }
+    }
+
+    #[test]
+    fn guest_memory_import() {
+        // shared: limits flag 0x03, min/max in pages (2048 -> 80 10, 4096 -> 80 20)
+        let mut m = WasmBuilder::new();
+        m.set_guest_memory_import(2048, 4096, true);
+        m.const_i32(2);
+        m.call_fn("foo", FunctionType::FN1);
+        m.finish();
+        // the guest memory import directly follows the module memory import
+        // ("e"."m", flag 0, min 64), making it memory index 1
+        #[rustfmt::skip]
+        let entries = [
+            1, 'e' as u8, 1, 'm' as u8, 2, 0x00, 0x40, // "e"."m"
+            1, 'e' as u8, 1, 'g' as u8, 2, 0x03, 0x80, 0x10, 0x80, 0x20, // "e"."g"
+        ];
+        assert!(find_subsequence(&m.output, &entries).is_some());
+        // the exported function index accounts for both memory imports:
+        // imports are [foo, "e"."m", "e"."g"], so function "f" is index 1
+        assert!(find_subsequence(&m.output, &[1, 'f' as u8, 0, 0x81, 0x00]).is_some());
+
+        // the configuration survives reset (it is builder-level, set once per build mode)
+        m.reset();
+        m.finish();
+        assert!(find_subsequence(&m.output, &entries).is_some());
+
+        // non-shared: limits flag 0x01, still with a maximum
+        let mut m = WasmBuilder::new();
+        m.set_guest_memory_import(2048, 4096, false);
+        m.finish();
+        let entry = [1, 'e' as u8, 1, 'g' as u8, 2, 0x01, 0x80, 0x10, 0x80, 0x20];
+        assert!(find_subsequence(&m.output, &entry).is_some());
+        // without function imports the exported function is index 0
+        assert!(find_subsequence(&m.output, &[1, 'f' as u8, 0, 0x80, 0x00]).is_some());
+
+        // not configured: no "e"."g" import
+        let mut m = WasmBuilder::new();
+        m.finish();
+        assert!(find_subsequence(&m.output, &[1, 'e' as u8, 1, 'g' as u8]).is_none());
+    }
+
+    #[test]
+    fn multimem_builder_test() {
+        // Builds modules exercising every guest-memory and atomic emitter and
+        // dumps them for engine validation and execution by
+        // tests/rust/verify-wasmgen-multimem-output.js (which has to be kept
+        // in sync with the addresses and values below)
+        for &(shared, path) in &[
+            (true, "build/dummy_output_multimem_shared.wasm"),
+            (false, "build/dummy_output_multimem_nonshared.wasm"),
+        ] {
+            let mut m = WasmBuilder::new();
+            m.set_guest_memory_import(1, 1, shared);
+
+            m.const_i32(2);
+            m.call_fn("foo", FunctionType::FN1);
+
+            // plain stores to the guest memory
+            m.const_i32(64);
+            m.const_i32(0x11223344);
+            m.store_unaligned_i32_to_guest(0);
+            m.const_i32(68);
+            m.const_i32(0xBEEF);
+            m.store_unaligned_u16_to_guest(0);
+            m.const_i32(70);
+            m.const_i32(0xAB);
+            m.store_u8_to_guest(0);
+            m.const_i32(72);
+            m.const_i64(0x0102030405060708);
+            m.store_unaligned_i64_to_guest(0);
+
+            // guest loads, copied into the module's own memory
+            m.const_i32(0);
+            m.const_i32(64);
+            m.load_unaligned_i32_from_guest(0);
+            m.store_aligned_i32(0);
+            m.const_i32(4);
+            m.const_i32(68);
+            m.load_unaligned_u16_from_guest(0);
+            m.store_aligned_i32(0);
+            m.const_i32(8);
+            m.const_i32(70);
+            m.load_u8_from_guest(0);
+            m.store_aligned_i32(0);
+            m.const_i32(16);
+            m.const_i32(72);
+            m.load_unaligned_i64_from_guest(0);
+            m.store_aligned_i64(0);
+
+            // atomic rmw on the guest memory; every final value is 42
+            let rmw32: &[(fn(&mut WasmBuilder, u8, u32), i32, i32)] = &[
+                (WasmBuilder::atomic_rmw_add_i32, 40, 2),
+                (WasmBuilder::atomic_rmw_sub_i32, 50, 8),
+                (WasmBuilder::atomic_rmw_and_i32, 0xFF, 0x2A),
+                (WasmBuilder::atomic_rmw_or_i32, 0x28, 0x02),
+                (WasmBuilder::atomic_rmw_xor_i32, 0x68, 0x42),
+                (WasmBuilder::atomic_rmw_xchg_i32, 7, 42),
+            ];
+            let mut addr = 128;
+            for &(emit, init, operand) in rmw32 {
+                m.const_i32(addr);
+                m.const_i32(init);
+                m.store_unaligned_i32_to_guest(0);
+                m.const_i32(addr);
+                m.const_i32(operand);
+                emit(&mut m, GUEST_MEMORY_INDEX, 0);
+                m.drop_();
+                addr += 4;
+            }
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.store_unaligned_i32_to_guest(0);
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.const_i32(42);
+            m.atomic_rmw_cmpxchg_i32(GUEST_MEMORY_INDEX, 0);
+            m.drop_();
+
+            let rmw16: &[(fn(&mut WasmBuilder, u8, u32), i32, i32)] = &[
+                (WasmBuilder::atomic_rmw_add_u16, 40, 2),
+                (WasmBuilder::atomic_rmw_sub_u16, 50, 8),
+                (WasmBuilder::atomic_rmw_and_u16, 0xFF, 0x2A),
+                (WasmBuilder::atomic_rmw_or_u16, 0x28, 0x02),
+                (WasmBuilder::atomic_rmw_xor_u16, 0x68, 0x42),
+                (WasmBuilder::atomic_rmw_xchg_u16, 7, 42),
+            ];
+            let mut addr = 160;
+            for &(emit, init, operand) in rmw16 {
+                m.const_i32(addr);
+                m.const_i32(init);
+                m.store_unaligned_u16_to_guest(0);
+                m.const_i32(addr);
+                m.const_i32(operand);
+                emit(&mut m, GUEST_MEMORY_INDEX, 0);
+                m.drop_();
+                addr += 4;
+            }
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.store_unaligned_u16_to_guest(0);
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.const_i32(42);
+            m.atomic_rmw_cmpxchg_u16(GUEST_MEMORY_INDEX, 0);
+            m.drop_();
+
+            let rmw8: &[(fn(&mut WasmBuilder, u8, u32), i32, i32)] = &[
+                (WasmBuilder::atomic_rmw_add_u8, 40, 2),
+                (WasmBuilder::atomic_rmw_sub_u8, 50, 8),
+                (WasmBuilder::atomic_rmw_and_u8, 0xFF, 0x2A),
+                (WasmBuilder::atomic_rmw_or_u8, 0x28, 0x02),
+                (WasmBuilder::atomic_rmw_xor_u8, 0x68, 0x42),
+                (WasmBuilder::atomic_rmw_xchg_u8, 7, 42),
+            ];
+            let mut addr = 192;
+            for &(emit, init, operand) in rmw8 {
+                m.const_i32(addr);
+                m.const_i32(init);
+                m.store_u8_to_guest(0);
+                m.const_i32(addr);
+                m.const_i32(operand);
+                emit(&mut m, GUEST_MEMORY_INDEX, 0);
+                m.drop_();
+                addr += 1;
+            }
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.store_u8_to_guest(0);
+            m.const_i32(addr);
+            m.const_i32(7);
+            m.const_i32(42);
+            m.atomic_rmw_cmpxchg_u8(GUEST_MEMORY_INDEX, 0);
+            m.drop_();
+
+            m.atomic_fence();
+
+            m.finish();
+
+            let mut f = File::create(path).expect(path);
+            f.write_all(&m.output).expect(path);
+        }
     }
 }
