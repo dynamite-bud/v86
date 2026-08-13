@@ -396,6 +396,7 @@ CPU.prototype.wasm_patch = function()
 
     this.set_cpuid_level = get_import("set_cpuid_level");
     this.set_smp_cpus = get_import("set_smp_cpus");
+    this.rearm_cpu_event_halt = get_import("rearm_cpu_event_halt");
 
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
@@ -635,6 +636,26 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    if(state[46] instanceof Uint8Array)
+    {
+        // validate before any state is applied: throwing mid-restore would
+        // leave a half-restored machine behind
+        const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
+        if(state[46].length !== APIC_STRUCT_SIZE &&
+            state[46].length !== this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state[46].length +
+                " (expected " + APIC_STRUCT_SIZE + " or " +
+                this.smp_cpus * APIC_STRUCT_SIZE + "; was the state image " +
+                "saved with a different cpus setting?)");
+        }
+    }
+
+    // the restored machine may be live: allow a later full halt to fire
+    // the machine-dead event again
+    this.rearm_cpu_event_halt && this.rearm_cpu_event_halt();
+
     this.memory_size[0] = state[0];
 
     if(this.mem8.length !== this.memory_size[0])
@@ -843,7 +864,7 @@ CPU.prototype.set_state_apic = function(state)
         apic[13] = state[11]; // tpr
         apic[14] = state[12]; // icr0
         apic[15] = state[13]; // icr1
-        apic.set(state[15], 16); // irr
+        apic.set(state[14], 16); // irr
         apic.set(state[15], 24); // isr
         apic.set(state[16], 32); // tmr
         apic[40] = state[17]; // spurious_vector
@@ -1039,10 +1060,18 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
-    this.smp_cpus = settings.cpus || 1;
-    // guarded like cpuid_level: keeps new js working against an older
-    // v86.wasm that lacks the export (the topology is then just not visible)
-    this.set_smp_cpus && this.set_smp_cpus(this.smp_cpus);
+    // An older v86.wasm without the export has exactly one LAPIC and no
+    // vcpu contexts: smp_cpus must then stay 1 everywhere on the JS side
+    // (fw_cfg, CMOS, APIC state views), not just skip the wasm call
+    this.smp_cpus = this.set_smp_cpus ? settings.cpus || 1 : 1;
+    if(this.set_smp_cpus)
+    {
+        this.set_smp_cpus(this.smp_cpus);
+    }
+    else if(settings.cpus > 1)
+    {
+        dbg_log("cpus option ignored: wasm module predates set_smp_cpus", LOG_CPU);
+    }
 
     this.acpi_enabled[0] = +settings.acpi;
 
