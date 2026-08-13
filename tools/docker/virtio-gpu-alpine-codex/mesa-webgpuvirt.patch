@@ -182,6 +182,7 @@ index caabb2e..1aa3172 100644
 +   out->v1.bset.ubo = 1;
 +   out->v1.bset.blend_eq_sep = 1;
 +   out->v1.bset.fragment_coord_conventions = 1;
++   out->capability_bits |= VIRGL_CAP_SRGB_WRITE_CONTROL;
 +   out->max_vertex_attribs = 16;
 +   out->max_vertex_attrib_stride = 2048;
 +   out->max_vertex_outputs = 16;
