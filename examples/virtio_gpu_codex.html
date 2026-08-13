@@ -128,6 +128,8 @@ import { V86 } from "../build/libv86.mjs";
 const params = new URLSearchParams(location.search);
 const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
 const relay_url = params.get("relay");
+const shader = params.get("shader") === "1";
+const triangle = params.get("triangle") === "1" || shader;
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -159,7 +161,8 @@ const filesystem_size = 2 * 1024 * 1024 * 1024;
 const width = 1024;
 const height = 768;
 const relay_state = relay_url ? "configured" : "unconfigured";
-const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}`;
+const gpu_cmdline = shader ? " v86_gpu_shader=1" : triangle ? " v86_gpu_triangle=1" : "";
+const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
 
 const emulator = new V86({
     wasm_path: "../build/v86.wasm",
@@ -184,6 +187,7 @@ const emulator = new V86({
     } : {}),
     virtio_gpu: {
         backend: renderer,
+        experimental_3d: triangle,
         width,
         height,
         ...(renderer === "wgpu" ? {
@@ -195,7 +199,11 @@ const emulator = new V86({
 window.emulator = emulator;
 window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
-status.textContent = `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
+status.textContent = shader ?
+    `Booting the capset-7 version-2 guest shader (${renderer_label})…` :
+    triangle ?
+        `Booting the capset-7 reference triangle (${renderer_label})…` :
+        `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
 
 let serial_text = "";
 let serial_render_pending = false;
@@ -223,7 +231,9 @@ function update_readiness()
     const canvas = document.querySelector(".v86-virtio-gpu-canvas");
     if(canvas && !canvas.hidden && getComputedStyle(canvas).display !== "none")
     {
-        status.textContent = `Codex is ready in maximized Ghostty (${renderer_label}).`;
+        status.textContent = triangle ?
+            `Reference triangle is ready (${renderer_label}).` :
+            `Codex is ready in maximized Ghostty (${renderer_label}).`;
         document.body.dataset.result = "pass";
         clearInterval(readiness_timer);
     }

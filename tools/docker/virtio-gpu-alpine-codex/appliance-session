@@ -37,6 +37,21 @@ done
 [ -e /dev/dri/card0 ] || fail drm-missing
 printf 'V86_APPLIANCE_DRM=/dev/dri/card0\n' >&3
 
+if grep -qw 'v86_gpu_capset_probe=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-capset-probe >&3 2>&3 || fail capset7-probe
+    exec tail -f /dev/null
+fi
+if grep -qw 'v86_gpu_shader=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-triangle --shader-v2 >&3 2>&3 || fail shader-v2
+    exec tail -f /dev/null
+fi
+
+
+if grep -qw 'v86_gpu_triangle=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-triangle >&3 2>&3 || fail triangle
+    exec tail -f /dev/null
+fi
+
 if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
     printf 'V86_APPLIANCE_NETWORK=UNCONFIGURED\n' >&3
 elif [ -e /run/v86-network-ready ] &&

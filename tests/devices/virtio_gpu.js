@@ -34,6 +34,7 @@ process.on("unhandledRejection", error => { throw error; });
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
 const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+
 const emulator = new V86({
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },

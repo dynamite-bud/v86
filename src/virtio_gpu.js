@@ -38,12 +38,48 @@ const VIRTIO_GPU_DISPLAY_INFO_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE +
 const VIRTIO_GPU_EDID_DATA_SIZE = 1024;
 const VIRTIO_GPU_EDID_BLOCK_SIZE = 128;
 const VIRTIO_GPU_EDID_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8 + VIRTIO_GPU_EDID_DATA_SIZE;
+const V86_WEBGPU_CAPSET_ID = 7;
+const V86_WEBGPU_CAPSET_VERSION = 2;
+const V86_WEBGPU_CAPSET_SIZE = 912;
+const V86_WEBGPU_CAPSET_MAGIC = 0x57363856;
+const V86_WEBGPU_CAPSET_FORMAT_STRIDE = 12;
+const V86_WEBGPU_CAPSET_MAX_CONTEXTS = 32;
+const VIRTIO_GPU_CAPSET_REQUEST_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8;
+const VIRTIO_GPU_CTX_CREATE_REQUEST_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 72;
+const VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 16;
+const VIRTIO_GPU_CAPSET_RESPONSE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + V86_WEBGPU_CAPSET_SIZE;
+const V86_WEBGPU_CAPSET_MAX_COMMANDS = 64;
+const V86_WEBGPU_CAPSET_MAX_SUBMIT_BYTES = 256 * 1024;
+const V86_WEBGPU_CAPSET_MAX_ATTACHMENTS = 128;
+const V86_WEBGPU_CAPSET_MAX_SHADERS = 32;
+const V86_WEBGPU_CAPSET_V1_MAX_SHADER_BYTES = 189;
+const V86_WEBGPU_CAPSET_V1_MAX_SHADER_BYTES_PER_CONTEXT =
+    V86_WEBGPU_CAPSET_V1_MAX_SHADER_BYTES * V86_WEBGPU_CAPSET_MAX_SHADERS;
+const V86_WEBGPU_CAPSET_V2_MAX_SHADER_BYTES = 16 * 1024;
+const V86_WEBGPU_CAPSET_V2_MAX_SHADER_BYTES_PER_CONTEXT = 128 * 1024;
+const V86_WEBGPU_CAPSET_MAX_COMPILATIONS = 1;
+const V86_WEBGPU_CAPSET_COMPILATION_TIMEOUT_MS = 5000;
+const V86_WEBGPU_CAPSET_GPU_WORK_TIMEOUT_MS = 5000;
+const V86_WEBGPU_CAPSET_MAX_VERTEX_INVOCATIONS = 64 * 1024;
+const V86_WEBGPU_CAPSET_MAX_INSTANCES = 1;
+const V86_WEBGPU_CAPSET_MAX_PIPELINES = 64;
+const V86_WEBGPU_CAPSET_MAX_DRAWS = 256;
+const V86_WEBGPU_CAPSET_FEATURE_WGSL = 1;
+const V86_WEBGPU_CAPSET_FEATURE_RENDER = 1;
+const VIRTIO_GPU_RESOURCE_CREATE_3D_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 48;
+const VIRTIO_GPU_TRANSFER_HOST_3D_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 48;
+const VIRTIO_GPU_CTX_RESOURCE_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8;
+const VIRTIO_GPU_SUBMIT_3D_HEADER_SIZE = VIRTIO_GPU_CTRL_HDR_SIZE + 8;
 
 export const VIRTIO_GPU_F_EDID = 1;
+export const VIRTIO_GPU_F_VIRGL = 0;
+export const VIRTIO_GPU_F_CONTEXT_INIT = 4;
 export const VIRTIO_GPU_EVENT_DISPLAY = 1;
 
 export const VIRTIO_GPU_CMD_GET_DISPLAY_INFO = 0x0100;
 export const VIRTIO_GPU_CMD_GET_EDID = 0x010A;
+export const VIRTIO_GPU_CMD_GET_CAPSET_INFO = 0x0108;
+export const VIRTIO_GPU_CMD_GET_CAPSET = 0x0109;
 export const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D = 0x0101;
 export const VIRTIO_GPU_CMD_RESOURCE_UNREF = 0x0102;
 export const VIRTIO_GPU_CMD_SET_SCANOUT = 0x0103;
@@ -51,16 +87,26 @@ export const VIRTIO_GPU_CMD_RESOURCE_FLUSH = 0x0104;
 export const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D = 0x0105;
 export const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING = 0x0106;
 export const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING = 0x0107;
+export const VIRTIO_GPU_CMD_CTX_CREATE = 0x0200;
+export const VIRTIO_GPU_CMD_CTX_DESTROY = 0x0201;
+export const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE = 0x0202;
+export const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE = 0x0203;
+export const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D = 0x0204;
+export const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D = 0x0205;
+export const VIRTIO_GPU_CMD_SUBMIT_3D = 0x0207;
 export const VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300;
 export const VIRTIO_GPU_CMD_MOVE_CURSOR = 0x0301;
 
 export const VIRTIO_GPU_RESP_OK_NODATA = 0x1100;
 export const VIRTIO_GPU_RESP_OK_DISPLAY_INFO = 0x1101;
 export const VIRTIO_GPU_RESP_OK_EDID = 0x1104;
+export const VIRTIO_GPU_RESP_OK_CAPSET_INFO = 0x1102;
+export const VIRTIO_GPU_RESP_OK_CAPSET = 0x1103;
 export const VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200;
 export const VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY = 0x1201;
 export const VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID = 0x1202;
 export const VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID = 0x1203;
+export const VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID = 0x1204;
 export const VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER = 0x1205;
 export const VIRTIO_GPU_FLAG_FENCE = 1;
 
@@ -84,7 +130,7 @@ var VirtioGpuBackingEntry;
 /**
  * @typedef {{id: number, format: number, width: number, height: number,
  *            byte_length: number, backing: !Array<!VirtioGpuBackingEntry>,
- *            backing_length: number, scanout_ids: !Set<number>}}
+ *            backing_length: number, scanout_ids: !Set<number>, is_3d: boolean}}
  */
 var VirtioGpuResource;
 
@@ -116,6 +162,8 @@ var VirtioGpuCtrlHeader;
  *         max_backing_entries: (number|undefined), max_total_backing_entries: (number|undefined),
  *         screen_container: (HTMLElement|undefined),
  *         canvas: (HTMLCanvasElement|undefined), wasm_module_url: (string|undefined),
+ *         experimental_3d: (boolean|undefined),
+ *         experimental_3d_capset_probe: (boolean|undefined),
  *         wasm_url: (string|undefined)}=} options
  */
 export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
@@ -126,6 +174,16 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
     this.height = validate_mode_dimension(options.height, 768, "height");
     this.max_host_memory_bytes = validate_host_memory_limit(options.max_host_memory_bytes);
     this.events_read = 0;
+    // Gate-only mode proves negotiation without exposing rendering commands.
+    this.experimental_3d_capset_probe = options.experimental_3d_capset_probe === true;
+    this.experimental_3d = options.experimental_3d === true;
+    this.capset_probe_contexts = new Set();
+    /** @type {Map<number, {resources: !Set<number>}>} */
+    this.contexts_3d = new Map();
+    this.capset_data_v1 = this.experimental_3d_capset_probe ?
+        create_webgpu_capset(null, 1) : null;
+    this.capset_data = this.experimental_3d_capset_probe ?
+        create_webgpu_capset(null, V86_WEBGPU_CAPSET_VERSION) : null;
 
     this.max_resource_dimension = validate_positive_limit(options.max_resource_dimension,
         VIRTIO_GPU_DEFAULT_MAX_RESOURCE_DIMENSION, "max_resource_dimension");
@@ -141,6 +199,19 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
        options.backend !== "wgpu" && options.backend !== "webgpu-js")
     {
         throw new Error("Unsupported virtio-gpu backend: " + options.backend);
+    }
+    if(this.experimental_3d_capset_probe && this.experimental_3d)
+    {
+        throw new Error("experimental_3d and experimental_3d_capset_probe are mutually exclusive");
+    }
+    if(this.experimental_3d_capset_probe &&
+       (backend !== undefined || options.backend && options.backend !== "memory"))
+    {
+        throw new Error("experimental_3d_capset_probe requires the memory backend");
+    }
+    if(this.experimental_3d && backend === undefined && options.backend !== "wgpu")
+    {
+        throw new Error("experimental_3d requires the wgpu backend");
     }
 
     this.backend = backend ||
@@ -186,7 +257,10 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
         {
             initial_port: VIRTIO_GPU_COMMON_CONFIG_PORT,
             queues,
-            features: [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID],
+            features: this.experimental_3d_capset_probe ?
+                [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID,
+                    VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_CONTEXT_INIT] :
+                [VIRTIO_F_VERSION_1, VIRTIO_GPU_F_EDID],
             on_driver_ok: () => {
                 dbg_log("VirtIO GPU driver ready", LOG_VIRTIO);
                 if(this.events_read)
@@ -233,7 +307,7 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
                 {
                     bytes: 4,
                     name: "num_capsets",
-                    read: () => 0,
+                    read: () => this.capset_data ? 1 : 0,
                     write: data => { /* read only */ },
                 },
                 {
@@ -245,7 +319,51 @@ export function VirtioGpu(cpu, bus, options = {}, backend = undefined)
             ],
         },
     });
+    if(this.experimental_3d)
+    {
+        this.backend_ready = this.backend_work.then(() => this.initialize_3d());
+        this.backend_work = this.backend_ready;
+    }
 }
+
+VirtioGpu.prototype.initialize_3d = async function()
+{
+    let capabilities;
+    try
+    {
+        capabilities = await this.backend.get3DCapabilities();
+    }
+    catch(error)
+    {
+        dbg_log("VirtIO GPU 3D preflight failed: " + error, LOG_VIRTIO);
+        return;
+    }
+    if(!capabilities ||
+       !Number.isSafeInteger(capabilities.max_texture_dimension_2d) ||
+       !Number.isSafeInteger(capabilities.max_color_attachments) ||
+       capabilities.max_texture_dimension_2d < 1 ||
+       capabilities.max_color_attachments < 1)
+    {
+        dbg_log("VirtIO GPU 3D preflight unavailable; continuing with 2D", LOG_VIRTIO);
+        return;
+    }
+
+    const capset_capabilities = {
+        max_texture_dimension_2d: capabilities.max_texture_dimension_2d,
+        max_bind_groups: capabilities.max_bind_groups,
+        max_color_attachments: capabilities.max_color_attachments,
+        max_resources: this.max_resources,
+        max_resource_dimension: this.max_resource_dimension,
+        max_host_memory_bytes: this.max_host_memory_bytes,
+    };
+    this.capset_data_v1 = create_webgpu_capset(capset_capabilities, 1);
+    this.capset_data = create_webgpu_capset(
+        capset_capabilities, V86_WEBGPU_CAPSET_VERSION);
+    const feature_mask = (1 << VIRTIO_GPU_F_VIRGL) | (1 << VIRTIO_GPU_F_CONTEXT_INIT);
+    this.virtio.device_feature[0] |= feature_mask;
+    this.virtio.driver_feature[0] |= feature_mask;
+};
+
 
 VirtioGpu.prototype.set_display_size = function(width, height)
 {
@@ -315,6 +433,11 @@ VirtioGpu.prototype.get_performance_stats = function(reset = false)
         live_resources: this.resources.size,
         resource_memory_bytes: this.resource_memory_bytes,
         backing_entries: this.backing_entry_count,
+        live_3d_contexts: this.contexts_3d.size,
+        live_3d_resources: Array.from(this.resources.values())
+            .filter(resource => resource.is_3d).length,
+        context_attachments: Array.from(this.contexts_3d.values())
+            .reduce((sum, context) => sum + context.resources.size, 0),
     };
     if(reset)
     {
@@ -447,6 +570,19 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
         this.record_response(VIRTIO_GPU_RESP_ERR_UNSPEC);
         return create_ctrl_response(VIRTIO_GPU_RESP_ERR_UNSPEC, header);
     }
+    if(this.capset_data &&
+       (header.type === VIRTIO_GPU_CMD_GET_CAPSET_INFO ||
+        header.type === VIRTIO_GPU_CMD_GET_CAPSET ||
+        this.experimental_3d_capset_probe &&
+        (header.type === VIRTIO_GPU_CMD_CTX_CREATE ||
+         header.type === VIRTIO_GPU_CMD_CTX_DESTROY)))
+    {
+        const response = this.process_capset_probe_command(request, writable_length, header);
+        this.record_response(response.byteLength >= 4 ?
+            view_of(response).getUint32(0, true) : VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+        return response;
+    }
+
     if(header.type === VIRTIO_GPU_CMD_GET_DISPLAY_INFO ||
        header.type === VIRTIO_GPU_CMD_GET_EDID)
     {
@@ -475,9 +611,12 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
            (header.flags & VIRTIO_GPU_FLAG_FENCE))
         {
             this.performance_stats.fenced_commands++;
-            const wait_started = performance_now();
-            await this.backend.waitIdle();
-            this.performance_stats.fence_wait_ms += performance_now() - wait_started;
+            if(header.type !== VIRTIO_GPU_CMD_SUBMIT_3D)
+            {
+                const wait_started = performance_now();
+                await this.backend.waitIdle();
+                this.performance_stats.fence_wait_ms += performance_now() - wait_started;
+            }
             if(generation !== this.work_generation)
             {
                 return null;
@@ -510,6 +649,75 @@ VirtioGpu.prototype.process_command = async function(request, writable_length,
     return response_type === null ? null : create_ctrl_response(response_type, header);
 };
 
+VirtioGpu.prototype.process_capset_probe_command = function(request, writable_length, header)
+{
+    const capset_data = this.capset_data;
+    if(capset_data === null)
+    {
+        return create_ctrl_response_for_writable(
+            VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+    }
+    const view = view_of(request);
+    if(header.type === VIRTIO_GPU_CMD_GET_CAPSET_INFO)
+    {
+        if(request.byteLength !== VIRTIO_GPU_CAPSET_REQUEST_SIZE ||
+           writable_length < VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE ||
+           view.getUint32(24, true) !== 0 || view.getUint32(28, true) !== 0)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_CAPSET_INFO, header,
+            VIRTIO_GPU_CAPSET_INFO_RESPONSE_SIZE);
+        const response_view = view_of(response);
+        response_view.setUint32(24, V86_WEBGPU_CAPSET_ID, true);
+        response_view.setUint32(28, V86_WEBGPU_CAPSET_VERSION, true);
+        response_view.setUint32(32, V86_WEBGPU_CAPSET_SIZE, true);
+        return response;
+    }
+    if(header.type === VIRTIO_GPU_CMD_GET_CAPSET)
+    {
+        const version = view.getUint32(28, true);
+        const requested_capset = version === 1 ? this.capset_data_v1 :
+            version === V86_WEBGPU_CAPSET_VERSION ? capset_data : null;
+        if(request.byteLength !== VIRTIO_GPU_CAPSET_REQUEST_SIZE ||
+           writable_length < VIRTIO_GPU_CAPSET_RESPONSE_SIZE ||
+           view.getUint32(24, true) !== V86_WEBGPU_CAPSET_ID ||
+           requested_capset === null)
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        const response = create_ctrl_response(VIRTIO_GPU_RESP_OK_CAPSET, header,
+            VIRTIO_GPU_CAPSET_RESPONSE_SIZE);
+        response.set(requested_capset, VIRTIO_GPU_CTRL_HDR_SIZE);
+        return response;
+    }
+    if(header.type === VIRTIO_GPU_CMD_CTX_CREATE)
+    {
+        const name_length = request.byteLength >= 28 ? view.getUint32(24, true) : 65;
+        const context_init = request.byteLength >= 32 ? view.getUint32(28, true) : 0;
+        if(request.byteLength !== VIRTIO_GPU_CTX_CREATE_REQUEST_SIZE ||
+           header.ctx_id === 0 || header.ring_idx !== 0 ||
+           name_length > 64 || context_init !== V86_WEBGPU_CAPSET_ID ||
+           this.capset_probe_contexts.size >= V86_WEBGPU_CAPSET_MAX_CONTEXTS ||
+           this.capset_probe_contexts.has(header.ctx_id))
+        {
+            return create_ctrl_response_for_writable(
+                VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+        }
+        this.capset_probe_contexts.add(header.ctx_id);
+        return create_ctrl_response(VIRTIO_GPU_RESP_OK_NODATA, header);
+    }
+    if(request.byteLength !== VIRTIO_GPU_CTRL_HDR_SIZE || header.ctx_id === 0 ||
+       header.ring_idx !== 0 || !this.capset_probe_contexts.delete(header.ctx_id))
+    {
+        return create_ctrl_response_for_writable(
+            VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, header, writable_length);
+    }
+    return create_ctrl_response(VIRTIO_GPU_RESP_OK_NODATA, header);
+};
+
 /**
  * @param {Uint8Array} request
  * @param {VirtioGpuCtrlHeader} header
@@ -534,9 +742,288 @@ VirtioGpu.prototype.execute_2d_command = async function(request, header, generat
             return this.attach_backing(request);
         case VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING:
             return this.detach_backing(request);
+        case VIRTIO_GPU_CMD_CTX_CREATE:
+            return this.create_context_3d(request, header, generation);
+        case VIRTIO_GPU_CMD_CTX_DESTROY:
+            return this.destroy_context_3d(request, header, generation);
+        case VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE:
+            return this.attach_resource_3d(request, header);
+        case VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE:
+            return this.detach_resource_3d(request, header);
+        case VIRTIO_GPU_CMD_RESOURCE_CREATE_3D:
+            return this.create_resource_3d(request, generation);
+        case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
+            return this.transfer_to_host_3d(request);
+        case VIRTIO_GPU_CMD_SUBMIT_3D:
+            return this.submit_3d(request, header);
         default:
             return VIRTIO_GPU_RESP_ERR_UNSPEC;
     }
+};
+
+VirtioGpu.prototype.create_context_3d = async function(request, header, generation)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_CTX_CREATE_REQUEST_SIZE ||
+       header.ctx_id === 0 || header.ring_idx !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const name_length = view.getUint32(24, true);
+    const context_init = view.getUint32(28, true);
+    if(name_length > 64 || context_init !== V86_WEBGPU_CAPSET_ID ||
+       this.contexts_3d.size >= V86_WEBGPU_CAPSET_MAX_CONTEXTS ||
+       this.contexts_3d.has(header.ctx_id))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+
+    await this.backend.createContext3D(header.ctx_id);
+    if(generation === this.work_generation)
+    {
+        this.contexts_3d.set(header.ctx_id, { resources: new Set() });
+    }
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.destroy_context_3d = async function(request, header, generation)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_CTRL_HDR_SIZE ||
+       header.ctx_id === 0 || header.ring_idx !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    if(!this.contexts_3d.has(header.ctx_id))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+    }
+
+    await this.backend.destroyContext3D(header.ctx_id);
+    if(generation === this.work_generation)
+    {
+        this.contexts_3d.delete(header.ctx_id);
+    }
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.attach_resource_3d = async function(request, header)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_CTX_RESOURCE_SIZE ||
+       header.ctx_id === 0 || header.ring_idx !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const resource_id = view.getUint32(24, true);
+    const context = this.contexts_3d.get(header.ctx_id);
+    if(!context)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+    }
+    const resource = this.resources.get(resource_id);
+    if(!resource)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+    }
+    if(!resource.is_3d || view.getUint32(28, true) !== 0 ||
+       context.resources.size >= V86_WEBGPU_CAPSET_MAX_ATTACHMENTS ||
+       context.resources.has(resource_id))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+
+    await this.backend.attachResource3D(header.ctx_id, resource_id);
+    context.resources.add(resource_id);
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.detach_resource_3d = async function(request, header)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_CTX_RESOURCE_SIZE ||
+       header.ctx_id === 0 || header.ring_idx !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const resource_id = view.getUint32(24, true);
+    const context = this.contexts_3d.get(header.ctx_id);
+    if(!context)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+    }
+    if(view.getUint32(28, true) !== 0 || !context.resources.has(resource_id))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+
+    await this.backend.detachResource3D(header.ctx_id, resource_id);
+    context.resources.delete(resource_id);
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.create_resource_3d = async function(request, generation)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_RESOURCE_CREATE_3D_SIZE)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const resource_id = view.getUint32(24, true);
+    const target = view.getUint32(28, true);
+    const format = view.getUint32(32, true);
+    const bind = view.getUint32(36, true);
+    const width = view.getUint32(40, true);
+    const height = view.getUint32(44, true);
+    const depth = view.getUint32(48, true);
+    const array_size = view.getUint32(52, true);
+    const last_level = view.getUint32(56, true);
+    const nr_samples = view.getUint32(60, true);
+    const flags = view.getUint32(64, true);
+    const padding = view.getUint32(68, true);
+    if(resource_id === 0 || this.resources.has(resource_id))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+    }
+    if(target !== 2 || format !== VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM ||
+       bind !== 2 || width === 0 || height === 0 ||
+       width > this.max_resource_dimension || height > this.max_resource_dimension ||
+       depth !== 1 || array_size !== 1 || last_level !== 0 || nr_samples !== 1 ||
+       flags !== 0 || padding !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    if(this.resources.size >= this.max_resources)
+    {
+        return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+    }
+    const byte_length = checked_resource_size(width, height);
+    if(byte_length === null)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    if(byte_length > this.max_host_memory_bytes - this.resource_memory_bytes)
+    {
+        return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+    }
+
+    await this.backend.createResource3D({ resource_id, format, width, height });
+    if(generation !== this.work_generation)
+    {
+        return VIRTIO_GPU_RESP_OK_NODATA;
+    }
+    this.resources.set(resource_id, {
+        id: resource_id,
+        format,
+        width,
+        height,
+        byte_length,
+        backing: [],
+        backing_length: 0,
+        scanout_ids: new Set(),
+        is_3d: true,
+    });
+    this.resource_memory_bytes += byte_length;
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.transfer_to_host_3d = async function(request)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength !== VIRTIO_GPU_TRANSFER_HOST_3D_SIZE)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const view = view_of(request);
+    const rect = {
+        x: view.getUint32(24, true),
+        y: view.getUint32(28, true),
+        width: view.getUint32(36, true),
+        height: view.getUint32(40, true),
+    };
+    const resource_id = view.getUint32(56, true);
+    const resource = this.resources.get(resource_id);
+    if(!resource)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+    }
+    const offset = view.getUint32(48, true);
+    const offset_high = view.getUint32(52, true);
+    const stride = view.getUint32(64, true);
+    const layer_stride = view.getUint32(68, true);
+    if(!resource.is_3d || resource.backing.length === 0 ||
+       view.getUint32(32, true) !== 0 || view.getUint32(44, true) !== 1 ||
+       offset_high !== 0 || view.getUint32(60, true) !== 0 ||
+       !valid_rect(rect, resource.width, resource.height))
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const row_bytes = rect.width * VIRTIO_GPU_BYTES_PER_PIXEL;
+    const effective_stride = stride === 0 ? row_bytes : stride;
+    if(effective_stride < row_bytes || layer_stride !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const upload_length = row_bytes * rect.height;
+    const last_row_offset = offset + effective_stride * (rect.height - 1);
+    const max_transfer_bytes = view_of(this.capset_data).getUint32(76, true);
+    if(!Number.isSafeInteger(upload_length) || upload_length > max_transfer_bytes ||
+       !Number.isSafeInteger(last_row_offset) ||
+       last_row_offset + row_bytes > resource.backing_length)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const data = new Uint8Array(upload_length);
+    for(let row = 0; row < rect.height; row++)
+    {
+        if(!copy_backing_range(this.cpu, resource.backing,
+            offset + row * effective_stride, data, row * row_bytes, row_bytes))
+        {
+            return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+        }
+    }
+    await this.backend.transferToHost3D({
+        resource_id,
+        ...rect,
+        stride: row_bytes,
+        data,
+    });
+    this.performance_stats.guest_read_bytes += upload_length;
+    this.performance_stats.upload_bytes += upload_length;
+    return VIRTIO_GPU_RESP_OK_NODATA;
+};
+
+VirtioGpu.prototype.submit_3d = async function(request, header)
+{
+    if(!this.experimental_3d || !this.capset_data ||
+       request.byteLength < VIRTIO_GPU_SUBMIT_3D_HEADER_SIZE ||
+       header.ctx_id === 0 || header.ring_idx !== 0)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const context = this.contexts_3d.get(header.ctx_id);
+    if(!context)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+    }
+    const view = view_of(request);
+    const size = view.getUint32(24, true);
+    if(size === 0 || size > V86_WEBGPU_CAPSET_MAX_SUBMIT_BYTES ||
+       size > this.max_command_bytes - VIRTIO_GPU_SUBMIT_3D_HEADER_SIZE ||
+       view.getUint32(28, true) !== 0 ||
+       request.byteLength !== VIRTIO_GPU_SUBMIT_3D_HEADER_SIZE + size)
+    {
+        return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    const commands = new Uint8Array(size);
+    commands.set(request.subarray(VIRTIO_GPU_SUBMIT_3D_HEADER_SIZE));
+    const resources = Uint32Array.from(context.resources);
+    const accepted = await this.backend.submit3D(header.ctx_id, commands, resources);
+    return accepted ? VIRTIO_GPU_RESP_OK_NODATA : VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
 };
 
 VirtioGpu.prototype.execute_cursor_command = async function(request, header)
@@ -655,6 +1142,7 @@ VirtioGpu.prototype.create_resource_2d = async function(request, generation)
         backing: [],
         backing_length: 0,
         scanout_ids: new Set(),
+        is_3d: false,
     });
     this.resource_memory_bytes += byte_length;
     return VIRTIO_GPU_RESP_OK_NODATA;
@@ -689,6 +1177,10 @@ VirtioGpu.prototype.unref_resource = async function(request, generation)
         return VIRTIO_GPU_RESP_OK_NODATA;
     }
 
+    for(const context of this.contexts_3d.values())
+    {
+        context.resources.delete(resource_id);
+    }
     for(const scanout_id of resource.scanout_ids)
     {
         this.scanouts[scanout_id] = null;
@@ -820,7 +1312,7 @@ VirtioGpu.prototype.transfer_to_host_2d = async function(request)
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
     }
-    if(offset_high !== 0 || resource.backing.length === 0 ||
+    if(resource.is_3d || offset_high !== 0 || resource.backing.length === 0 ||
        !valid_rect(rect, resource.width, resource.height))
     {
         return VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
@@ -955,9 +1447,18 @@ VirtioGpu.prototype.detach_backing = async function(request)
     resource.backing_length = 0;
     return VIRTIO_GPU_RESP_OK_NODATA;
 };
-
 VirtioGpu.prototype.get_state = function()
 {
+    if(this.capset_probe_contexts.size)
+    {
+        throw new Error("Cannot save virtio-gpu state while a capset probe context is live");
+    }
+    if(this.contexts_3d.size ||
+       Array.from(this.resources.values()).some(resource => resource.is_3d))
+    {
+        throw new Error("Cannot save virtio-gpu state while 3D state is live");
+    }
+
     const state = [];
     state[0] = this.virtio;
     state[1] = this.events_read;
@@ -994,6 +1495,8 @@ VirtioGpu.prototype.set_state = function(state)
     const generation = this.work_generation;
     this.queue_active.fill(false);
     this.queue_address_error.fill(false);
+    this.capset_probe_contexts.clear();
+    this.contexts_3d.clear();
     this.virtio.set_state(state[0]);
     this.events_read = is_uint32(state[1]) ? state[1] : 0;
     this.width = restore_mode_dimension(state[2], this.width);
@@ -1059,6 +1562,8 @@ VirtioGpu.prototype.reset = function()
     const generation = this.work_generation;
     this.queue_active.fill(false);
     this.queue_address_error.fill(false);
+    this.capset_probe_contexts.clear();
+    this.contexts_3d.clear();
     this.events_read = 0;
     this.resources.clear();
     this.scanouts = [null];
@@ -1414,7 +1919,88 @@ function restore_resource_metadata(
     {
         return null;
     }
-    return { id, format, width, height, byte_length, backing, backing_length, scanout_ids: new Set() };
+    return {
+        id,
+        format,
+        width,
+        height,
+        byte_length,
+        backing,
+        backing_length,
+        scanout_ids: new Set(),
+        is_3d: false,
+    };
+}
+
+/**
+ * @param {?{max_texture_dimension_2d: number, max_bind_groups: number,
+ *            max_color_attachments: number, max_resources: number,
+ *            max_resource_dimension: number, max_host_memory_bytes: number}} capabilities
+ * @param {number} version
+ * @return {!Uint8Array}
+ */
+function create_webgpu_capset(capabilities, version)
+{
+    const capset = new Uint8Array(V86_WEBGPU_CAPSET_SIZE);
+    const view = view_of(capset);
+    view.setUint32(0, V86_WEBGPU_CAPSET_MAGIC, true);
+    view.setUint16(4, version, true);
+    view.setUint16(6, 0, true);
+    view.setUint32(8, V86_WEBGPU_CAPSET_SIZE, true);
+    view.setUint32(24, V86_WEBGPU_CAPSET_FORMAT_STRIDE, true);
+    view.setUint32(28, V86_WEBGPU_CAPSET_MAX_CONTEXTS, true);
+    if(!capabilities)
+    {
+        return capset;
+    }
+
+    view.setUint32(12, V86_WEBGPU_CAPSET_FEATURE_RENDER, true);
+    view.setUint32(16, V86_WEBGPU_CAPSET_FEATURE_WGSL, true);
+    view.setUint32(20, 1, true);
+    view.setUint32(32, capabilities.max_resources, true);
+    view.setUint32(36, V86_WEBGPU_CAPSET_MAX_ATTACHMENTS, true);
+    view.setUint32(40, Math.min(capabilities.max_texture_dimension_2d,
+        capabilities.max_resource_dimension), true);
+    view.setUint32(44, 1, true);
+    view.setUint32(48, 1, true);
+    view.setUint32(52, 1, true);
+    view.setUint32(56, V86_WEBGPU_CAPSET_MAX_SUBMIT_BYTES, true);
+    view.setUint32(60, V86_WEBGPU_CAPSET_MAX_COMMANDS, true);
+    view.setUint32(64, V86_WEBGPU_CAPSET_MAX_ATTACHMENTS, true);
+    view.setUint32(68, 16, true);
+    view.setUint32(72, 4, true);
+    view.setUint32(76, Math.min(capabilities.max_host_memory_bytes, 1024 * 1024), true);
+    view.setUint32(80, version === 1 ?
+        V86_WEBGPU_CAPSET_V1_MAX_SHADER_BYTES : V86_WEBGPU_CAPSET_V2_MAX_SHADER_BYTES, true);
+    view.setUint32(84, version === 1 ?
+        V86_WEBGPU_CAPSET_V1_MAX_SHADER_BYTES_PER_CONTEXT :
+        V86_WEBGPU_CAPSET_V2_MAX_SHADER_BYTES_PER_CONTEXT, true);
+    view.setUint32(88, V86_WEBGPU_CAPSET_MAX_SHADERS, true);
+    view.setUint32(92, V86_WEBGPU_CAPSET_MAX_PIPELINES, true);
+    view.setUint32(112, 1, true);
+    write_uint64(view, 136, capabilities.max_host_memory_bytes);
+    if(version === V86_WEBGPU_CAPSET_VERSION)
+    {
+        view.setUint32(156, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);
+        view.setUint32(160, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);
+        view.setUint32(164, V86_WEBGPU_CAPSET_COMPILATION_TIMEOUT_MS, true);
+        view.setUint32(168, V86_WEBGPU_CAPSET_GPU_WORK_TIMEOUT_MS, true);
+        view.setUint32(172, V86_WEBGPU_CAPSET_MAX_VERTEX_INVOCATIONS, true);
+        view.setUint32(176, V86_WEBGPU_CAPSET_MAX_INSTANCES, true);
+    }
+
+    const format_offset = 144;
+    view.setUint32(format_offset, VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM, true);
+    view.setUint32(format_offset + 4,
+        (1 << 1) | (1 << 4) | (1 << 5) | (1 << 6), true);
+    view.setUint32(format_offset + 8, 1, true);
+    return capset;
+}
+
+function write_uint64(view, offset, value)
+{
+    view.setUint32(offset, value >>> 0, true);
+    view.setUint32(offset + 4, Math.floor(value / 0x100000000), true);
 }
 
 function create_empty_cursor()

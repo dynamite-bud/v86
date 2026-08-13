@@ -18,6 +18,68 @@ export class VirtioGpuBackend
         return Promise.reject(new Error("VirtioGpuBackend.createResource2D is not implemented"));
     }
 
+    /**
+     * Return renderer limits for the private capset, or null when 3D is unavailable.
+     * @return {!Promise<?{max_texture_dimension_2d: number, max_bind_groups: number,
+     *                      max_color_attachments: number}>}
+     */
+    get3DCapabilities()
+    {
+        return Promise.resolve(null);
+    }
+
+    /** @param {number} context_id */
+    createContext3D(context_id)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.createContext3D is not implemented"));
+    }
+
+    /** @param {number} context_id */
+    destroyContext3D(context_id)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.destroyContext3D is not implemented"));
+    }
+
+    /**
+     * @param {{resource_id: number, format: number, width: number, height: number}} desc
+     */
+    createResource3D(desc)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.createResource3D is not implemented"));
+    }
+
+    /** @param {number} context_id @param {number} resource_id */
+    attachResource3D(context_id, resource_id)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.attachResource3D is not implemented"));
+    }
+
+    /** @param {number} context_id @param {number} resource_id */
+    detachResource3D(context_id, resource_id)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.detachResource3D is not implemented"));
+    }
+
+    /**
+     * @param {{resource_id: number, x: number, y: number, width: number, height: number,
+     *          stride: number, data: Uint8Array}} upload
+     */
+    transferToHost3D(upload)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.transferToHost3D is not implemented"));
+    }
+
+    /**
+     * @param {number} context_id
+     * @param {!Uint8Array} commands
+     * @param {!Uint32Array} resource_ids
+     * @return {!Promise<boolean>} false for guest validation failure
+     */
+    submit3D(context_id, commands, resource_ids)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.submit3D is not implemented"));
+    }
+
     /** @param {number} resource_id */
     destroyResource(resource_id)
     {

@@ -398,6 +398,13 @@ export interface VirtioGpuConfig {
     max_total_backing_entries?: number;
 
     /**
+     * Opt in to the private capset-7 basic-render path. Only the Rust/Wasm
+     * `wgpu` backend can advertise it; preflight failure leaves 2D enabled.
+     * @default false
+     */
+    experimental_3d?: boolean;
+
+    /**
      * Dedicated presentation canvas for either WebGPU backend. When omitted,
      * v86 creates one in the configured screen container.
      */

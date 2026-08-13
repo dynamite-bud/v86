@@ -151,13 +151,22 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
-|Rootfs tar|676,536,320|794,818,560|-118,282,240 bytes|14.88%|
-|Compressed flat files|275,299,815|295,224,610|-19,924,795 bytes|6.75%|
-|Filesystem JSON|580,824|695,517|-114,693 bytes|16.49%|
-|Flat-file count|7,945|9,175|-1,230|13.41%|
+|Rootfs tar|676,556,800|794,818,560|-118,261,760 bytes|14.88%|
+|Compressed flat files|275,304,359|295,224,610|-19,920,251 bytes|6.75%|
+|Filesystem JSON|580,889|695,517|-114,628 bytes|16.48%|
+|Flat-file count|7,946|9,175|-1,229|13.40%|
 |Package closure|311|420|-109|25.95%|
 
 These values come from the generated image contracts and package locks. Recompute them after any image, package, or artifact change.
+
+The reproducible capset-probe rebuild produced these SHA-256 values:
+
+|Artifact|SHA-256|
+|---|---|
+|Rootfs tar|`a417a48cc7a167c589703d76495954dfe577e86d9e0bbf3c0b83af60aa907344`|
+|Filesystem JSON|`3bdc02a9f78f8ac6b388e174da331aac84a2771009cb91d41bd7d9d59b099a21`|
+|Flat-file manifest|`b211ea07ad06429249db9633ceb871e768c8612bc43b9fb47a67c61be7c0d759`|
+|Image contract|`e6cc7fda37e4a63f1270efb88febcf1dc38649ff8e053f30777a563c8aa4d228`|
 
 ## Original OMP Gate
 

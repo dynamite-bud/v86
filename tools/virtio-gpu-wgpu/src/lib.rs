@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+mod submit_3d;
+
 use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -33,6 +35,7 @@ struct Resource {
     byte_length: usize,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    renderable: bool,
 }
 
 struct Renderer {
@@ -43,10 +46,13 @@ struct Renderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    guest_pipeline_layout: wgpu::PipelineLayout,
+    guest_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     present_params: wgpu::Buffer,
     resources: HashMap<u32, Resource>,
+    contexts: HashMap<u32, submit_3d::Context3D>,
     scanout: Option<Scanout>,
     max_host_memory_bytes: usize,
     host_memory_bytes: usize,
@@ -84,6 +90,114 @@ impl WgpuRenderer {
     ) -> Result<(), JsValue> {
         self.inner_mut()?
             .create_resource_2d(resource_id, format, width, height)
+            .map_err(js_error)
+    }
+
+    pub fn capabilities_3d(&self) -> Result<Box<[u32]>, JsValue> {
+        let renderer = self.inner()?;
+        renderer.check_fault().map_err(js_error)?;
+        let limits = renderer.device.limits();
+        Ok(vec![
+            limits.max_texture_dimension_2d,
+            limits.max_bind_groups,
+            limits.max_color_attachments,
+        ]
+        .into_boxed_slice())
+    }
+
+    pub fn object_stats_3d(&self) -> Result<Box<[u32]>, JsValue> {
+        let renderer = self.inner()?;
+        renderer.check_fault().map_err(js_error)?;
+        let mut shaders = 0_usize;
+        let mut pipelines = 0_usize;
+        let mut shader_bytes = 0_usize;
+        for context in renderer.contexts.values() {
+            let stats = context.object_stats();
+            shaders += stats.0;
+            pipelines += stats.1;
+            shader_bytes += stats.2;
+        }
+        Ok(vec![
+            renderer.contexts.len() as u32,
+            shaders as u32,
+            pipelines as u32,
+            shader_bytes as u32,
+        ]
+        .into_boxed_slice())
+    }
+
+    pub fn create_context_3d(&mut self, context_id: u32) -> Result<(), JsValue> {
+        let renderer = self.inner_mut()?;
+        renderer.check_fault().map_err(js_error)?;
+        if context_id == 0 || renderer.contexts.contains_key(&context_id) {
+            return Err(js_error("invalid: duplicate or zero context id"));
+        }
+        renderer
+            .contexts
+            .insert(context_id, submit_3d::Context3D::new());
+        Ok(())
+    }
+
+    pub fn destroy_context_3d(&mut self, context_id: u32) -> Result<(), JsValue> {
+        let renderer = self.inner_mut()?;
+        renderer.check_fault().map_err(js_error)?;
+        renderer
+            .contexts
+            .remove(&context_id)
+            .ok_or_else(|| js_error("invalid: unknown context"))?;
+        Ok(())
+    }
+
+    pub fn create_resource_3d(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        self.inner_mut()?
+            .create_resource_3d(resource_id, format, width, height)
+            .map_err(js_error)
+    }
+
+    pub fn attach_resource_3d(&mut self, context_id: u32, resource_id: u32) -> Result<(), JsValue> {
+        let renderer = self.inner_mut()?;
+        renderer.check_fault().map_err(js_error)?;
+        if !renderer.resources.contains_key(&resource_id) {
+            return Err(js_error("invalid: unknown resource"));
+        }
+        let context = renderer
+            .contexts
+            .get_mut(&context_id)
+            .ok_or_else(|| js_error("invalid: unknown context"))?;
+        if !context.attachments.insert(resource_id) {
+            return Err(js_error("invalid: resource is already attached"));
+        }
+        Ok(())
+    }
+
+    pub fn detach_resource_3d(&mut self, context_id: u32, resource_id: u32) -> Result<(), JsValue> {
+        let renderer = self.inner_mut()?;
+        renderer.check_fault().map_err(js_error)?;
+        let context = renderer
+            .contexts
+            .get_mut(&context_id)
+            .ok_or_else(|| js_error("invalid: unknown context"))?;
+        if !context.attachments.remove(&resource_id) {
+            return Err(js_error("invalid: resource is not attached"));
+        }
+        Ok(())
+    }
+
+    pub async fn submit_3d(
+        &mut self,
+        context_id: u32,
+        commands: &[u8],
+        resource_ids: &[u32],
+    ) -> Result<(), JsValue> {
+        let renderer = self.inner_mut()?;
+        submit_3d::submit(renderer, context_id, commands, resource_ids)
+            .await
             .map_err(js_error)
     }
 
@@ -325,6 +439,25 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let (guest_pipeline_layout, guest_pipeline) = submit_3d::create_pinned_pipeline(&device)?;
+        queue.submit([submit_3d::encode_pinned_pipeline_probe(
+            &device,
+            &guest_pipeline,
+        )]);
+        let (probe_sender, probe_receiver) = oneshot::channel();
+        queue.on_submitted_work_done(move || {
+            let _ = probe_sender.send(());
+        });
+        probe_receiver
+            .await
+            .map_err(|_| "WebGPU pipeline probe callback was dropped".to_owned())?;
+        if let Some(message) = fault
+            .lock()
+            .map_err(|_| "WebGPU fault lock was poisoned")?
+            .clone()
+        {
+            return Err(message);
+        }
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("v86 virtio-gpu nearest sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -349,10 +482,13 @@ impl Renderer {
             queue,
             surface_config,
             pipeline,
+            guest_pipeline,
+            guest_pipeline_layout,
             bind_group_layout,
             sampler,
             present_params,
             resources: HashMap::new(),
+            contexts: HashMap::new(),
             scanout: None,
             max_host_memory_bytes,
             host_memory_bytes: 0,
@@ -367,6 +503,27 @@ impl Renderer {
         format: u32,
         width: u32,
         height: u32,
+    ) -> Result<(), String> {
+        self.create_resource(resource_id, format, width, height, false)
+    }
+
+    fn create_resource_3d(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        self.create_resource(resource_id, format, width, height, true)
+    }
+
+    fn create_resource(
+        &mut self,
+        resource_id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+        renderable: bool,
     ) -> Result<(), String> {
         self.check_fault()?;
         if resource_id == 0 {
@@ -400,7 +557,13 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | if renderable {
+                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -431,6 +594,7 @@ impl Renderer {
                 byte_length,
                 texture,
                 bind_group,
+                renderable,
             },
         );
         self.host_memory_bytes += byte_length;
@@ -443,6 +607,9 @@ impl Renderer {
             .resources
             .remove(&resource_id)
             .ok_or_else(|| format!("Unknown resource {resource_id}"))?;
+        for context in self.contexts.values_mut() {
+            context.attachments.remove(&resource_id);
+        }
         self.host_memory_bytes -= resource.byte_length;
         if self
             .scanout
@@ -657,6 +824,7 @@ impl Renderer {
 
     fn reset(&mut self) {
         self.resources.clear();
+        self.contexts.clear();
         self.scanout = None;
         self.host_memory_bytes = 0;
         self.upload_scratch.clear();

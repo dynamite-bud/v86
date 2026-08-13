@@ -12,10 +12,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 300000);
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
-const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS || "webgpu-js,wgpu")
+const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
+assert.ok(["appliance", "triangle", "shader"].includes(SCENARIO),
+    `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
+const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
+    (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
     .split(",")
     .map(value => value.trim())
     .filter(Boolean);
+let last_readiness_state = null;
 for(const renderer of renderers)
 {
     assert.ok(renderer === "webgpu-js" || renderer === "wgpu",
@@ -157,12 +162,21 @@ async function run_scenario(browser_ws, base_url, renderer)
         const url = new URL(
             `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
+        if(SCENARIO === "shader") url.searchParams.set("shader", "1");
+        else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
         await cdp.call("Page.navigate", { url: url.href });
         await wait_for(async() => {
             const state = await evaluate(cdp,
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
+                `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
+                `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
+                `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
+                `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
+                `({ id, resources: Array.from(context.resources) })), ` +
+                `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
+            last_readiness_state = state;
             if(state.fatal)
             {
                 const error = new Error(state.fatal);
@@ -174,7 +188,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 const reason = /V86_APPLIANCE_FAILURE=([^\r\n]+)/.exec(state.serial)?.[1] || "unknown";
                 const serial_tail = state.serial.slice(-6000);
                 const error = new Error(
-                    `Appliance readiness contract failed: ${reason}\n${serial_tail}`);
+                    `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
+                    `GPU state: ${JSON.stringify(state.gpu)}`);
                 error.terminal = true;
                 throw error;
             }
@@ -197,6 +212,214 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_height: canvas.height,
             };
         })()`);
+        if(SCENARIO !== "appliance")
+        {
+            for(const marker of [
+                "V86_GPU_TRIANGLE_RENDER_NODE=/dev/dri/renderD128",
+                "V86_GPU_TRIANGLE_GET_CAPS=PASS",
+                "V86_GPU_TRIANGLE_CONTEXT_INIT=PASS",
+                "V86_GPU_TRIANGLE_TRANSFER=PASS",
+                "V86_GPU_TRIANGLE_SUBMIT=PASS",
+                "V86_GPU_TRIANGLE_FENCE=PASS",
+                "V86_GPU_TRIANGLE_MODESET=PASS",
+                "V86_GPU_TRIANGLE_READY=PASS",
+                "V86_APPLIANCE_READY=PASS",
+            ])
+            {
+                assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
+            }
+            assert.ok(state.serial.includes(
+                `V86_GPU_TRIANGLE_GET_CAPS=PASS version=${SCENARIO === "shader" ? 2 : 1}`),
+                "Guest did not use the requested capset version");
+            if(SCENARIO === "shader")
+            {
+                assert.ok(state.serial.includes("V86_GPU_SHADER_V2=PASS"),
+                    "Missing version-2 guest shader marker");
+            }
+            const rendered = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                const canvas = device.backend.canvas;
+                const rect = canvas.getBoundingClientRect();
+                return {
+                    stats: device.get_performance_stats(),
+                    scanout: device.scanouts[0],
+                    canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
+                    canvas_width: canvas.width,
+                    canvas_height: canvas.height,
+                    rect: {
+                        x: rect.left + window.scrollX,
+                        y: rect.top + window.scrollY,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                };
+            })()`);
+            const pixels = await sample_canvas_screenshot(cdp, rendered);
+            if(SCENARIO === "shader")
+            {
+                assert.ok(pixels.center[1] > 180 && pixels.center[0] < 100 &&
+                    pixels.center[2] < 100, `Guest shader triangle center is not green: ${pixels.center}`);
+            }
+            else
+            {
+                assert.ok(pixels.center[0] > 180 && pixels.center[1] < 100 &&
+                    pixels.center[2] < 100, `Triangle center is not red: ${pixels.center}`);
+            }
+            assert.ok(pixels.corner[2] > pixels.corner[0] &&
+                pixels.corner[2] > pixels.corner[1],
+                `Triangle clear color is not blue: ${pixels.corner}`);
+            assert.equal(rendered.canvas_visible, true);
+            assert.equal(rendered.canvas_width, rendered.scanout.width);
+            assert.equal(rendered.canvas_height, rendered.scanout.height);
+            for(const command of ["0x202", "0x204", "0x205", "0x207"])
+            {
+                assert.ok((rendered.stats.command_counts[command] || 0) >= 1,
+                    `Missing standard virtio-gpu command ${command}`);
+            }
+            assert.equal(failures.length, 0, failures.join(" | "));
+            if(SCENARIO === "shader")
+            {
+                const arbitrary = await evaluate(cdp,
+                    `(${run_shader_acceptance_in_page.toString()})()`);
+                const arbitrary_pixels = await sample_canvas_screenshot(cdp, arbitrary);
+                assert.ok(arbitrary_pixels.center[1] > 180 &&
+                    arbitrary_pixels.center[0] < 100 && arbitrary_pixels.center[2] < 100,
+                    `Arbitrary shader triangle center is not green: ${arbitrary_pixels.center}`);
+                assert.ok(arbitrary_pixels.corner[2] > arbitrary_pixels.corner[0] &&
+                    arbitrary_pixels.corner[2] > arbitrary_pixels.corner[1],
+                    `Arbitrary shader clear color is not blue: ${arbitrary_pixels.corner}`);
+                assert.deepEqual(arbitrary.object_stats, [
+                    arbitrary.baseline_stats[0] + 1,
+                    arbitrary.baseline_stats[1] + 2,
+                    arbitrary.baseline_stats[2] + 1,
+                    arbitrary.baseline_stats[3] +
+                        arbitrary.vertex_bytes + arbitrary.fragment_bytes,
+                ]);
+                assert.deepEqual(arbitrary.after_invalid_stats, [
+                    arbitrary.object_stats[0] + 1,
+                    arbitrary.object_stats[1],
+                    arbitrary.object_stats[2],
+                    arbitrary.object_stats[3],
+                ]);
+                assert.deepEqual(arbitrary.after_cleanup_stats, arbitrary.baseline_stats);
+                assert.equal(arbitrary.invalid_cases, 12);
+                assert.equal(failures.length, 0, failures.join(" | "));
+
+                const work_timeout = await evaluate(cdp,
+                    `(${run_shader_work_timeout_in_page.toString()})()`);
+                assert.match(work_timeout.error,
+                    /WebGPU render work timed out after 5000 ms/);
+                assert.ok(work_timeout.elapsed_ms >= 4900 && work_timeout.elapsed_ms < 8000,
+                    `Render work timeout was not bounded: ${work_timeout.elapsed_ms} ms`);
+                assert.equal(work_timeout.object_response_type, 0x1100);
+                assert.equal(work_timeout.object_response_flags, 1);
+                assert.equal(work_timeout.object_response_fence, 1);
+                assert.ok(work_timeout.object_elapsed_ms < 2000,
+                    `Fenced object submit performed an outer GPU wait: ${work_timeout.object_elapsed_ms} ms`);
+                assert.equal(work_timeout.render_response_type, 0x1200);
+                assert.equal(work_timeout.canvas_hidden, true);
+                assert.equal(work_timeout.renderer_disposed, true);
+                assert.deepEqual(work_timeout.recovery, {
+                    fatal: null,
+                    initialized: true,
+                    contexts: 0,
+                    resources: 0,
+                    attachments: 0,
+                });
+
+                const timeouts = [];
+                for(let attempt = 0; attempt < 2; attempt++)
+                {
+                    const timeout = await evaluate(cdp,
+                        `(${run_shader_timeout_in_page.toString()})()`);
+                    assert.match(timeout.error,
+                        /WebGPU pipeline compilation timed out after 5000 ms/);
+                    assert.ok(timeout.elapsed_ms >= 4900 && timeout.elapsed_ms < 8000,
+                        `Compilation timeout was not bounded: ${timeout.elapsed_ms} ms`);
+                    assert.equal(timeout.canvas_hidden, true);
+                    assert.equal(timeout.renderer_disposed, true);
+                    assert.deepEqual(timeout.recovery, {
+                        fatal: null,
+                        initialized: true,
+                        contexts: 0,
+                        resources: 0,
+                        attachments: 0,
+                    });
+                    timeouts.push(timeout);
+                }
+                await evaluate(cdp, "window.emulator.stop()");
+                return {
+                    renderer,
+                    ready_ms: Math.round(ready_ms),
+                    shader: true,
+                    guest_shader_v2: state.serial.includes("V86_GPU_SHADER_V2=PASS"),
+                    guest_center_rgba: pixels.center,
+                    guest_corner_rgba: pixels.corner,
+                    arbitrary_center_rgba: arbitrary_pixels.center,
+                    arbitrary_corner_rgba: arbitrary_pixels.corner,
+                    invalid_cases: arbitrary.invalid_cases,
+                    compilation_timeout_ms:
+                        timeouts.map(timeout => Math.round(timeout.elapsed_ms)),
+                    render_work_timeout_ms: Math.round(work_timeout.elapsed_ms),
+                    timeout_fallback: work_timeout.canvas_hidden &&
+                        timeouts.every(timeout => timeout.canvas_hidden),
+                    timeout_recovery: work_timeout.recovery.initialized &&
+                        timeouts.every(timeout => timeout.recovery.initialized),
+                    leaked_3d_objects: work_timeout.recovery.contexts +
+                        work_timeout.recovery.resources + work_timeout.recovery.attachments +
+                        timeouts.reduce((count, timeout) => count +
+                            timeout.recovery.contexts + timeout.recovery.resources +
+                            timeout.recovery.attachments, 0),
+                };
+            }
+            const loss = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                device.backend.handle_fatal(
+                    new Error("triangle acceptance injected device loss"), "acceptance");
+                return device.backend.fatal_error?.message || null;
+            })()`);
+            assert.match(loss, /triangle acceptance injected device loss/);
+            await wait_for(async() => evaluate(cdp,
+                "window.emulator.v86.cpu.devices.virtio_gpu.backend.canvas.hidden"),
+                5000, "triangle device-loss VGA fallback");
+            const recovery = await evaluate(cdp, `(async() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                device.reset();
+                await device.backend_ready;
+                const stats = device.get_performance_stats();
+                return {
+                    fatal: device.backend.fatal_error?.message || null,
+                    initialized: device.backend.initialized,
+                    capset: Boolean(device.capset_data),
+                    contexts: stats.live_3d_contexts,
+                    resources: stats.live_3d_resources,
+                    attachments: stats.context_attachments,
+                };
+            })()`);
+            assert.deepEqual(recovery, {
+                fatal: null,
+                initialized: true,
+                capset: true,
+                contexts: 0,
+                resources: 0,
+                attachments: 0,
+            });
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return {
+                renderer,
+                ready_ms: Math.round(ready_ms),
+                triangle: true,
+                guest_shader_v2: SCENARIO === "shader",
+                center_rgba: pixels.center,
+                corner_rgba: pixels.corner,
+                submit_3d_commands: rendered.stats.command_counts["0x207"],
+                ordered_fence: state.serial.includes("V86_GPU_TRIANGLE_FENCE=PASS"),
+                loss_fallback: true,
+                loss_recovery: recovery.initialized,
+                leaked_3d_objects: recovery.contexts + recovery.resources + recovery.attachments,
+            };
+        }
         for(const marker of [
             "V86_APPLIANCE_ARCH=i686",
             "V86_APPLIANCE_UID=1000",
@@ -338,7 +561,38 @@ async function guest_command(cdp, command, success_marker, failure_marker, timeo
             throw error;
         }
         return serial.includes(success_marker);
+
     }, timeout, success_marker);
+}
+async function sample_canvas_screenshot(cdp, rendered)
+{
+    const screenshot = await cdp.call("Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: true,
+        clip: {
+            ...rendered.rect,
+            scale: 1,
+        },
+    });
+    return evaluate(cdp, `(async() => {
+        const image = new Image();
+        image.src = "data:image/png;base64,${screenshot.data}";
+        await image.decode();
+        const copy = document.createElement("canvas");
+        copy.width = image.naturalWidth;
+        copy.height = image.naturalHeight;
+        const context = copy.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0);
+        const center = Array.from(context.getImageData(
+            Math.floor(copy.width / 2), Math.floor(copy.height / 2), 1, 1).data);
+        const corner_x = Math.min(copy.width - 1,
+            Math.max(0, Math.floor(8 * copy.width / ${rendered.canvas_width})));
+        const corner_y = Math.min(copy.height - 1,
+            Math.max(0, Math.floor(8 * copy.height / ${rendered.canvas_height})));
+        const corner = Array.from(context.getImageData(corner_x, corner_y, 1, 1).data);
+        return { center, corner };
+    })()`);
 }
 
 class Cdp
@@ -390,6 +644,488 @@ class Cdp
     }
 }
 
+async function run_shader_acceptance_in_page()
+{
+    const device = window.emulator.v86.cpu.devices.virtio_gpu;
+    const backend = device.backend;
+    const encoder = new TextEncoder();
+    const valid_context_id = 0x7FFF0001;
+    const invalid_context_id = 0x7FFF0002;
+    const resource_id = 0x7FFF0001;
+    const width = 128;
+    const height = 128;
+
+    function shader_record(id, stage, source)
+    {
+        const source_bytes = typeof source === "string" ? encoder.encode(source) : source;
+        const size = 24 + ((source_bytes.byteLength + 7) & ~7);
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, 1, true);
+        view.setUint16(2, size / 4, true);
+        view.setUint32(8, id, true);
+        view.setUint32(12, stage, true);
+        view.setUint32(16, 1, true);
+        view.setUint32(20, source_bytes.byteLength, true);
+        bytes.set(source_bytes, 24);
+        return bytes;
+    }
+
+    function record(opcode, words)
+    {
+        const bytes = new Uint8Array(8 + words.length * 4);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, opcode, true);
+        view.setUint16(2, bytes.byteLength / 4, true);
+        for(let index = 0; index < words.length; index++)
+        {
+            view.setUint32(8 + index * 4, words[index], true);
+        }
+        return bytes;
+    }
+
+    function f32(value)
+    {
+        const buffer = new ArrayBuffer(4);
+        const view = new DataView(buffer);
+        view.setFloat32(0, value, true);
+        return view.getUint32(0, true);
+    }
+
+    function submit(records, resources = [])
+    {
+        const records_offset = (32 + resources.length * 4 + 7) & ~7;
+        const total_size = records_offset +
+            records.reduce((total, item) => total + item.byteLength, 0);
+        const bytes = new Uint8Array(total_size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, 0x53363856, true);
+        view.setUint16(4, 2, true);
+        view.setUint32(8, total_size, true);
+        view.setUint32(12, records.length, true);
+        view.setUint32(16, resources.length, true);
+        resources.forEach((id, index) => view.setUint32(32 + index * 4, id, true));
+        let offset = records_offset;
+        for(const item of records)
+        {
+            bytes.set(item, offset);
+            offset += item.byteLength;
+        }
+        return bytes;
+    }
+
+    const vertex_source = concat(
+        "// capset version 2 arbitrary vertex source\n",
+        "@vertex fn main(@builtin(vertex_index) i: u32) -> ",
+        "@builtin(position) vec4f {",
+        "let p = array<vec2f, 3>(vec2f(0.0, 0.72), ",
+        "vec2f(-0.72, -0.72), vec2f(0.72, -0.72));",
+        "return vec4f(p[i], 0.0, 1.0);}"
+    );
+    const fragment_source = concat(
+        "@fragment fn main() -> @location(0) vec4f {",
+        "return vec4f(0.02, 0.95, 0.04, 1.0);}"
+    );
+    const pipeline_record = record(3, [3, 1, 2, 3, 67, 1, 0, 0]);
+    const baseline_stats = Array.from(backend.renderer["object_stats_3d"]());
+
+    await backend.createContext3D(valid_context_id);
+    await backend.createResource3D({
+        resource_id,
+        format: 67,
+        width,
+        height,
+    });
+    await backend.attachResource3D(valid_context_id, resource_id);
+    const object_submit = submit([
+        shader_record(1, 1, vertex_source),
+        shader_record(2, 2, fragment_source),
+        pipeline_record,
+    ]);
+    if(!await backend.submit3D(valid_context_id, object_submit, new Uint32Array()))
+    {
+        throw new Error("Valid arbitrary shader object submit was rejected");
+    }
+    const object_stats = Array.from(backend.renderer["object_stats_3d"]());
+
+    await backend.createContext3D(invalid_context_id);
+    let invalid_cases = 0;
+    async function expect_invalid(commands, label, context_id = invalid_context_id,
+        resources = new Uint32Array())
+    {
+        if(await backend.submit3D(context_id, commands, resources))
+        {
+            throw new Error(`Invalid shader case was accepted: ${label}`);
+        }
+        if(backend.fatal_error)
+        {
+            throw backend.fatal_error;
+        }
+        invalid_cases++;
+    }
+    await expect_invalid(submit([
+        shader_record(1, 1, new Uint8Array([0xFF])),
+    ]), "UTF-8");
+    await expect_invalid(submit([
+        shader_record(1, 1, "@vertex fn main("),
+    ]), "syntax");
+    await expect_invalid(submit([
+        shader_record(1, 1,
+            "@vertex fn main() -> @builtin(position) vec4f { return vec4f(true); }"),
+    ]), "types");
+    await expect_invalid(submit([
+        shader_record(1, 1, "fn helper() {}"),
+    ]), "missing entry point");
+    await expect_invalid(submit([
+        shader_record(1, 1,
+            "@fragment fn main() -> @location(0) vec4f { return vec4f(1.0); }"),
+    ]), "stage mismatch");
+    await expect_invalid(submit([
+        shader_record(1, 1, concat(
+            "@group(0) @binding(0) var<uniform> data: vec4f;",
+            "@vertex fn main() -> @builtin(position) vec4f { return data; }")),
+    ]), "resource binding");
+    await expect_invalid(submit([
+        shader_record(1, 1, new Uint8Array(16 * 1024 + 1).fill(0x78)),
+    ]), "source limit");
+    const aggregate_source = concat(
+        "//", "x".repeat(15 * 1024), "\n",
+        "@vertex fn main() -> @builtin(position) vec4f {",
+        "return vec4f(0.0, 0.0, 0.0, 1.0);}"
+    );
+    await expect_invalid(submit(Array.from({ length: 9 }, (_, index) =>
+        shader_record(index + 1, 1, aggregate_source))), "context source limit");
+    const small_source = concat(
+        "@vertex fn main() -> @builtin(position) vec4f {",
+        "return vec4f(0.0, 0.0, 0.0, 1.0);}"
+    );
+    await expect_invalid(submit(Array.from({ length: 33 }, (_, index) =>
+        shader_record(index + 1, 1, small_source))), "live shader limit");
+    const mismatch_vertex = concat(
+        "struct Out { @builtin(position) pos: vec4f, @location(0) value: vec4f };",
+        "@vertex fn main() -> Out {",
+        "return Out(vec4f(0.0, 0.0, 0.0, 1.0), vec4f(1.0));}"
+    );
+    const mismatch_fragment = concat(
+        "@fragment fn main(@location(0) value: vec2f) -> @location(0) vec4f {",
+        "return vec4f(value, 0.0, 1.0);}"
+    );
+    await expect_invalid(submit([
+        shader_record(1, 1, mismatch_vertex),
+        shader_record(2, 2, mismatch_fragment),
+        pipeline_record,
+    ]), "pipeline interface");
+
+    function make_render_submit(vertices = 3, instances = 1)
+    {
+        return submit([
+            record(16, [0, 1, 1, f32(0.02), f32(0.04), f32(0.30), f32(1), 0]),
+            record(17, [3, 0]),
+            record(18, [f32(0), f32(0), f32(width), f32(height), f32(0), f32(1)]),
+            record(19, [0, 0, width, height]),
+            record(20, [vertices, instances, 0, 0]),
+            record(21, []),
+        ], [resource_id]);
+    }
+    const attached_resources = new Uint32Array([resource_id]);
+    await expect_invalid(make_render_submit(64 * 1024 + 1), "vertex invocation limit",
+        valid_context_id, attached_resources);
+    await expect_invalid(make_render_submit(3, 2), "instance limit",
+        valid_context_id, attached_resources);
+    const after_invalid_stats = Array.from(backend.renderer["object_stats_3d"]());
+    const render_submit = make_render_submit();
+    if(!await backend.submit3D(
+        valid_context_id, render_submit, new Uint32Array([resource_id])))
+    {
+        throw new Error("Valid arbitrary shader render submit was rejected");
+    }
+    await backend.setScanout({ resource_id, x: 0, y: 0, width, height });
+    await backend.flush({ resource_id, x: 0, y: 0, width, height });
+    const canvas = backend.canvas;
+    const rect = canvas.getBoundingClientRect();
+
+    await backend.detachResource3D(valid_context_id, resource_id);
+    await backend.destroyResource(resource_id);
+    await backend.destroyContext3D(valid_context_id);
+    await backend.destroyContext3D(invalid_context_id);
+    const after_cleanup_stats = Array.from(backend.renderer["object_stats_3d"]());
+    return {
+        baseline_stats,
+        object_stats,
+        after_invalid_stats,
+        after_cleanup_stats,
+        invalid_cases,
+        vertex_bytes: encoder.encode(vertex_source).byteLength,
+        fragment_bytes: encoder.encode(fragment_source).byteLength,
+        canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
+        canvas_width: canvas.width,
+        canvas_height: canvas.height,
+        rect: {
+            x: rect.left + window.scrollX,
+            y: rect.top + window.scrollY,
+            width: rect.width,
+            height: rect.height,
+        },
+    };
+
+    function concat(...parts)
+    {
+        return parts.join("");
+    }
+}
+
+async function run_shader_timeout_in_page()
+{
+    const device = window.emulator.v86.cpu.devices.virtio_gpu;
+    const backend = device.backend;
+    const context_id = 0x7FFF0003;
+    const source = new TextEncoder().encode(concat(
+        "// forced timeout shader\n",
+        "@vertex fn main() -> @builtin(position) vec4f {",
+        "return vec4f(0.0, 0.0, 0.0, 1.0);}"
+    ));
+    const record_size = 24 + ((source.byteLength + 7) & ~7);
+    const commands = new Uint8Array(32 + record_size);
+    const view = new DataView(commands.buffer);
+    view.setUint32(0, 0x53363856, true);
+    view.setUint16(4, 2, true);
+    view.setUint32(8, commands.byteLength, true);
+    view.setUint32(12, 1, true);
+    view.setUint16(32, 1, true);
+    view.setUint16(34, record_size / 4, true);
+    view.setUint32(40, 1, true);
+    view.setUint32(44, 1, true);
+    view.setUint32(48, 1, true);
+    view.setUint32(52, source.byteLength, true);
+    commands.set(source, 56);
+
+    const prototype = GPUDevice.prototype;
+    const original_pop_error_scope = prototype.popErrorScope;
+    prototype.popErrorScope = function()
+    {
+        return this.lost.then(info => {
+            throw info;
+        });
+    };
+    let error = "";
+    const started = performance.now();
+    try
+    {
+        await backend.createContext3D(context_id);
+        await backend.submit3D(context_id, commands, new Uint32Array());
+    }
+    catch(failure)
+    {
+        error = failure && failure.message || String(failure);
+    }
+    finally
+    {
+        prototype.popErrorScope = original_pop_error_scope;
+    }
+    const elapsed_ms = performance.now() - started;
+    const canvas_hidden = backend.canvas.hidden;
+    const renderer_disposed = backend.renderer === null;
+    device.reset();
+    await device.backend_ready;
+    const stats = device.get_performance_stats();
+    return {
+        error,
+        elapsed_ms,
+        canvas_hidden,
+        renderer_disposed,
+        recovery: {
+            fatal: device.backend.fatal_error?.message || null,
+            initialized: device.backend.initialized,
+            contexts: stats.live_3d_contexts,
+            resources: stats.live_3d_resources,
+            attachments: stats.context_attachments,
+        },
+    };
+
+    function concat(...parts)
+    {
+        return parts.join("");
+    }
+}
+
+async function run_shader_work_timeout_in_page()
+{
+    const device = window.emulator.v86.cpu.devices.virtio_gpu;
+    const backend = device.backend;
+    const encoder = new TextEncoder();
+    const context_entry = device.contexts_3d.entries().next().value;
+    if(!context_entry)
+    {
+        throw new Error("Guest version-2 context is unavailable");
+    }
+    const [context_id, context] = context_entry;
+    const resource_id = context.resources.values().next().value;
+    const resource = device.resources.get(resource_id);
+    if(!resource)
+    {
+        throw new Error("Guest version-2 resource is unavailable");
+    }
+
+    function record(opcode, words)
+    {
+        const bytes = new Uint8Array(8 + words.length * 4);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, opcode, true);
+        view.setUint16(2, bytes.byteLength / 4, true);
+        for(let index = 0; index < words.length; index++)
+        {
+            view.setUint32(8 + index * 4, words[index], true);
+        }
+        return bytes;
+    }
+
+    function shader_record(id, source)
+    {
+        const source_bytes = encoder.encode(source);
+        const size = 24 + ((source_bytes.byteLength + 7) & ~7);
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint16(0, 1, true);
+        view.setUint16(2, size / 4, true);
+        view.setUint32(8, id, true);
+        view.setUint32(12, 1, true);
+        view.setUint32(16, 1, true);
+        view.setUint32(20, source_bytes.byteLength, true);
+        bytes.set(source_bytes, 24);
+        return bytes;
+    }
+
+    function f32(value)
+    {
+        const buffer = new ArrayBuffer(4);
+        const view = new DataView(buffer);
+        view.setFloat32(0, value, true);
+        return view.getUint32(0, true);
+    }
+
+    function private_submit(records, resources = [])
+    {
+        const records_offset = (32 + resources.length * 4 + 7) & ~7;
+        const total_size = records_offset +
+            records.reduce((total, item) => total + item.byteLength, 0);
+        const bytes = new Uint8Array(total_size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, 0x53363856, true);
+        view.setUint16(4, 2, true);
+        view.setUint32(8, total_size, true);
+        view.setUint32(12, records.length, true);
+        view.setUint32(16, resources.length, true);
+        resources.forEach((id, index) => view.setUint32(32 + index * 4, id, true));
+        let offset = records_offset;
+        for(const item of records)
+        {
+            bytes.set(item, offset);
+            offset += item.byteLength;
+        }
+        return bytes;
+    }
+
+    function fenced_request(commands, fence_id)
+    {
+        const request = new Uint8Array(32 + commands.byteLength);
+        const view = new DataView(request.buffer);
+        view.setUint32(0, 0x0207, true);
+        view.setUint32(4, 1, true);
+        view.setUint32(8, fence_id, true);
+        view.setUint32(16, context_id, true);
+        view.setUint32(24, commands.byteLength, true);
+        request.set(commands, 32);
+        return request;
+    }
+
+    const prototype = GPUQueue.prototype;
+    const original_on_submitted_work_done = prototype.onSubmittedWorkDone;
+    prototype.onSubmittedWorkDone = function()
+    {
+        return new Promise(() => {});
+    };
+    const object_commands = private_submit([
+        shader_record(4, concat(
+            "@vertex fn main() -> @builtin(position) vec4f {",
+            "return vec4f(0.0, 0.0, 0.0, 1.0);}")),
+    ]);
+    let object_response;
+    const object_started = performance.now();
+    try
+    {
+        object_response = await Promise.race([
+            device.process_command(fenced_request(object_commands, 1), 24),
+            new Promise((resolve, reject) =>
+                setTimeout(() => reject(new Error("Fenced object submit did not settle")), 2000)),
+        ]);
+    }
+    finally
+    {
+        prototype.onSubmittedWorkDone = original_on_submitted_work_done;
+    }
+    const object_elapsed_ms = performance.now() - object_started;
+    const object_response_view = new DataView(
+        object_response.buffer, object_response.byteOffset, object_response.byteLength);
+
+    const render_commands = private_submit([
+        record(16, [0, 1, 1, f32(0.02), f32(0.04), f32(0.30), f32(1), 0]),
+        record(17, [1, 0]),
+        record(18, [
+            f32(0), f32(0), f32(resource.width), f32(resource.height), f32(0), f32(1),
+        ]),
+        record(19, [0, 0, resource.width, resource.height]),
+        record(20, [3, 1, 0, 0]),
+        record(21, []),
+    ], [resource_id]);
+    prototype.onSubmittedWorkDone = function()
+    {
+        return new Promise(() => {});
+    };
+    let render_response;
+    const started = performance.now();
+    try
+    {
+        render_response = await device.process_command(
+            fenced_request(render_commands, 2), 24);
+    }
+    finally
+    {
+        prototype.onSubmittedWorkDone = original_on_submitted_work_done;
+    }
+    const elapsed_ms = performance.now() - started;
+    const render_response_view = new DataView(
+        render_response.buffer, render_response.byteOffset, render_response.byteLength);
+    const error = backend.fatal_error?.message || "";
+    const canvas_hidden = backend.canvas.hidden;
+    const renderer_disposed = backend.renderer === null;
+    device.reset();
+    await device.backend_ready;
+    const stats = device.get_performance_stats();
+    return {
+        error,
+        elapsed_ms,
+        object_elapsed_ms,
+        object_response_type: object_response_view.getUint32(0, true),
+        object_response_flags: object_response_view.getUint32(4, true),
+        object_response_fence: object_response_view.getUint32(8, true),
+        render_response_type: render_response_view.getUint32(0, true),
+        canvas_hidden,
+        renderer_disposed,
+        recovery: {
+            fatal: device.backend.fatal_error?.message || null,
+            initialized: device.backend.initialized,
+            contexts: stats.live_3d_contexts,
+            resources: stats.live_3d_resources,
+            attachments: stats.context_attachments,
+        },
+    };
+
+    function concat(...parts)
+    {
+        return parts.join("");
+    }
+}
+
 async function evaluate(cdp, expression)
 {
     const response = await cdp.call("Runtime.evaluate", {
@@ -422,7 +1158,10 @@ async function wait_for(predicate, timeout, label)
         }
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-    throw new Error(`Timed out waiting for ${label}${last_error ? `: ${last_error.message}` : ""}`);
+    const diagnostics = last_readiness_state ?
+        `\n${last_readiness_state.serial.slice(-6000)}\n` +
+        `GPU state: ${JSON.stringify(last_readiness_state.gpu)}` : "";
+    throw new Error(`Timed out waiting for ${label}${last_error ? `: ${last_error.message}` : ""}${diagnostics}`);
 }
 
 function find_chrome()
