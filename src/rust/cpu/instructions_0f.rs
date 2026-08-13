@@ -3350,10 +3350,11 @@ pub unsafe fn instr_0FA2() {
                     edx = x2apic_id;
                 },
                 subleaf => {
-                    // no further levels: eax = ebx = 0, level type 0 (invalid)
+                    // no further levels: eax = ebx = 0, level type 0
+                    // (invalid); only ECX[7:0] echoes the input subleaf
                     eax = 0;
                     ebx = 0;
-                    ecx = subleaf as i32;
+                    ecx = (subleaf & 0xFF) as i32;
                     edx = x2apic_id;
                 },
             }
