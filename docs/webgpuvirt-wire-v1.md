@@ -61,10 +61,12 @@ and either stride zero (Linux non-blob tight packing) or a stride of at least
 
 ## Capset 7 payload
 
-`GET_CAPSET_INFO(index=0)` returns ID 7, maximum version 1, and maximum size 912.
-`GET_CAPSET(id=7, version=1)` returns exactly 912 payload bytes. Any other
-index, ID, version, nonzero request padding, short writable buffer, or malformed
-request returns `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`.
+`GET_CAPSET_INFO(index=0)` returns ID 7, maximum version 2, and maximum size 912.
+Version 2 is specified separately in
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). `GET_CAPSET(id=7, version=1)`
+still returns exactly these frozen 912 payload bytes. Any other index, ID,
+unsupported version, nonzero request padding, short writable buffer, or
+malformed request returns `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`.
 
 | Offset | Type | Version-1 value |
 | ---: | --- | --- |

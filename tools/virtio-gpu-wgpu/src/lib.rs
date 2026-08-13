@@ -46,6 +46,7 @@ struct Renderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    guest_pipeline_layout: wgpu::PipelineLayout,
     guest_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -100,6 +101,27 @@ impl WgpuRenderer {
             limits.max_texture_dimension_2d,
             limits.max_bind_groups,
             limits.max_color_attachments,
+        ]
+        .into_boxed_slice())
+    }
+
+    pub fn object_stats_3d(&self) -> Result<Box<[u32]>, JsValue> {
+        let renderer = self.inner()?;
+        renderer.check_fault().map_err(js_error)?;
+        let mut shaders = 0_usize;
+        let mut pipelines = 0_usize;
+        let mut shader_bytes = 0_usize;
+        for context in renderer.contexts.values() {
+            let stats = context.object_stats();
+            shaders += stats.0;
+            pipelines += stats.1;
+            shader_bytes += stats.2;
+        }
+        Ok(vec![
+            renderer.contexts.len() as u32,
+            shaders as u32,
+            pipelines as u32,
+            shader_bytes as u32,
         ]
         .into_boxed_slice())
     }
@@ -417,7 +439,7 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
-        let guest_pipeline = submit_3d::create_pinned_pipeline(&device)?;
+        let (guest_pipeline_layout, guest_pipeline) = submit_3d::create_pinned_pipeline(&device)?;
         queue.submit([submit_3d::encode_pinned_pipeline_probe(
             &device,
             &guest_pipeline,
@@ -461,6 +483,7 @@ impl Renderer {
             surface_config,
             pipeline,
             guest_pipeline,
+            guest_pipeline_layout,
             bind_group_layout,
             sampler,
             present_params,

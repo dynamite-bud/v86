@@ -354,6 +354,7 @@ class Test3DBackend extends MemoryGpuBackend
         this.block_submit = false;
         this.submit_started = null;
         this.release_submit = null;
+        this.wait_idle_calls = 0;
     }
 
     async get3DCapabilities()
@@ -405,6 +406,12 @@ class Test3DBackend extends MemoryGpuBackend
             await new Promise(resolve => { this.release_submit = resolve; });
         }
         return this.accept_submit;
+    }
+
+    async waitIdle()
+    {
+        this.wait_idle_calls++;
+        return super.waitIdle();
     }
 
     async reset()
@@ -554,7 +561,7 @@ class Test3DBackend extends MemoryGpuBackend
     const expected_info = new Uint8Array(16);
     const expected_info_view = new DataView(expected_info.buffer);
     expected_info_view.setUint32(0, 7, true);
-    expected_info_view.setUint32(4, 1, true);
+    expected_info_view.setUint32(4, 2, true);
     expected_info_view.setUint32(8, 912, true);
     assert.deepEqual(info.subarray(24), expected_info);
 
@@ -569,6 +576,11 @@ class Test3DBackend extends MemoryGpuBackend
     expected_capset_view.setUint32(24, 12, true);
     expected_capset_view.setUint32(28, 32, true);
     assert.deepEqual(capset.subarray(24), expected_capset);
+    const capset_v2 = await device.process_command(make_get_capset(7, 2), 936);
+    assert.equal(response_type(capset_v2), VIRTIO_GPU_RESP_OK_CAPSET);
+    const expected_capset_v2 = expected_capset.slice();
+    new DataView(expected_capset_v2.buffer).setUint16(4, 2, true);
+    assert.deepEqual(capset_v2.subarray(24), expected_capset_v2);
 
     assert.equal(response_type(await device.process_command(
         make_get_capset_info(1), 40)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
@@ -583,7 +595,7 @@ class Test3DBackend extends MemoryGpuBackend
     assert.equal(response_type(await device.process_command(
         make_get_capset(6, 1), 936)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
     assert.equal(response_type(await device.process_command(
-        make_get_capset(7, 2), 936)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
+        make_get_capset(7, 3), 936)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
     assert.equal(response_type(await device.process_command(
         make_get_capset(7, 1), 935)), VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);
     const probe_free_state = device.get_state();
@@ -683,6 +695,20 @@ class Test3DBackend extends MemoryGpuBackend
         expected_view.setUint32(offset, value, true);
     }
     assert.deepEqual(capset.subarray(24), expected_capset);
+    const capset_v2 = await device.process_command(make_get_capset(7, 2), 936);
+    assert.equal(response_type(capset_v2), VIRTIO_GPU_RESP_OK_CAPSET);
+    const expected_capset_v2 = expected_capset.slice();
+    const expected_v2_view = new DataView(expected_capset_v2.buffer);
+    expected_v2_view.setUint16(4, 2, true);
+    expected_v2_view.setUint32(80, 16 * 1024, true);
+    expected_v2_view.setUint32(84, 128 * 1024, true);
+    expected_v2_view.setUint32(156, 1, true);
+    expected_v2_view.setUint32(160, 1, true);
+    expected_v2_view.setUint32(164, 5000, true);
+    expected_v2_view.setUint32(168, 5000, true);
+    expected_v2_view.setUint32(172, 64 * 1024, true);
+    expected_v2_view.setUint32(176, 1, true);
+    assert.deepEqual(capset_v2.subarray(24), expected_capset_v2);
 
     assert.equal(await execute(device,
         make_context_resource(VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, 7, 3)),
@@ -706,6 +732,7 @@ class Test3DBackend extends MemoryGpuBackend
         VIRTIO_GPU_RESP_OK_NODATA);
     assert.equal(backend.submits.length, 1);
     assert.deepEqual(Array.from(backend.submits[0].resource_ids), [3]);
+    assert.equal(backend.wait_idle_calls, 0);
     backend.block_submit = true;
     const submit_started = new Promise(resolve => { backend.submit_started = resolve; });
     let fence_completed = false;
@@ -721,6 +748,7 @@ class Test3DBackend extends MemoryGpuBackend
     backend.release_submit();
     assert.equal(await fenced_submit, VIRTIO_GPU_RESP_OK_NODATA);
     assert.equal(fence_completed, true);
+    assert.equal(backend.wait_idle_calls, 0);
     assert.equal(await execute(device,
         make_submit_3d(7, payload, { size: payload.byteLength - 1 })),
         VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER);

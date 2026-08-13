@@ -15,7 +15,8 @@
 #include <virtgpu_drm.h>
 
 #define V86_CAPSET_ID 7U
-#define V86_CAPSET_VERSION 1U
+#define V86_CAPSET_VERSION_1 1U
+#define V86_CAPSET_VERSION_2 2U
 #define V86_CAPSET_SIZE 912U
 #define V86_CAPSET_MAGIC 0x57363856U
 #define V86_SUBMIT_MAGIC 0x53363856U
@@ -51,6 +52,15 @@ static const char vertex_shader[] =
 static const char fragment_shader[] =
     "@fragment fn main() -> @location(0) vec4f {"
     "return vec4f(1.0, 0.08, 0.04, 1.0);}";
+static const char shader_v2_vertex[] =
+    "@vertex fn main(@builtin(vertex_index) index: u32) -> "
+    "@builtin(position) vec4f {"
+    "let positions = array<vec2f, 3>(vec2f(0.0, 0.68), "
+    "vec2f(-0.68, -0.68), vec2f(0.68, -0.68));"
+    "return vec4f(positions[index], 0.0, 1.0);}";
+static const char shader_v2_fragment[] =
+    "@fragment fn main() -> @location(0) vec4f {"
+    "return vec4f(0.02, 0.95, 0.04, 1.0);}";
 
 struct submit_builder
 {
@@ -138,10 +148,10 @@ static int add_shader(struct submit_builder *builder,
     return 0;
 }
 
-static void finish_submit(struct submit_builder *builder)
+static void finish_submit(struct submit_builder *builder, uint16_t version)
 {
     put_u32(builder->bytes, V86_SUBMIT_MAGIC);
-    put_u16(builder->bytes + 4, 1);
+    put_u16(builder->bytes + 4, version);
     put_u16(builder->bytes + 6, 0);
     put_u32(builder->bytes + 8, (uint32_t)builder->offset);
     put_u32(builder->bytes + 12, builder->command_count);
@@ -252,12 +262,15 @@ static void request_stop(int signal_number)
     stop_requested = 1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    int shader_v2 = argc == 2 && strcmp(argv[1], "--shader-v2") == 0;
+    uint16_t submit_version = shader_v2 ?
+        V86_CAPSET_VERSION_2 : V86_CAPSET_VERSION_1;
     uint8_t capset[V86_CAPSET_SIZE] = { 0 };
     struct drm_virtgpu_get_caps get_caps = {
         .cap_set_id = V86_CAPSET_ID,
-        .cap_set_ver = V86_CAPSET_VERSION,
+        .cap_set_ver = submit_version,
         .addr = (uintptr_t)capset,
         .size = sizeof(capset),
     };
@@ -286,6 +299,17 @@ int main(void)
     int card_fd = -1;
     int prime_fd = -1;
     uint8_t *record;
+    uint16_t capset_version;
+    const char *selected_vertex_shader;
+    const char *selected_fragment_shader;
+
+    if(argc > 2 || (argc == 2 && !shader_v2))
+    {
+        fprintf(stderr, "usage: %s [--shader-v2]\n", argv[0]);
+        return 2;
+    }
+    selected_vertex_shader = shader_v2 ? shader_v2_vertex : vertex_shader;
+    selected_fragment_shader = shader_v2 ? shader_v2_fragment : fragment_shader;
 
     printf("V86_GPU_TRIANGLE_BEGIN\n");
     render_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
@@ -300,17 +324,19 @@ int main(void)
         return fail("GET_CAPS");
     }
     memcpy(&magic, capset, sizeof(magic));
+    memcpy(&capset_version, capset + 4, sizeof(capset_version));
     memcpy(&feature_bits, capset + 12, sizeof(feature_bits));
     memcpy(&shader_ir_bits, capset + 16, sizeof(shader_ir_bits));
     if(magic != V86_CAPSET_MAGIC ||
+       capset_version != submit_version ||
        !(feature_bits & V86_FEATURE_BASIC_RENDER) ||
        !(shader_ir_bits & V86_SHADER_IR_WGSL))
     {
         errno = EPROTO;
         return fail("GET_CAPS");
     }
-    printf("V86_GPU_TRIANGLE_GET_CAPS=PASS features=0x%08x shaders=0x%08x\n",
-        feature_bits, shader_ir_bits);
+    printf("V86_GPU_TRIANGLE_GET_CAPS=PASS version=%u features=0x%08x shaders=0x%08x\n",
+        capset_version, feature_bits, shader_ir_bits);
     if(ioctl(render_fd, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &context_init) < 0)
     {
         return fail("CONTEXT_INIT");
@@ -372,8 +398,8 @@ int main(void)
     printf("V86_GPU_TRIANGLE_TRANSFER=PASS\n");
 
     begin_submit(&builder, NULL, 0);
-    if(add_shader(&builder, 1, V86_SHADER_STAGE_VERTEX, vertex_shader) < 0 ||
-       add_shader(&builder, 2, V86_SHADER_STAGE_FRAGMENT, fragment_shader) < 0)
+    if(add_shader(&builder, 1, V86_SHADER_STAGE_VERTEX, selected_vertex_shader) < 0 ||
+       add_shader(&builder, 2, V86_SHADER_STAGE_FRAGMENT, selected_fragment_shader) < 0)
     {
         return fail("SHADER_RECORD");
     }
@@ -388,7 +414,7 @@ int main(void)
     put_u32(record + 20, V86_TOPOLOGY_TRIANGLE_LIST);
     put_u32(record + 24, V86_FORMAT_R8G8B8A8_UNORM);
     put_u32(record + 28, 1);
-    finish_submit(&builder);
+    finish_submit(&builder, submit_version);
     if(exec_submit(render_fd, &builder, NULL, 0) < 0)
     {
         return fail("OBJECT_SUBMIT");
@@ -426,7 +452,7 @@ int main(void)
     {
         return fail("RENDER_RECORD");
     }
-    finish_submit(&builder);
+    finish_submit(&builder, submit_version);
     if(exec_submit(render_fd, &builder, &bo_handle, 1) < 0)
     {
         return fail("RENDER_SUBMIT");
@@ -457,6 +483,10 @@ int main(void)
     printf("V86_GPU_TRIANGLE_MODESET=PASS width=%u height=%u\n",
         mode.hdisplay, mode.vdisplay);
     printf("V86_GPU_TRIANGLE_READY=PASS\n");
+    if(shader_v2)
+    {
+        printf("V86_GPU_SHADER_V2=PASS\n");
+    }
     printf("V86_APPLIANCE_READY=PASS\n");
     signal(SIGINT, request_stop);
     signal(SIGTERM, request_stop);

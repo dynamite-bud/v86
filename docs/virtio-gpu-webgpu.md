@@ -15,12 +15,13 @@ hardening required for Linux KMS and desktop use:
 - Reset/device-loss recovery, serializable 2D state, ready snapshots, hard resource limits, and performance counters.
 - Reproducible Linux KMS plus Xorg/Wayland desktop acceptance through direct JavaScript WebGPU and Rust/Wasm `wgpu`.
 - An opt-in capset-7 basic-render path on the Rust/Wasm backend: standard
-  contexts/resources/transfers, a bounded private submit decoder, one
-  startup-validated immutable WGSL pipeline, and a Linux/libdrm reference
-  triangle.
+  contexts/resources/transfers, a bounded private submit decoder, frozen
+  version-1 pinned shaders, bounded version-2 arbitrary WGSL with synchronous
+  Naga and WebGPU validation, context-local pipelines, bounded draw work, and
+  5000 ms compilation and GPU-completion timeouts.
 
 The default device still exposes only standard 2D. Resource blobs, UUIDs, host
-mappings, Mesa, arbitrary guest shaders, shader translation, virgl
+mappings, Mesa, SPIR-V, resource bindings, shader translation, virgl
 compatibility, Vulkan, and 3D on the direct JavaScript backend are not
 implemented or advertised.
 
@@ -394,24 +395,28 @@ targets listed above.
 **Implemented today:** when `virtio_gpu.experimental_3d` is true and the
 Rust/Wasm `wgpu` backend preflight succeeds, the device advertises capset 7,
 `VIRTIO_GPU_F_VIRGL`, and `VIRTIO_GPU_F_CONTEXT_INIT`. It accepts the exact
-standard command subset and private submit ABI frozen in
-[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md). The Linux/libdrm reference
-utility creates one render target, submits the pinned red triangle, presents it
-through the normal scanout path, and is checked by browser pixels, ordered
-fences, teardown, and device-loss recovery. With the option off, another
-backend selected, or preflight unavailable, `num_capsets` remains zero and the
-device is the existing standard 2D implementation.
+standard command subset and the two private submit ABIs frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md) and
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Version 1 maps its two pinned
+shader handles to the immutable startup pipeline. Version 2 accepts bounded
+UTF-8 WGSL, validates every module synchronously with Naga, validates staged
+WebGPU modules and pipelines through the patched wgpu error scope, commits
+objects atomically, caps draw work, and faults after 5000 ms if compilation or
+submitted GPU work does not settle. Browser acceptance proves both revisions,
+invalid-source and draw-limit accounting, repeated compilation/render timeout
+recovery, and zero leaked standard 3D state. With the option off, another backend
+selected, or preflight unavailable, `num_capsets` remains zero and the device
+is the existing standard 2D implementation.
 
-Not implemented: arbitrary guest WGSL or SPIR-V, buffers, bindings, vertex or
-index data, texture sampling, depth/stencil, blending, readback, resource blobs,
-UUIDs, host mappings, Mesa/Gallium, virgl compatibility, or Vulkan. The direct
-JavaScript backend remains 2D-only.
+Not implemented: SPIR-V, buffers, bindings, vertex or index data, texture
+sampling, depth/stencil, blending, readback, resource blobs, UUIDs, host
+mappings, Mesa/Gallium, virgl compatibility, or Vulkan. The direct JavaScript
+backend remains 2D-only.
 
-Everything beyond the frozen version-1 wire document is future architecture,
-not a statement of current support. A phase may advertise only the bits,
-limits, formats, and opcodes whose gate has passed; naming an item below does
-not make it available. Implementation work for this boundary is tracked in
-[XWAH-1](https://github.com/dynamite-bud/v86/issues/1).
+The implemented boundary is tracked by
+[XWAH-1](https://github.com/dynamite-bud/v86/issues/1) and
+[XWAH-15](https://github.com/dynamite-bud/v86/issues/15). Naming later
+architecture below does not advertise it.
 
 #### Linux/libdrm capset-7 transport gate
 
@@ -432,8 +437,7 @@ V86_GPU_CAPSET7_CONTEXT_INIT=PASS capset=7
 the Linux-required `VIRTIO_GPU_F_VIRGL` and `VIRTIO_GPU_F_CONTEXT_INIT`, returns
 the zero-feature capset envelope, and implements context create/destroy. It is
 false by default, absent from the public TypeScript API, and does not advertise
-basic render, formats, resources, transfers, or submit support. Phase 6 remains
-gated on the Rust decoder and reference triangle.
+basic render, formats, resources, transfers, or submit support.
 
 ### Negotiation and 2D fallback
 
@@ -444,20 +448,19 @@ limits, and return an immutable capset. If preflight fails, startup continues
 as the existing 2D device with zero capsets and no 3D feature bits. Features
 cannot be added or withdrawn after VirtIO negotiation.
 
-After the complete Phase 6 gate, the opt-in device may additionally advertise
-`VIRTIO_GPU_F_VIRGL` (the Linux gate for standard context/resource/execbuffer
-ioctls) and `VIRTIO_GPU_F_CONTEXT_INIT`, with `num_capsets = 1`. It advertises
-only the private capset below, never `VIRTIO_GPU_CAPSET_VIRGL` or
-`VIRTIO_GPU_CAPSET_VIRGL2`. Blob, UUID, host-visible-memory, and multiple-ring
-features remain off. `CTX_CREATE.context_init` must select that capset and the
-single default ring; other capset IDs, upper bits, and ring indices are
-rejected.
+The opt-in device additionally advertises `VIRTIO_GPU_F_VIRGL` (the Linux gate
+for standard context/resource/execbuffer ioctls) and
+`VIRTIO_GPU_F_CONTEXT_INIT`, with `num_capsets = 1`. It advertises only private
+capset 7, never `VIRTIO_GPU_CAPSET_VIRGL` or `VIRTIO_GPU_CAPSET_VIRGL2`. Blob,
+UUID, host-visible-memory, and multiple-ring features remain off.
+`CTX_CREATE.context_init` selects capset 7 and the single default ring; other
+capset IDs, upper bits, and ring indices are rejected.
 
-The provisional experimental capset ID is `7`, the first unassigned ID after
-the IDs 1-6 in the pinned Linux 6.18 UAPI. Phase 6 must prove that this kernel
-and libdrm preserve it through `GET_CAPS` and `CONTEXT_INIT`. It is not an
-upstream allocation: a standards collision requires changing the host and
-guest together before release.
+The experimental capset ID is `7`, the first unassigned ID after IDs 1-6 in the
+pinned Linux 6.18 UAPI. The Linux/libdrm gate proves this kernel preserves it
+through `GET_CAPS` and `CONTEXT_INIT`. It is not an upstream allocation: a
+standards collision requires changing the host and guest together before
+release.
 
 A guest that does not negotiate 3D continues to use the unchanged 2D ABI.
 Mesa's `webgpuvirt` loader declines the device when capset 7 or a required bit
@@ -530,11 +533,12 @@ The implemented Phase 6 byte contract is frozen in
 opcodes below describe the versioned architecture ceiling; version 1 advertises
 only the exact nonzero fields listed in that dedicated wire document.
 
-`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 1, and maximum size
-912 bytes. `GET_CAPSET(id = 7, version = 1)` returns exactly 912 zero-initialized
-data bytes after the standard response header. Other indices, IDs, or versions
+`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 2, and maximum size
+912 bytes. `GET_CAPSET(id = 7, version = 1)` returns the frozen 912-byte
+version-1 payload; version 2 is defined in
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Other indices, IDs, or versions
 return `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`. All fields are packed
-little-endian and the capset is frozen for the device lifetime:
+little-endian and each versioned payload is frozen for the device lifetime:
 
 ```text
 struct v86_webgpu_capset_v1 {
@@ -748,9 +752,10 @@ non-finite values are deterministic validation failures.
 
 ### Later-revision hard-limit ceiling
 
-The table below is an architecture ceiling for later capset revisions, not the
-implemented version-1 contract. The exact version-1 values are frozen in
-[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md); configuration and adapter
+The table below is an architecture ceiling beyond implemented capset versions
+1 and 2. Their exact values are frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md) and
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md); configuration and adapter
 limits may only lower advertised values:
 | Item | Absolute ceiling |
 | --- | ---: |

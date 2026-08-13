@@ -41,6 +41,11 @@ if grep -qw 'v86_gpu_capset_probe=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-capset-probe >&3 2>&3 || fail capset7-probe
     exec tail -f /dev/null
 fi
+if grep -qw 'v86_gpu_shader=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-triangle --shader-v2 >&3 2>&3 || fail shader-v2
+    exec tail -f /dev/null
+fi
+
 
 if grep -qw 'v86_gpu_triangle=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-triangle >&3 2>&3 || fail triangle

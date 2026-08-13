@@ -10,12 +10,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 bytemuck = "1.24.0"
 futures-channel = "0.3.31"
+futures-util = "0.3.31"
 js-sys = "0.3.104"
-naga = { version = "=30.0.0", features = ["wgsl-in"] }
+naga = { git = "https://github.com/dynamite-bud/wgpu", rev = "7d5148d689f24101eb34c6af71b0071dcd113059", features = ["wgsl-in"] }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "=0.4.77"
-web-sys = { version = "=0.3.104", features = ["HtmlCanvasElement"] }
-wgpu = { version = "=30.0.0", default-features = false, features = ["std", "webgpu", "wgsl"] }
+web-sys = { version = "=0.3.104", features = ["HtmlCanvasElement", "Window"] }
+wgpu = { git = "https://github.com/dynamite-bud/wgpu", rev = "7d5148d689f24101eb34c6af71b0071dcd113059", default-features = false, features = ["std", "webgpu", "wgsl"] }
 
 
 [dev-dependencies]
