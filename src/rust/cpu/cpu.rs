@@ -9,7 +9,7 @@ use crate::cpu::misc_instr::{
     push16, push32,
 };
 use crate::cpu::modrm::{resolve_modrm16, resolve_modrm32};
-use crate::cpu::{apic, ioapic, pic};
+use crate::cpu::{apic, ioapic, pic, vcpu};
 use crate::dbg::dbg_trace;
 use crate::gen;
 use crate::jit;
@@ -4565,6 +4565,50 @@ pub unsafe fn check_page_switch(block_addr: u32, next_block_addr: u32) {
 
 #[no_mangle]
 pub unsafe fn reset_cpu() {
+    // Reset every vCPU's state block through the live block: switch it in,
+    // reset it, mark APs as waiting for INIT+SIPI. With one vCPU this
+    // degenerates to a single reset_vcpu_block with no-op switches.
+    let vcpu_count = vcpu::count();
+    if vcpu_count == 0 {
+        // set_smp_cpus has not sized the vCPU table; plain single-CPU reset
+        reset_vcpu_block();
+    }
+    else {
+        for i in 0..vcpu_count {
+            vcpu::switch_to(i);
+            reset_vcpu_block();
+            vcpu::set_run_state(
+                i,
+                if i == 0 { vcpu::RunState::Runnable } else { vcpu::RunState::WaitForSipi },
+            );
+            vcpu::clear_wake_pending(i);
+        }
+        vcpu::switch_to(0);
+        if vcpu_count > 1 {
+            // switch_to contract: flush after a real switch (the last
+            // reset_vcpu_block flushed while another vCPU was live)
+            full_clear_tlb();
+        }
+    }
+
+    // machine-global state, reset exactly once:
+
+    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
+    // interrupts) must return to power-on values on reboot; stale values
+    // would misroute interrupts now that destinations are matched honestly
+    apic::reset();
+    ioapic::reset();
+
+    set_tsc(0, 0);
+
+    jit::jit_clear_cache_js();
+}
+
+/// Reset the current vCPU's state block (and the TLB caching its mappings)
+/// to power-on values with the real-mode entry point at F000:FFF0.
+/// Machine-global state (APIC/IOAPIC, TSC, JIT cache) is reset once by
+/// reset_cpu, not here.
+unsafe fn reset_vcpu_block() {
     for i in 0..8 {
         *segment_is_null.offset(i) = false;
         *segment_limits.offset(i) = 0;
@@ -4599,12 +4643,6 @@ pub unsafe fn reset_cpu() {
     *mxcsr = 0x1F80;
 
     full_clear_tlb();
-
-    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
-    // interrupts) must return to power-on values on reboot; stale values
-    // would misroute interrupts now that destinations are matched honestly
-    apic::reset();
-    ioapic::reset();
 
     *protected_mode = false;
 
@@ -4643,8 +4681,6 @@ pub unsafe fn reset_cpu() {
     *last_op1 = 0;
     *last_op_size = 0;
 
-    set_tsc(0, 0);
-
     *instruction_pointer = 0xFFFF0;
     switch_cs_real_mode(0xF000);
 
@@ -4652,8 +4688,6 @@ pub unsafe fn reset_cpu() {
     write_reg32(ESP, 0x100);
 
     update_state_flags();
-
-    jit::jit_clear_cache_js();
 }
 
 #[no_mangle]
@@ -4662,5 +4696,6 @@ pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
 #[no_mangle]
 pub unsafe fn set_smp_cpus(n: u32) {
     dbg_assert!(n >= 1 && n <= MAX_CPUS);
-    smp_cpus = n
+    smp_cpus = n;
+    vcpu::init(n as usize)
 }

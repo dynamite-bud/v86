@@ -13,4 +13,5 @@ pub mod modrm;
 pub mod pic;
 pub mod sse_instr;
 pub mod string;
+pub mod vcpu;
 pub mod vga;
