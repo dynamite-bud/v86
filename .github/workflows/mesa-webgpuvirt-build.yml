@@ -43,9 +43,9 @@ jobs:
         run: |
           file mesa-artifacts/lib/libgallium-26.1.6.so | grep -q 'ELF 32-bit LSB'
           file -L mesa-artifacts/lib/dri/virtio_gpu_dri.so | grep -q 'ELF 32-bit LSB'
-          sha256sum mesa-artifacts/lib/libgallium-26.1.6.so \
-            mesa-artifacts/lib/dri/virtio_gpu_dri.so \
-            > mesa-artifacts/SHA256SUMS
+          (cd mesa-artifacts && sha256sum \
+            lib/libgallium-26.1.6.so \
+            lib/dri/virtio_gpu_dri.so > SHA256SUMS)
 
       - name: Upload Mesa artifacts
         uses: actions/upload-artifact@v7
