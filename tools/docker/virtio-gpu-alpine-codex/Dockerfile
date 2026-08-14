@@ -52,6 +52,17 @@ RUN git clone --depth 1 --branch mesa-26.1.6 \
     meson compile -C /src/mesa/build-webgpuvirt && \
     DESTDIR=/opt/webgpuvirt meson install -C /src/mesa/build-webgpuvirt
 
+COPY mesa-artifacts.lock /tmp/
+RUN set -eux; \
+    expected_commit=$MESA_COMMIT; \
+    . /tmp/mesa-artifacts.lock; \
+    test "$expected_commit" = "$MESA_COMMIT"; \
+    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT"; \
+    printf '%s  %s\n' "$MESA_GALLIUM_SHA256" \
+        /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so | sha256sum -c -; \
+    printf '%s  %s\n' "$MESA_DRI_SHA256" \
+        /opt/webgpuvirt/usr/local/lib/dri/virtio_gpu_dri.so | sha256sum -c -
+
 FROM scratch AS mesa-artifacts
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /lib/
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /lib/dri
