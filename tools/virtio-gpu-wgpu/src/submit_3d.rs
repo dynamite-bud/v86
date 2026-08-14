@@ -3967,15 +3967,18 @@ mod tests {
             }
             if case % 2 == 0 && length >= SUBMIT_HEADER_SIZE {
                 bytes[0..4].copy_from_slice(&SUBMIT_MAGIC.to_le_bytes());
-                bytes[4..6].copy_from_slice(
-                    &(if case % 4 == 0 { SUBMIT_V1 } else { SUBMIT_V2 }).to_le_bytes(),
-                );
+                let major = match case % 6 {
+                    0 => SUBMIT_V1,
+                    2 => SUBMIT_V2,
+                    _ => SUBMIT_V3,
+                };
+                bytes[4..6].copy_from_slice(&major.to_le_bytes());
                 bytes[6..8].copy_from_slice(&SUBMIT_MINOR.to_le_bytes());
                 bytes[8..12].copy_from_slice(&(length as u32).to_le_bytes());
                 bytes[20..32].fill(0);
             }
             if let Ok(submit) = decode(&bytes) {
-                assert!(matches!(submit.major, SUBMIT_V1 | SUBMIT_V2));
+                assert!(matches!(submit.major, SUBMIT_V1 | SUBMIT_V2 | SUBMIT_V3));
                 assert!(!submit.records.is_empty());
                 assert!(submit.records.len() <= MAX_COMMANDS);
                 assert!(submit.resources.len() <= MAX_RESOURCES);
