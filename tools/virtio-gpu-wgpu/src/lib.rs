@@ -11,6 +11,7 @@ const TARGET_BUFFER: u32 = 0;
 const TARGET_TEXTURE_2D: u32 = 2;
 const TARGET_TEXTURE_RECT: u32 = 5;
 const FORMAT_R8_UNORM: u32 = 64;
+const FORMAT_R8_UINT: u32 = 177;
 const BIND_RENDER_TARGET: u32 = 1 << 1;
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const FORMAT_B8G8R8X8_UNORM: u32 = 2;
@@ -663,12 +664,14 @@ impl Renderer {
         {
             return Err("Resource dimensions exceed WebGPU limits".into());
         }
-        let bytes_per_pixel = if format == FORMAT_R8_UNORM { 1 } else { BYTES_PER_PIXEL };
+        let bytes_per_pixel =
+            if matches!(format, FORMAT_R8_UNORM | FORMAT_R8_UINT) { 1 } else { BYTES_PER_PIXEL };
         if checked_resource_size(width, height, bytes_per_pixel)? != byte_length {
             return Err("Resource byte length does not match its dimensions".into());
         }
+        // The pinned Ghostty translation consumes its R8UI atlas as normalized alpha.
         let texture_format = match format {
-            FORMAT_R8_UNORM => wgpu::TextureFormat::R8Unorm,
+            FORMAT_R8_UNORM | FORMAT_R8_UINT => wgpu::TextureFormat::R8Unorm,
             FORMAT_B8G8R8A8_SRGB | FORMAT_B8G8R8X8_SRGB | FORMAT_R8G8B8A8_SRGB => {
                 wgpu::TextureFormat::Rgba8UnormSrgb
             },
@@ -1132,6 +1135,7 @@ fn create_surface(
 fn validate_texture_format(format: u32) -> Result<(), String> {
     match format {
         FORMAT_R8_UNORM
+        | FORMAT_R8_UINT
         | FORMAT_B8G8R8A8_UNORM
         | FORMAT_B8G8R8X8_UNORM
         | FORMAT_R8G8B8A8_UNORM
