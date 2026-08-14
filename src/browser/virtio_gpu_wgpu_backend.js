@@ -22,6 +22,8 @@ export class WgpuBackend extends VirtioGpuBackend
         this.initialized = false;
         this.fatal_error = null;
         this.last_invalid_3d_error = null;
+        /** @type {!Array<string>} */
+        this.invalid_3d_errors = [];
         this.device_status_timer = 0;
         this.active_calls = 0;
         this.previous_hidden = null;
@@ -225,6 +227,11 @@ export class WgpuBackend extends VirtioGpuBackend
             if(message.startsWith("invalid:"))
             {
                 this.last_invalid_3d_error = message;
+                this.invalid_3d_errors.push(message);
+                if(this.invalid_3d_errors.length > 32)
+                {
+                    this.invalid_3d_errors.shift();
+                }
                 return false;
             }
             throw this.handle_fatal(error, "submit3D");

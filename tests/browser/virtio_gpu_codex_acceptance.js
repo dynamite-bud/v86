@@ -197,6 +197,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
                 `({ id, resources: Array.from(context.resources) })), ` +
                 `last_invalid_3d_error: device.backend?.last_invalid_3d_error || null, ` +
+                `invalid_3d_errors: device.backend?.invalid_3d_errors || [], ` +
                 `last_transfer_from_host_3d: device.last_transfer_from_host_3d || null, ` +
                 `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
@@ -213,7 +214,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 const serial_tail = state.serial.slice(-60000);
                 const error = new Error(
                     `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
-                    `GPU state: ${JSON.stringify(state.gpu)}`);
+                    `GPU state: ${JSON.stringify(state.gpu)}\n3D rejections:\n` +
+                    (state.gpu?.invalid_3d_errors || []).join("\n"));
                 error.terminal = true;
                 throw error;
             }
@@ -561,7 +563,10 @@ async function run_scenario(browser_ws, base_url, renderer)
         {
             assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
         }
-        assert.match(state.serial, /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
+        const accelerated = SCENARIO === "accelerated";
+        assert.match(state.serial, accelerated ?
+            /V86_APPLIANCE_RENDERER=.*webgpuvirt/i :
+            /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
         assert.match(state.serial, /V86_APPLIANCE_OPENGL=4\.[1-9]/);
         assert.match(state.serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
         assert.ok(state.serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.147.0"));
@@ -570,6 +575,21 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.canvas_visible, true);
         assert.equal(state.canvas_width, state.scanout.width);
         assert.equal(state.canvas_height, state.scanout.height);
+        if(accelerated)
+        {
+            const gpu = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                return {
+                    stats: device.get_performance_stats(),
+                    last_invalid_3d_error: device.backend.last_invalid_3d_error,
+                };
+            })()`);
+            assert.equal(gpu.stats.invalid_commands, 0);
+            assert.equal(gpu.stats.backend_errors, 0);
+            assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
+                "Accelerated Ghostty did not submit a standard VirGL command stream");
+            assert.equal(gpu.last_invalid_3d_error, null);
+        }
 
         if(RELAY_URL)
         {
@@ -659,7 +679,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             ready_ms: Math.round(ready_ms),
             architecture: "i686",
             uid: 1000,
-            llvmpipe: true,
+            llvmpipe: !accelerated,
+            accelerated_3d: accelerated,
             tls_relay: Boolean(RELAY_URL),
             desktop_exclusions: true,
             login_unconfigured: true,
