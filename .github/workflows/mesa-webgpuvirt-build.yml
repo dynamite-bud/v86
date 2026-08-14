@@ -42,7 +42,7 @@ jobs:
       - name: Verify i386 artifacts
         run: |
           file mesa-artifacts/lib/libgallium-26.1.6.so | grep -q 'ELF 32-bit LSB'
-          file mesa-artifacts/lib/dri/virtio_gpu_dri.so | grep -q 'ELF 32-bit LSB'
+          file -L mesa-artifacts/lib/dri/virtio_gpu_dri.so | grep -q 'ELF 32-bit LSB'
           sha256sum mesa-artifacts/lib/libgallium-26.1.6.so \
             mesa-artifacts/lib/dri/virtio_gpu_dri.so \
             > mesa-artifacts/SHA256SUMS
