@@ -871,7 +871,7 @@ struct MesaVertexElement {
 struct MesaShader {
     stage: u32,
     expected_length: usize,
-    source: Vec<u8>,
+    source: Arc<Vec<u8>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1003,9 +1003,10 @@ fn update_mesa_shader(state: &mut MesaState, payload: &[u32]) -> Result<(), Stri
         {
             return Err(invalid("out-of-order Mesa shader continuation"));
         }
-        chunk.truncate(shader.expected_length - shader.source.len());
-        shader.source.extend_from_slice(&chunk);
-        if shader.source.len() == shader.expected_length && shader.source.last() != Some(&0) {
+        let source = Arc::make_mut(&mut shader.source);
+        chunk.truncate(shader.expected_length - source.len());
+        source.extend_from_slice(&chunk);
+        if source.len() == shader.expected_length && source.last() != Some(&0) {
             return Err(invalid("unterminated Mesa shader"));
         }
         return Ok(());
@@ -1041,7 +1042,7 @@ fn update_mesa_shader(state: &mut MesaState, payload: &[u32]) -> Result<(), Stri
         MesaShader {
             stage,
             expected_length: offset_or_length,
-            source: chunk,
+            source: Arc::new(chunk),
         },
     );
     Ok(())
