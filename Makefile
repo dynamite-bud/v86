@@ -415,6 +415,9 @@ virtio-gpu-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 virtio-gpu-codex-benchmark: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
 	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=benchmark \
 		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
+virtio-gpu-codex-accelerated-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
 virtio-gpu-codex-benchmark-accelerated: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
 	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=benchmark-accelerated \
 		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
@@ -509,8 +512,8 @@ denodoc:
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-capset-probe-test virtio-gpu-browser-test virtio-gpu-ready-snapshot-test \
-	virtio-gpu-codex-browser-test virtio-gpu-codex-benchmark \
-	virtio-gpu-codex-benchmark-accelerated virtio-gpu-color-test \
+	virtio-gpu-codex-browser-test virtio-gpu-codex-accelerated-test \
+	virtio-gpu-codex-benchmark virtio-gpu-codex-benchmark-accelerated \
 	virtio-gpu-3d-transport-test \
 	virtio-gpu-3d-triangle-test virtio-gpu-3d-shader-test \
 	virtio-gpu-webgpuvirt-triangle-test \
