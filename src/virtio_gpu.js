@@ -120,6 +120,7 @@ export const VIRTIO_GPU_FLAG_FENCE = 1;
 
 export const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM = 1;
 export const VIRTIO_GPU_FORMAT_R8_UNORM = 64;
+export const VIRTIO_GPU_FORMAT_R8_UINT = 177;
 export const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM = 2;
 export const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM = 67;
 export const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM = 134;
@@ -918,6 +919,7 @@ VirtioGpu.prototype.create_resource_3d = async function(request, generation)
          format === VIRTIO_GPU_FORMAT_B8G8R8A8_SRGB ||
          format === VIRTIO_GPU_FORMAT_B8G8R8X8_SRGB ||
          format === VIRTIO_GPU_FORMAT_R8_UNORM ||
+         format === VIRTIO_GPU_FORMAT_R8_UINT ||
          format === VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM ||
          format === VIRTIO_GPU_FORMAT_R8G8B8A8_SRGB) &&
         (bind & ~((1 << 1) | (1 << 3) | (1 << 7) | (1 << 18) | (1 << 20))) === 0 &&
@@ -934,7 +936,8 @@ VirtioGpu.prototype.create_resource_3d = async function(request, generation)
     {
         return VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY;
     }
-    const bytes_per_pixel = format === VIRTIO_GPU_FORMAT_R8_UNORM ? 1 : 4;
+    const bytes_per_pixel = format === VIRTIO_GPU_FORMAT_R8_UNORM ||
+        format === VIRTIO_GPU_FORMAT_R8_UINT ? 1 : 4;
     const byte_length = checked_resource_size(width, height, bytes_per_pixel);
     if(byte_length === null)
     {
@@ -2126,7 +2129,7 @@ function create_webgpu_capset(capabilities, version)
         V86_WEBGPU_CAPSET_V3_FEATURES : V86_WEBGPU_CAPSET_FEATURE_RENDER, true);
     view.setUint32(16, version === 3 ?
         V86_WEBGPU_CAPSET_SHADER_IR_SPIRV : V86_WEBGPU_CAPSET_SHADER_IR_WGSL, true);
-    view.setUint32(20, version === 3 ? 2 : 1, true);
+    view.setUint32(20, version === 3 ? 3 : 1, true);
     view.setUint32(32, capabilities.max_resources, true);
     view.setUint32(36, V86_WEBGPU_CAPSET_MAX_ATTACHMENTS, true);
     view.setUint32(40, Math.min(capabilities.max_texture_dimension_2d,
@@ -2182,6 +2185,11 @@ function create_webgpu_capset(capabilities, version)
         view.setUint32(format_offset + V86_WEBGPU_CAPSET_FORMAT_STRIDE + 4,
             (1 << 0) | (1 << 3) | (1 << 4) | (1 << 6), true);
         view.setUint32(format_offset + V86_WEBGPU_CAPSET_FORMAT_STRIDE + 8, 1, true);
+        view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE,
+            VIRTIO_GPU_FORMAT_R8_UINT, true);
+        view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE + 4,
+            (1 << 0) | (1 << 3) | (1 << 4) | (1 << 6), true);
+        view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE + 8, 1, true);
         view.setUint32(180, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);
         view.setUint32(184, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);
         view.setUint32(188, V86_WEBGPU_CAPSET_COMPILATION_TIMEOUT_MS, true);

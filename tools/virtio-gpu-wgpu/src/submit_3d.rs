@@ -8,7 +8,7 @@ use wasm_bindgen::{JsCast, closure::Closure};
 
 use super::{
     FORMAT_B8G8R8A8_SRGB, FORMAT_B8G8R8A8_UNORM, FORMAT_B8G8R8X8_SRGB, FORMAT_B8G8R8X8_UNORM,
-    FORMAT_R8_UNORM, FORMAT_R8G8_UNORM, FORMAT_R8G8B8A8_SRGB, FORMAT_R8G8B8A8_UNORM, Renderer,
+    FORMAT_R8_UINT, FORMAT_R8_UNORM, FORMAT_R8G8B8A8_SRGB, FORMAT_R8G8B8A8_UNORM, Renderer,
     record_fault,
 };
 
@@ -76,7 +76,7 @@ fn is_color_target_format(format: u32) -> bool {
     matches!(
         format,
         FORMAT_R8_UNORM
-            | FORMAT_R8G8_UNORM
+            | FORMAT_R8_UINT
             | FORMAT_R8G8B8A8_UNORM
             | FORMAT_B8G8R8A8_UNORM
             | FORMAT_R8G8B8A8_SRGB
@@ -168,8 +168,7 @@ fn mesa_vertex_attributes(
 
 fn color_target_format(format: u32) -> Result<wgpu::TextureFormat, String> {
     match format {
-        FORMAT_R8_UNORM => Ok(wgpu::TextureFormat::R8Unorm),
-        FORMAT_R8G8_UNORM => Ok(wgpu::TextureFormat::Rg8Unorm),
+        FORMAT_R8_UNORM | FORMAT_R8_UINT => Ok(wgpu::TextureFormat::R8Unorm),
         FORMAT_R8G8B8A8_UNORM | FORMAT_B8G8R8A8_UNORM => Ok(wgpu::TextureFormat::Rgba8Unorm),
         FORMAT_R8G8B8A8_SRGB | FORMAT_B8G8R8A8_SRGB | FORMAT_B8G8R8X8_SRGB => {
             Ok(wgpu::TextureFormat::Rgba8UnormSrgb)
@@ -2002,8 +2001,7 @@ async fn render_mesa_draw(
         FORMAT_R8G8B8A8_SRGB => 3,
         FORMAT_B8G8R8A8_UNORM => 4,
         FORMAT_B8G8R8A8_SRGB | FORMAT_B8G8R8X8_SRGB => 5,
-        FORMAT_R8_UNORM => 6,
-        FORMAT_R8G8_UNORM => 7,
+        FORMAT_R8_UNORM | FORMAT_R8_UINT => 6,
         _ => return Err(invalid("unsupported Mesa virgl render target format")),
     };
     let pipeline_id = MESA_PIPELINE_ID - mesa_program_index(program) * 8 - format_offset;
@@ -3749,7 +3747,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn mesa_color_pipeline_formats_are_supported() {
         assert!(is_color_target_format(FORMAT_R8_UNORM));
-        assert!(is_color_target_format(FORMAT_R8G8_UNORM));
+        assert!(is_color_target_format(FORMAT_R8_UINT));
         assert!(is_color_target_format(FORMAT_R8G8B8A8_UNORM));
         assert!(is_color_target_format(FORMAT_B8G8R8A8_UNORM));
         assert!(is_color_target_format(FORMAT_R8G8B8A8_SRGB));
@@ -3760,8 +3758,8 @@ mod tests {
             wgpu::TextureFormat::R8Unorm
         );
         assert_eq!(
-            color_target_format(FORMAT_R8G8_UNORM).unwrap(),
-            wgpu::TextureFormat::Rg8Unorm
+            color_target_format(FORMAT_R8_UINT).unwrap(),
+            wgpu::TextureFormat::R8Unorm
         );
         assert_eq!(
             color_target_format(FORMAT_R8G8B8A8_UNORM).unwrap(),

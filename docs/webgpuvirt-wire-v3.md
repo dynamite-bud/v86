@@ -13,7 +13,7 @@ The payload is 912 bytes. Version 3 changes or defines these fields:
 | 4 | `le16` | submit major 3 |
 | 12 | `le32` | feature bits `0x5f`: basic render, vertex buffers, indexed draw, sampled textures, uniform buffers, blending |
 | 16 | `le32` | shader IR bits `0x2`: WebGPU-restricted SPIR-V only |
-| 20 | `le32` | two format records |
+| 20 | `le32` | three format records |
 | 80 | `le32` | maximum bytes per shader: 131072 |
 | 84 | `le32` | maximum live shader bytes per context: 262144 |
 | 96 | `le32` | one bind group per pipeline |
@@ -23,6 +23,7 @@ The payload is 912 bytes. Version 3 changes or defines these fields:
 | 128 | `le64` | maximum buffer size: 4194304 bytes |
 | 144 | format record | format 67 (`R8G8B8A8_UNORM`), usage `0x7b`, sample count bit `0x1` |
 | 156 | format record | format 64 (`R8_UNORM`), usage `0x59`, sample count bit `0x1` |
+| 168 | format record | format 177 (`R8_UINT`), usage `0x59`, sample count bit `0x1` |
 | 180 | `le32` | one global in-flight compilation |
 | 184 | `le32` | one in-flight compilation per context |
 | 188 | `le32` | pipeline-compilation timeout: 5000 ms |

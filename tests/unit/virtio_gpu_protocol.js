@@ -46,6 +46,7 @@ import {
     VIRTIO_GPU_FORMAT_B8G8R8A8_SRGB,
     VIRTIO_GPU_FORMAT_B8G8R8X8_SRGB,
     VIRTIO_GPU_FORMAT_R8_UNORM,
+    VIRTIO_GPU_FORMAT_R8_UINT,
     VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM,
     VIRTIO_GPU_FORMAT_R8G8B8A8_SRGB,
     VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM,
@@ -740,9 +741,10 @@ class Test3DBackend extends MemoryGpuBackend
     const expected_v3_view = new DataView(expected_capset_v3.buffer);
     expected_v3_view.setUint16(4, 3, true);
     for(const [offset, value] of [
-        [12, 0x5F], [16, 2], [20, 2], [80, 128 * 1024], [84, 256 * 1024],
+        [12, 0x5F], [16, 2], [20, 3], [80, 128 * 1024], [84, 256 * 1024],
         [96, 1], [100, 16], [104, 8], [108, 8], [128, 4 * 1024 * 1024],
         [148, 0x7B], [156, VIRTIO_GPU_FORMAT_R8_UNORM], [160, 0x59], [164, 1],
+        [168, VIRTIO_GPU_FORMAT_R8_UINT], [172, 0x59], [176, 1],
         [180, 1], [184, 1], [188, 5000], [192, 5000], [196, 4 * 1024 * 1024],
         [200, 1024], [204, 8], [208, 4 * 1024 * 1024],
         [212, (1 << 2) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 14)],
@@ -807,7 +809,23 @@ class Test3DBackend extends MemoryGpuBackend
     })), VIRTIO_GPU_RESP_OK_NODATA);
     assert.equal(await execute(device, make_resource_command(
         VIRTIO_GPU_CMD_RESOURCE_UNREF, 100)), VIRTIO_GPU_RESP_OK_NODATA);
-
+    assert.equal(await execute(device, make_create_3d(104, 2, 1, {
+        target: 2,
+        format: VIRTIO_GPU_FORMAT_R8_UINT,
+        bind: 1 << 3,
+    })), VIRTIO_GPU_RESP_OK_NODATA);
+    assert.deepEqual(backend.resource_3d_descs.at(-1), {
+        resource_id: 104,
+        target: 2,
+        bind: 1 << 3,
+        format: VIRTIO_GPU_FORMAT_R8_UINT,
+        width: 2,
+        height: 1,
+        byte_length: 2,
+    });
+    assert.equal(await execute(device,
+        make_resource_command(VIRTIO_GPU_CMD_RESOURCE_UNREF, 104)),
+        VIRTIO_GPU_RESP_OK_NODATA);
 
     for(const [resource_id, format] of [
         [101, VIRTIO_GPU_FORMAT_B8G8R8A8_SRGB],

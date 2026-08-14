@@ -69,7 +69,7 @@ index 32df394..15d79a3 100644
  
  #endif
 diff --git a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c b/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
-index caabb2e..4d00fff 100644
+index caabb2e..44a7a0c 100644
 --- a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
 +++ b/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
 @@ -25,8 +25,10 @@
@@ -115,7 +115,7 @@ index caabb2e..4d00fff 100644
     memset(&eb, 0, sizeof(struct drm_virtgpu_execbuffer));
     eb.command = (unsigned long)(void*)cbuf->buf;
     eb.size = cbuf->base.cdw * 4;
-@@ -1005,12 +1032,114 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
+@@ -1005,12 +1032,113 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
     return ret;
  }
  
@@ -183,7 +183,6 @@ index caabb2e..4d00fff 100644
 +   snprintf(out->renderer, sizeof(out->renderer), "v86 WebGPU webgpuvirt");
 +
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8_UNORM);
-+   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8_UNORM);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8B8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8X8_UNORM);
@@ -194,7 +193,7 @@ index caabb2e..4d00fff 100644
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R32G32B32A32_UINT);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R32G32B32A32_SINT);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8_UNORM);
-+   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8_UINT);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8B8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8X8_UNORM);
@@ -230,7 +229,7 @@ index caabb2e..4d00fff 100644
  
     virgl_ws_fill_new_caps_defaults(caps);
  
-@@ -1173,44 +1302,37 @@ virgl_drm_resource_cache_entry_release(struct virgl_resource_cache_entry *entry,
+@@ -1173,44 +1301,37 @@ virgl_drm_resource_cache_entry_release(struct virgl_resource_cache_entry *entry,
     virgl_hw_res_destroy(qdws, res);
  }
  
@@ -291,7 +290,7 @@ index caabb2e..4d00fff 100644
     return 0;
  }
  
-@@ -1223,7 +1345,7 @@ virgl_drm_winsys_get_fd(struct virgl_winsys *vws)
+@@ -1223,7 +1344,7 @@ virgl_drm_winsys_get_fd(struct virgl_winsys *vws)
  }
  
  static struct virgl_winsys *
@@ -300,7 +299,7 @@ index caabb2e..4d00fff 100644
  {
     static const unsigned CACHE_TIMEOUT_USEC = 1000000;
     struct virgl_drm_winsys *qdws;
-@@ -1247,7 +1369,7 @@ virgl_drm_winsys_create(int drmFD)
+@@ -1247,7 +1368,7 @@ virgl_drm_winsys_create(int drmFD)
        return NULL;
  
     if (params[param_context_init].value) {
@@ -309,7 +308,7 @@ index caabb2e..4d00fff 100644
        if (ret)
           return NULL;
     }
-@@ -1257,6 +1379,7 @@ virgl_drm_winsys_create(int drmFD)
+@@ -1257,6 +1378,7 @@ virgl_drm_winsys_create(int drmFD)
        return NULL;
  
     qdws->fd = drmFD;
@@ -317,7 +316,7 @@ index caabb2e..4d00fff 100644
     virgl_resource_cache_init(&qdws->cache, CACHE_TIMEOUT_USEC,
                               virgl_drm_resource_cache_entry_is_busy,
                               virgl_drm_resource_cache_entry_release,
-@@ -1363,8 +1486,9 @@ equal_fd(const void *key1, const void *key2)
+@@ -1363,8 +1485,9 @@ equal_fd(const void *key1, const void *key2)
     return false;
  }
  
@@ -329,7 +328,7 @@ index caabb2e..4d00fff 100644
  {
     struct pipe_screen *pscreen = NULL;
  
-@@ -1377,14 +1501,17 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
+@@ -1377,14 +1500,17 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
  
     pscreen = util_hash_table_get(fd_tab, intptr_to_pointer(fd));
     if (pscreen) {
@@ -349,7 +348,7 @@ index caabb2e..4d00fff 100644
        if (!vws) {
           close(dup_fd);
           goto unlock;
-@@ -1393,11 +1520,6 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
+@@ -1393,11 +1519,6 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
        pscreen = virgl_create_screen(vws, config);
        if (pscreen) {
           _mesa_hash_table_insert(fd_tab, intptr_to_pointer(dup_fd), pscreen);
@@ -361,7 +360,7 @@ index caabb2e..4d00fff 100644
           virgl_screen(pscreen)->winsys_priv = pscreen->destroy;
           pscreen->destroy = virgl_drm_screen_destroy;
        }
-@@ -1407,3 +1529,15 @@ unlock:
+@@ -1407,3 +1528,15 @@ unlock:
     simple_mtx_unlock(&virgl_screen_mutex);
     return pscreen;
  }
