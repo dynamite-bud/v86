@@ -7,12 +7,21 @@ use futures_channel::oneshot;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
 
+const TARGET_BUFFER: u32 = 0;
+const TARGET_TEXTURE_2D: u32 = 2;
+const TARGET_TEXTURE_RECT: u32 = 5;
+const FORMAT_R8_UNORM: u32 = 64;
+const BIND_RENDER_TARGET: u32 = 1 << 1;
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const FORMAT_B8G8R8X8_UNORM: u32 = 2;
 const FORMAT_R8G8B8A8_UNORM: u32 = 67;
 const FORMAT_R8G8B8X8_UNORM: u32 = 134;
+const FORMAT_B8G8R8A8_SRGB: u32 = 100;
+const FORMAT_B8G8R8X8_SRGB: u32 = 101;
+const FORMAT_R8G8B8A8_SRGB: u32 = 104;
 const BYTES_PER_PIXEL: u32 = 4;
 const PRESENT_PARAM_WORDS: usize = 8;
+const RESOURCE_READBACK_TIMEOUT_MS: i32 = 5000;
 
 #[derive(Clone, Copy)]
 struct Rect {
@@ -29,12 +38,15 @@ struct Scanout {
 }
 
 struct Resource {
+    target: u32,
     format: u32,
     width: u32,
     height: u32,
     byte_length: usize,
-    texture: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
+    bytes_per_pixel: u32,
+    texture: Option<wgpu::Texture>,
+    buffer: Option<wgpu::Buffer>,
+    bind_group: Option<wgpu::BindGroup>,
     renderable: bool,
 }
 
@@ -148,15 +160,27 @@ impl WgpuRenderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_resource_3d(
         &mut self,
         resource_id: u32,
+        target: u32,
+        bind: u32,
         format: u32,
         width: u32,
         height: u32,
+        byte_length: u32,
     ) -> Result<(), JsValue> {
         self.inner_mut()?
-            .create_resource_3d(resource_id, format, width, height)
+            .create_resource_3d(
+                resource_id,
+                target,
+                bind,
+                format,
+                width,
+                height,
+                byte_length,
+            )
             .map_err(js_error)
     }
 
@@ -230,6 +254,31 @@ impl WgpuRenderer {
                 stride,
                 data,
             )
+            .map_err(js_error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_resource_2d(
+        &mut self,
+        resource_id: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.inner_mut()?
+            .download_resource_2d(
+                resource_id,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                stride,
+            )
+            .await
             .map_err(js_error)
     }
 
@@ -504,25 +553,53 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
-        self.create_resource(resource_id, format, width, height, false)
+        let byte_length = checked_resource_size(width, height, BYTES_PER_PIXEL)?;
+        self.create_resource(
+            resource_id,
+            TARGET_TEXTURE_2D,
+            0,
+            format,
+            width,
+            height,
+            byte_length,
+            false,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_resource_3d(
         &mut self,
         resource_id: u32,
+        target: u32,
+        bind: u32,
         format: u32,
         width: u32,
         height: u32,
+        byte_length: u32,
     ) -> Result<(), String> {
-        self.create_resource(resource_id, format, width, height, true)
+        let renderable = bind & BIND_RENDER_TARGET != 0;
+        self.create_resource(
+            resource_id,
+            target,
+            bind,
+            format,
+            width,
+            height,
+            byte_length as usize,
+            renderable,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_resource(
         &mut self,
         resource_id: u32,
+        target: u32,
+        _bind: u32,
         format: u32,
         width: u32,
         height: u32,
+        byte_length: usize,
         renderable: bool,
     ) -> Result<(), String> {
         self.check_fault()?;
@@ -532,7 +609,52 @@ impl Renderer {
         if self.resources.contains_key(&resource_id) {
             return Err(format!("Duplicate resource {resource_id}"));
         }
-        validate_format(format)?;
+        if byte_length > self.max_host_memory_bytes - self.host_memory_bytes {
+            return Err("GPU host memory limit exceeded".into());
+        }
+
+        if target == TARGET_BUFFER {
+            if format != FORMAT_R8_UNORM || height != 1 || width as usize != byte_length {
+                return Err("Invalid WebGPU buffer resource".into());
+            }
+            let allocation_size = byte_length
+                .checked_add(3)
+                .map(|size| size & !3)
+                .ok_or_else(|| "Buffer resource size overflow".to_owned())?;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("v86 virtio-gpu buffer resource"),
+                size: allocation_size as u64,
+                usage: wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::INDEX,
+                mapped_at_creation: false,
+            });
+            self.resources.insert(
+                resource_id,
+                Resource {
+                    target,
+                    format,
+                    width,
+                    height,
+                    byte_length,
+                    bytes_per_pixel: 1,
+                    texture: None,
+                    buffer: Some(buffer),
+                    bind_group: None,
+                    renderable: false,
+                },
+            );
+            self.host_memory_bytes += byte_length;
+            return Ok(());
+        }
+
+        if !matches!(target, TARGET_TEXTURE_2D | TARGET_TEXTURE_RECT) {
+            return Err("Unsupported WebGPU resource target".into());
+        }
+        validate_texture_format(format)?;
         if width == 0 || height == 0 {
             return Err("Resource dimensions must not be zero".into());
         }
@@ -541,13 +663,19 @@ impl Renderer {
         {
             return Err("Resource dimensions exceed WebGPU limits".into());
         }
-        let byte_length = checked_rgba_size(width, height)?;
-        if byte_length > self.max_host_memory_bytes - self.host_memory_bytes {
-            return Err("GPU host memory limit exceeded".into());
+        let bytes_per_pixel = if format == FORMAT_R8_UNORM { 1 } else { BYTES_PER_PIXEL };
+        if checked_resource_size(width, height, bytes_per_pixel)? != byte_length {
+            return Err("Resource byte length does not match its dimensions".into());
         }
-
+        let texture_format = match format {
+            FORMAT_R8_UNORM => wgpu::TextureFormat::R8Unorm,
+            FORMAT_B8G8R8A8_SRGB | FORMAT_B8G8R8X8_SRGB | FORMAT_R8G8B8A8_SRGB => {
+                wgpu::TextureFormat::Rgba8UnormSrgb
+            },
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("v86 virtio-gpu resource"),
+            label: Some("v86 virtio-gpu texture resource"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -556,8 +684,9 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: texture_format,
             usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | if renderable {
                     wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -588,12 +717,15 @@ impl Renderer {
         self.resources.insert(
             resource_id,
             Resource {
+                target,
                 format,
                 width,
                 height,
                 byte_length,
-                texture,
-                bind_group,
+                bytes_per_pixel,
+                texture: Some(texture),
+                buffer: None,
+                bind_group: Some(bind_group),
                 renderable,
             },
         );
@@ -635,7 +767,7 @@ impl Renderer {
         validate_rect(rect, resource.width, resource.height)?;
         let row_bytes = rect
             .width
-            .checked_mul(BYTES_PER_PIXEL)
+            .checked_mul(resource.bytes_per_pixel)
             .ok_or_else(|| "Upload row size overflow".to_owned())?;
         if stride < row_bytes {
             return Err("Upload stride is smaller than a row".into());
@@ -643,6 +775,24 @@ impl Renderer {
         let required_length = stride as usize * (rect.height as usize - 1) + row_bytes as usize;
         if data.len() < required_length {
             return Err("Upload data is truncated".into());
+        }
+
+        if resource.target == TARGET_BUFFER {
+            if rect.y != 0
+                || rect.height != 1
+                || rect.x & 3 != 0
+                || row_bytes & 3 != 0
+                || stride != row_bytes
+            {
+                return Err("Buffer uploads must be aligned and contiguous".into());
+            }
+            self.queue.write_buffer(
+                resource.buffer.as_ref().unwrap(),
+                rect.x as u64,
+                &data[..row_bytes as usize],
+            );
+            self.queue.submit([]);
+            return Ok(());
         }
 
         let aligned_row_bytes = row_bytes
@@ -666,7 +816,7 @@ impl Renderer {
 
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &resource.texture,
+                texture: resource.texture.as_ref().unwrap(),
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: rect.x,
@@ -691,12 +841,137 @@ impl Renderer {
         Ok(())
     }
 
+    async fn download_resource_2d(
+        &mut self,
+        resource_id: u32,
+        rect: Rect,
+        stride: u32,
+    ) -> Result<Vec<u8>, String> {
+        self.check_fault()?;
+        let resource = self
+            .resources
+            .get(&resource_id)
+            .ok_or_else(|| format!("Unknown resource {resource_id}"))?;
+        validate_rect(rect, resource.width, resource.height)?;
+        let row_bytes = rect
+            .width
+            .checked_mul(resource.bytes_per_pixel)
+            .ok_or_else(|| "Download row size overflow".to_owned())?;
+        if stride < row_bytes {
+            return Err("Download stride is smaller than a row".into());
+        }
+        let output_length = (stride as usize)
+            .checked_mul(rect.height as usize - 1)
+            .and_then(|length| length.checked_add(row_bytes as usize))
+            .ok_or_else(|| "Download size overflow".to_owned())?;
+
+        let aligned_row_bytes = if resource.target == TARGET_BUFFER {
+            if rect.y != 0
+                || rect.height != 1
+                || rect.x & 3 != 0
+                || row_bytes & 3 != 0
+                || stride != row_bytes
+            {
+                return Err("Buffer downloads must be aligned and contiguous".into());
+            }
+            row_bytes
+        } else {
+            row_bytes
+                .checked_add(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+                .ok_or_else(|| "Download row alignment overflow".to_owned())?
+                / wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+        };
+        let staging_length = u64::from(aligned_row_bytes)
+            .checked_mul(u64::from(rect.height))
+            .ok_or_else(|| "Download staging size overflow".to_owned())?;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("v86 virtio-gpu readback staging buffer"),
+            size: staging_length,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("v86 virtio-gpu readback encoder"),
+            });
+        if resource.target == TARGET_BUFFER {
+            encoder.copy_buffer_to_buffer(
+                resource.buffer.as_ref().unwrap(),
+                u64::from(rect.x),
+                &staging,
+                0,
+                u64::from(row_bytes),
+            );
+        } else {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: resource.texture.as_ref().unwrap(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: rect.x,
+                        y: rect.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(aligned_row_bytes),
+                        rows_per_image: Some(rect.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: rect.width,
+                    height: rect.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.queue.submit([encoder.finish()]);
+
+        let slice = staging.slice(..);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        submit_3d::await_with_timeout(
+            self,
+            receiver,
+            "WebGPU resource readback",
+            RESOURCE_READBACK_TIMEOUT_MS,
+        )
+        .await?
+        .map_err(|_| "WebGPU resource readback callback was canceled".to_owned())?
+        .map_err(|error| format!("WebGPU resource readback failed: {error}"))?;
+
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|error| format!("WebGPU resource readback mapping failed: {error}"))?;
+        let mut result = vec![0; output_length];
+        for row in 0..rect.height as usize {
+            let source_offset = row * aligned_row_bytes as usize;
+            let target_offset = row * stride as usize;
+            result[target_offset..target_offset + row_bytes as usize]
+                .copy_from_slice(&mapped[source_offset..source_offset + row_bytes as usize]);
+        }
+        drop(mapped);
+        staging.unmap();
+        Ok(result)
+    }
+
     fn set_scanout(&mut self, scanout: Scanout) -> Result<(), String> {
         self.check_fault()?;
         let resource = self
             .resources
             .get(&scanout.resource_id)
             .ok_or_else(|| format!("Unknown resource {}", scanout.resource_id))?;
+        if resource.texture.is_none() {
+            return Err("Scanout resource is not a texture".into());
+        }
         validate_rect(scanout.rect, resource.width, resource.height)?;
         self.scanout = Some(scanout);
         Ok(())
@@ -719,7 +994,10 @@ impl Renderer {
         let format = resource.format;
         let resource_width = resource.width;
         let resource_height = resource.height;
-        let bind_group = resource.bind_group.clone();
+        let bind_group = resource
+            .bind_group
+            .clone()
+            .ok_or_else(|| "Scanout resource is not presentable".to_owned())?;
         let params = [
             scanout.rect.x,
             scanout.rect.y,
@@ -851,12 +1129,16 @@ fn create_surface(
         .map_err(|error| format!("Failed to create WebGPU canvas surface: {error}"))
 }
 
-fn validate_format(format: u32) -> Result<(), String> {
+fn validate_texture_format(format: u32) -> Result<(), String> {
     match format {
-        FORMAT_B8G8R8A8_UNORM
+        FORMAT_R8_UNORM
+        | FORMAT_B8G8R8A8_UNORM
         | FORMAT_B8G8R8X8_UNORM
         | FORMAT_R8G8B8A8_UNORM
-        | FORMAT_R8G8B8X8_UNORM => Ok(()),
+        | FORMAT_R8G8B8X8_UNORM
+        | FORMAT_B8G8R8A8_SRGB
+        | FORMAT_B8G8R8X8_SRGB
+        | FORMAT_R8G8B8A8_SRGB => Ok(()),
         _ => Err(format!("Unsupported virtio-gpu format {format}")),
     }
 }
@@ -879,10 +1161,10 @@ fn validate_rect(rect: Rect, resource_width: u32, resource_height: u32) -> Resul
     Ok(())
 }
 
-fn checked_rgba_size(width: u32, height: u32) -> Result<usize, String> {
+fn checked_resource_size(width: u32, height: u32, bytes_per_pixel: u32) -> Result<usize, String> {
     let size = u64::from(width)
         .checked_mul(u64::from(height))
-        .and_then(|size| size.checked_mul(u64::from(BYTES_PER_PIXEL)))
+        .and_then(|size| size.checked_mul(u64::from(bytes_per_pixel)))
         .ok_or_else(|| "Resource dimensions overflow host addressing".to_owned())?;
     usize::try_from(size).map_err(|_| "Resource dimensions overflow host addressing".to_owned())
 }

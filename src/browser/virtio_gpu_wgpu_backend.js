@@ -21,6 +21,7 @@ export class WgpuBackend extends VirtioGpuBackend
         this.renderer = null;
         this.initialized = false;
         this.fatal_error = null;
+        this.last_invalid_3d_error = null;
         this.device_status_timer = 0;
         this.active_calls = 0;
         this.previous_hidden = null;
@@ -164,8 +165,8 @@ export class WgpuBackend extends VirtioGpuBackend
 
     async createResource3D(desc)
     {
-        return this.invoke("create_resource_3d", desc.resource_id, desc.format,
-            desc.width, desc.height);
+        return this.invoke("create_resource_3d", desc.resource_id, desc.target,
+            desc.bind, desc.format, desc.width, desc.height, desc.byte_length);
     }
 
     async attachResource3D(context_id, resource_id)
@@ -187,6 +188,12 @@ export class WgpuBackend extends VirtioGpuBackend
         }
         return this.invoke("upload_resource_2d", upload.resource_id, upload.x, upload.y,
             upload.width, upload.height, upload.stride, upload.data);
+    }
+
+    async transferFromHost3D(download)
+    {
+        return this.invoke("download_resource_2d", download.resource_id, download.x, download.y,
+            download.width, download.height, download.stride);
     }
 
     async submit3D(context_id, commands, resource_ids)
@@ -217,6 +224,7 @@ export class WgpuBackend extends VirtioGpuBackend
                 error.message : String(error);
             if(message.startsWith("invalid:"))
             {
+                this.last_invalid_3d_error = message;
                 return false;
             }
             throw this.handle_fatal(error, "submit3D");

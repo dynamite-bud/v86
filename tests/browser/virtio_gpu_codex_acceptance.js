@@ -15,7 +15,9 @@ const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
-assert.ok(["appliance", "triangle", "shader", "benchmark"].includes(SCENARIO),
+assert.ok(
+    ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark"]
+        .includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
@@ -174,6 +176,9 @@ async function run_scenario(browser_ws, base_url, renderer)
             `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
         if(SCENARIO === "shader") url.searchParams.set("shader", "1");
+        else if(SCENARIO === "resources") url.searchParams.set("resources", "1");
+        else if(SCENARIO === "mesa") url.searchParams.set("mesa", "1");
+        else if(SCENARIO === "accelerated") url.searchParams.set("accelerated", "1");
         else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
         else if(SCENARIO === "benchmark")
         {
@@ -190,6 +195,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
                 `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
                 `({ id, resources: Array.from(context.resources) })), ` +
+                `last_invalid_3d_error: device.backend?.last_invalid_3d_error || null, ` +
+                `last_transfer_from_host_3d: device.last_transfer_from_host_3d || null, ` +
                 `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
             last_readiness_state = state;
@@ -202,7 +209,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             if(state.result === "fail")
             {
                 const reason = /V86_APPLIANCE_FAILURE=([^\r\n]+)/.exec(state.serial)?.[1] || "unknown";
-                const serial_tail = state.serial.slice(-6000);
+                const serial_tail = state.serial.slice(-60000);
                 const error = new Error(
                     `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
                     `GPU state: ${JSON.stringify(state.gpu)}`);
@@ -228,7 +235,47 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_height: canvas.height,
             };
         })()`);
-        if(SCENARIO === "triangle" || SCENARIO === "shader")
+        if(SCENARIO === "mesa")
+        {
+            const result = /V86_GPU_MESA_WEBGPUVIRT=PASS renderer=([^\r\n]+) center=(\d+),(\d+),(\d+),(\d+) corner=(\d+),(\d+),(\d+),(\d+)/.exec(
+                state.serial);
+            assert.ok(result, "Missing Mesa webgpuvirt rendering marker");
+            const center = result.slice(2, 6).map(Number);
+            const corner = result.slice(6, 10).map(Number);
+            assert.ok(center[0] > 180 && center[1] < 100 && center[2] < 100,
+                `Mesa triangle center is not red: ${center}`);
+            assert.ok(corner[2] > corner[0] && corner[2] > corner[1],
+                `Mesa clear color is not blue: ${corner}`);
+            const gpu = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                return {
+                    stats: device.get_performance_stats(),
+                    last_invalid_3d_error: device.backend.last_invalid_3d_error,
+                    last_transfer_from_host_3d: device.last_transfer_from_host_3d,
+                };
+            })()`);
+            assert.equal(gpu.stats.invalid_commands, 0);
+            assert.equal(gpu.stats.backend_errors, 0);
+            assert.ok((gpu.stats.command_counts["0x206"] || 0) >= 1,
+                "Mesa readback did not use TRANSFER_FROM_HOST_3D");
+            assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
+                "Mesa did not submit a standard VirGL command stream");
+            assert.equal(gpu.last_invalid_3d_error, null);
+            assert.ok(gpu.last_transfer_from_host_3d?.resource_id > 0);
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return {
+                renderer,
+                ready_ms: Math.round(ready_ms),
+                mesa_webgpuvirt: true,
+                guest_renderer: result[1],
+                center_rgba: center,
+                corner_rgba: corner,
+                submit_3d_commands: gpu.stats.command_counts["0x207"],
+                readback_commands: gpu.stats.command_counts["0x206"],
+            };
+        }
+        if(["triangle", "shader", "resources"].includes(SCENARIO))
         {
             for(const marker of [
                 "V86_GPU_TRIANGLE_RENDER_NODE=/dev/dri/renderD128",
@@ -244,13 +291,26 @@ async function run_scenario(browser_ws, base_url, renderer)
             {
                 assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
             }
+            const expected_version = SCENARIO === "shader" ? 2 :
+                SCENARIO === "resources" ? 3 : 1;
             assert.ok(state.serial.includes(
-                `V86_GPU_TRIANGLE_GET_CAPS=PASS version=${SCENARIO === "shader" ? 2 : 1}`),
+                `V86_GPU_TRIANGLE_GET_CAPS=PASS version=${expected_version}`),
                 "Guest did not use the requested capset version");
             if(SCENARIO === "shader")
             {
                 assert.ok(state.serial.includes("V86_GPU_SHADER_V2=PASS"),
                     "Missing version-2 guest shader marker");
+            }
+            else if(SCENARIO === "resources")
+            {
+                for(const marker of [
+                    "V86_GPU_LLVMPIPE_REFERENCE=PASS renderer=llvmpipe",
+                    "V86_GPU_TRIANGLE_RESOURCES=PASS textures=2 vertex_buffers=2 index_buffers=1 uniforms=1",
+                    "V86_GPU_SHADER_V3=PASS resources=6 bindings=3 indexed_draws=1",
+                ])
+                {
+                    assert.ok(state.serial.includes(marker), `Missing resource marker: ${marker}`);
+                }
             }
             const rendered = await evaluate(cdp, `(() => {
                 const device = window.emulator.v86.cpu.devices.virtio_gpu;
@@ -291,6 +351,15 @@ async function run_scenario(browser_ws, base_url, renderer)
             {
                 assert.ok((rendered.stats.command_counts[command] || 0) >= 1,
                     `Missing standard virtio-gpu command ${command}`);
+            }
+            if(SCENARIO === "resources")
+            {
+                assert.equal(rendered.stats.live_3d_resources, 6);
+                assert.equal(rendered.stats.live_3d_contexts, 1);
+                assert.ok(rendered.stats.upload_bytes >= 96,
+                    `Guest resources were not uploaded: ${rendered.stats.upload_bytes}`);
+                assert.equal(rendered.stats.invalid_commands, 0);
+                assert.equal(rendered.stats.backend_errors, 0);
             }
             assert.equal(failures.length, 0, failures.join(" | "));
             if(SCENARIO === "shader")

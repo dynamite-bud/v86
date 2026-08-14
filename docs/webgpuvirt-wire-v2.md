@@ -4,7 +4,7 @@ Version 2 extends [`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md) with bounded 
 
 ## Negotiation
 
-`GET_CAPSET_INFO(index=0)` returns capset ID 7, maximum version 2, and maximum size 912. `GET_CAPSET(id=7, version=1)` returns the frozen version-1 payload. `GET_CAPSET(id=7, version=2)` returns the version-2 payload. Other versions are invalid.
+`GET_CAPSET_INFO(index=0)` now returns capset ID 7, maximum version 3, and maximum size 912. `GET_CAPSET(id=7, version=1)` returns the frozen version-1 payload. `GET_CAPSET(id=7, version=2)` returns the frozen version-2 payload; version 3 is defined separately in [`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md).
 
 Both payloads are 912 bytes. Version 2 changes these fields from version 1:
 
@@ -81,3 +81,4 @@ Destroy rules are unchanged: IDs are context-local, missing objects are invalid,
 - two forced never-settling compilation scopes and one never-settling submitted-work promise each fault at the 5000 ms bound, restore VGA, reinitialize the backend, and leave zero standard 3D contexts/resources/attachments.
 
 `make virtio-gpu-3d-triangle-test` remains the browser acceptance contract for the frozen version-1 pinned pipeline.
+`make virtio-gpu-webgpuvirt-triangle-test` is the version-3 resource and binding acceptance contract.

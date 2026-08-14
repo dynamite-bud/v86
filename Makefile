@@ -423,10 +423,15 @@ virtio-gpu-3d-transport-test: virtio-gpu-unit-test
 		cargo test --manifest-path tools/virtio-gpu-wgpu/Cargo.toml --target wasm32-unknown-unknown
 
 virtio-gpu-3d-triangle-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
-	V86_CODEX_BROWSER_SCENARIO=triangle ./tests/browser/virtio_gpu_codex_acceptance.js
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=triangle \
+		./tests/browser/virtio_gpu_codex_acceptance.js
 
 virtio-gpu-3d-shader-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
 	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=shader \
+		./tests/browser/virtio_gpu_codex_acceptance.js
+
+virtio-gpu-webgpuvirt-triangle-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=resources \
 		./tests/browser/virtio_gpu_codex_acceptance.js
 
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
@@ -504,4 +509,5 @@ denodoc:
 	virtio-gpu-codex-browser-test virtio-gpu-codex-benchmark virtio-gpu-color-test \
 	virtio-gpu-3d-transport-test \
 	virtio-gpu-3d-triangle-test virtio-gpu-3d-shader-test \
+	virtio-gpu-webgpuvirt-triangle-test \
 	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image

@@ -11,30 +11,32 @@ Implemented and tested today:
 - A deterministic in-memory backend for Node tests.
 - Two browser presentation backends: direct JavaScript WebGPU (`webgpu-js`) and Rust/Wasm `wgpu`. Both upload and present standard 2D resources.
 - Reproducible Linux KMS and Alpine XFCE guests, with Xorg and Wayland exercised through both browser backends.
-- An opt-in capset-7 basic-render path on the Rust/Wasm backend. Frozen version
-  1 maps the pinned Linux/libdrm flow to one startup-validated immutable
-  pipeline. Version 2 accepts bounded guest WGSL, validates it synchronously
-  with Naga, creates context-local WebGPU pipelines atomically under the patched
-  wgpu error scope, caps draw work, and faults the renderer after 5000 ms if
-  compilation or submitted GPU work does not settle.
-- Browser acceptance proves both the pinned red triangle and an arbitrary green
-  triangle, deterministic invalid-source and draw-limit rejection, ordered fence
-  completion, repeated timeout fallback/recovery, and zero leaked standard 3D
-  objects.
+- An opt-in capset-7 path on the Rust/Wasm backend. Frozen version 1 maps the
+  pinned Linux/libdrm flow to one startup-validated immutable pipeline. Version
+  2 accepts bounded guest WGSL. Version 3 accepts WebGPU-restricted SPIR-V,
+  multiple vertex buffers, sampled textures, uniform bindings,
+  premultiplied-alpha blending, and instancing. Naga and the patched wgpu error
+  scope validate object batches atomically; compilation and submitted GPU work
+  fault at a 5000 ms bound.
+- Browser acceptance proves the pinned red triangle, arbitrary green WGSL
+  triangle, and an indexed textured version-3 resource triangle against a Mesa
+  llvmpipe software reference. It also proves deterministic malformed-input rejection,
+  ordered fences, repeated timeout/device-loss fallback and recovery, and zero
+  leaked standard 3D objects.
 
 Not implemented:
 
-- SPIR-V, resource bindings, vertex/index buffers, sampled textures,
-  depth/stencil, blending, readback, resource blobs/UUIDs, host mappings,
-  Mesa/Gallium, shader translation, virgl compatibility, Vulkan, or 3D on the
-  direct JavaScript backend.
+- Depth/stencil, readback, resource blobs/UUIDs, host mappings,
+  the Mesa/Gallium `webgpuvirt` driver, accelerated Ghostty, virgl
+  compatibility, Vulkan, or 3D on the direct JavaScript backend.
 - The default device still reports `num_capsets = 0` and does not advertise 3D
   feature bits. Capset 7 is available only with `experimental_3d: true` and a
   successful Rust/Wasm backend preflight.
 
 The exact implemented byte contracts are frozen in
-[`docs/webgpuvirt-wire-v1.md`](../webgpuvirt-wire-v1.md) and
-[`docs/webgpuvirt-wire-v2.md`](../webgpuvirt-wire-v2.md).
+[`docs/webgpuvirt-wire-v1.md`](../webgpuvirt-wire-v1.md),
+[`docs/webgpuvirt-wire-v2.md`](../webgpuvirt-wire-v2.md), and
+[`docs/webgpuvirt-wire-v3.md`](../webgpuvirt-wire-v3.md).
 
 ## Data Flow
 

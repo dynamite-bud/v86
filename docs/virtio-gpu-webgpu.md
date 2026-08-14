@@ -393,25 +393,26 @@ targets listed above.
 ### Experimental 3D status boundary
 
 **Implemented today:** when `virtio_gpu.experimental_3d` is true and the
-Rust/Wasm `wgpu` backend preflight succeeds, the device advertises capset 7,
-`VIRTIO_GPU_F_VIRGL`, and `VIRTIO_GPU_F_CONTEXT_INIT`. It accepts the exact
-standard command subset and the two private submit ABIs frozen in
-[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md) and
-[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Version 1 maps its two pinned
+Rust/Wasm `wgpu` backend passes preflight, the device exposes the versioned
+private wire contracts in [`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md),
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md), and
+[`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md). Version 1 maps its two pinned
 shader handles to the immutable startup pipeline. Version 2 accepts bounded
-UTF-8 WGSL, validates every module synchronously with Naga, validates staged
-WebGPU modules and pipelines through the patched wgpu error scope, commits
-objects atomically, caps draw work, and faults after 5000 ms if compilation or
-submitted GPU work does not settle. Browser acceptance proves both revisions,
-invalid-source and draw-limit accounting, repeated compilation/render timeout
-recovery, and zero leaked standard 3D state. With the option off, another backend
-selected, or preflight unavailable, `num_capsets` remains zero and the device
-is the existing standard 2D implementation.
+UTF-8 WGSL. Version 3 accepts bounded WebGPU-restricted SPIR-V, up to eight
+vertex buffers and attributes, uint16/uint32 indexed draw, sampled RGBA/R8
+textures, uniform-buffer bindings, premultiplied-alpha blending, and instancing.
+Every revision validates
+the complete batch before creating WebGPU objects or queue work, captures
+Naga/wgpu validation errors, caps draw work, and faults after 5000 ms if
+compilation or submitted GPU work does not settle. Browser acceptance proves
+the frozen triangles, arbitrary WGSL, and a version-3 indexed textured resource
+triangle against a Mesa llvmpipe reference. With the option off, another
+backend selected, or preflight unavailable, `num_capsets` remains zero and the
+device is the existing standard 2D implementation.
 
-Not implemented: SPIR-V, buffers, bindings, vertex or index data, texture
-sampling, depth/stencil, blending, readback, resource blobs, UUIDs, host
-mappings, Mesa/Gallium, virgl compatibility, or Vulkan. The direct JavaScript
-backend remains 2D-only.
+Not implemented: depth/stencil, readback, resource blobs, UUIDs,
+host mappings, the Mesa/Gallium `webgpuvirt` driver, accelerated Ghostty, virgl
+compatibility, or Vulkan. The direct JavaScript backend remains 2D-only.
 
 The implemented boundary is tracked by
 [XWAH-1](https://github.com/dynamite-bud/v86/issues/1) and
@@ -520,11 +521,12 @@ The VirtIO GPU structures and command numbers remain unmodified:
 
 For capset 7, `RESOURCE_CREATE_3D` uses the stable virgl protocol numeric
 namespaces for target, format, and bind fields, but support is implied only by
-the returned format/feature tables. Version 1 accepts buffer, 2D texture, and
-2D-array targets only. Buffer resources use format 0, byte size in `width`,
-unit height/depth/array, one level, and one sample. Unknown bits or combinations
-are invalid. Blobs, host mappings, and a second resource-creation ABI are not
-part of version 1.
+the returned format/feature tables. Version 3 accepts byte-addressable buffers
+as target 0, format 64 (`R8_UNORM`), byte size in `width`, unit
+height/depth/array, one level, and one sample. It accepts 2D and rectangle
+textures only in listed formats and bind combinations. Unknown bits or
+combinations are invalid. Blobs, host mappings, and a second resource-creation
+ABI are not part of version 3.
 
 ### Capset 7, version 1
 
@@ -533,11 +535,12 @@ The implemented Phase 6 byte contract is frozen in
 opcodes below describe the versioned architecture ceiling; version 1 advertises
 only the exact nonzero fields listed in that dedicated wire document.
 
-`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 2, and maximum size
+`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 3, and maximum size
 912 bytes. `GET_CAPSET(id = 7, version = 1)` returns the frozen 912-byte
-version-1 payload; version 2 is defined in
-[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Other indices, IDs, or versions
-return `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`. All fields are packed
+version-1 payload; versions 2 and 3 are defined in
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md) and
+[`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md). Other indices, IDs, or
+versions return `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`. All fields are packed
 little-endian and each versioned payload is frozen for the device lifetime:
 
 ```text
@@ -599,8 +602,8 @@ copy source, copy destination, scanout, CPU upload, and CPU readback.
 Every numeric limit is
 `min(compiled ceiling, configured limit, WebGPU adapter limit)`. A feature is
 set only when every opcode, format, validation path, and test needed for it is
-complete; associated limits are zero otherwise. An incompatible layout needs
-capset version 2 rather than reinterpretation of version 1.
+complete; associated limits are zero otherwise. An incompatible layout needs a
+new capset major rather than reinterpretation of an existing version.
 
 ### Private `SUBMIT_3D` ABI version 1
 
