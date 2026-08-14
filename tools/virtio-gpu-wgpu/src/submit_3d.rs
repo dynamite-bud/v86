@@ -85,6 +85,8 @@ fn is_color_target_format(format: u32) -> bool {
 
 const VIRGL_FORMAT_R32_FLOAT: u32 = 28;
 const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
+const VIRGL_FORMAT_R16G16_USCALED: u32 = 53;
+const VIRGL_FORMAT_R16G16_SSCALED: u32 = 61;
 const VIRGL_FORMAT_R32G32B32_FLOAT: u32 = 30;
 const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
 const VIRGL_FORMAT_R8_UINT: u32 = 177;
@@ -97,6 +99,8 @@ fn mesa_vertex_format(format: u32) -> Result<wgpu::VertexFormat, String> {
     match format {
         VIRGL_FORMAT_R32_FLOAT => Ok(wgpu::VertexFormat::Float32),
         VIRGL_FORMAT_R32G32_FLOAT => Ok(wgpu::VertexFormat::Float32x2),
+        VIRGL_FORMAT_R16G16_USCALED => Ok(wgpu::VertexFormat::Uint16x2),
+        VIRGL_FORMAT_R16G16_SSCALED => Ok(wgpu::VertexFormat::Sint16x2),
         VIRGL_FORMAT_R32G32B32_FLOAT => Ok(wgpu::VertexFormat::Float32x3),
         VIRGL_FORMAT_R32G32B32A32_FLOAT => Ok(wgpu::VertexFormat::Float32x4),
         VIRGL_FORMAT_R8G8B8A8_UINT => Ok(wgpu::VertexFormat::Uint8x4),
@@ -106,7 +110,7 @@ fn mesa_vertex_format(format: u32) -> Result<wgpu::VertexFormat, String> {
         VIRGL_FORMAT_R8_UINT => Err(invalid(
             "single-byte Mesa vertex attributes require packing",
         )),
-        _ => Err(invalid("unsupported Mesa vertex format")),
+        _ => Err(invalid(format!("unsupported Mesa vertex format {format}"))),
     }
 }
 
@@ -536,6 +540,33 @@ struct VertexConstants {
 @group(0) @binding(0) var<uniform> constants: VertexConstants;
 
 @vertex fn main(@location(0) position: vec2<f32>) -> @builtin(position) vec4<f32> {
+    let transform = constants.values[0];
+    return vec4<f32>(
+        position * vec2<f32>(transform.x, transform.z) +
+            vec2<f32>(transform.y, transform.w),
+        0.0,
+        1.0,
+    );
+}
+"#;
+const MESA_RECTANGLE_VERTEX_SHADER_SOURCE: &str = r#"
+struct VertexConstants {
+    values: array<vec4<f32>, 1>,
+}
+@group(0) @binding(0) var<uniform> constants: VertexConstants;
+
+@vertex fn main(
+    @builtin(vertex_index) vertex: u32,
+    @location(0) origin_raw: vec2<i32>,
+    @location(1) size_raw: vec2<u32>,
+) -> @builtin(position) vec4<f32> {
+    let origin = vec2<f32>(origin_raw);
+    let size = vec2<f32>(size_raw);
+    let corner = vec2<f32>(
+        f32(vertex & 1u),
+        f32((vertex & 2u) >> 1u),
+    );
+    let position = origin + size * corner;
     let transform = constants.values[0];
     return vec4<f32>(
         position * vec2<f32>(transform.x, transform.z) +
@@ -1058,6 +1089,7 @@ enum MesaProgram {
     CellText,
     Image,
     SolidColor,
+    RectangleColor,
 }
 
 fn mesa_declared_max(source: &str, file: &str) -> Option<u32> {
@@ -1107,16 +1139,21 @@ fn classify_mesa_program(
         (Some(max), Some(1), _) if max >= 6 => Ok(MesaProgram::CellText),
         (Some(3), Some(0), None) => Ok(MesaProgram::Image),
         (Some(1), Some(0), None) => Ok(MesaProgram::Probe),
+        (Some(1), None, None) => Ok(MesaProgram::RectangleColor),
         (Some(0), None, None) => Ok(MesaProgram::SolidColor),
         _ => Err(invalid(format!(
             "unsupported Mesa shader program inputs={vertex_inputs:?} samplers={fragment_samplers:?} \
-             buffers={fragment_buffers:?} vertex={} fragment={}",
-            vertex_source.lines().take(20).collect::<Vec<_>>().join("|"),
+             buffers={fragment_buffers:?}\nvertex:\n{}\nfragment:\n{}",
+            vertex_source
+                .lines()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n"),
             fragment_source
                 .lines()
                 .take(20)
                 .collect::<Vec<_>>()
-                .join("|"),
+                .join("\n"),
         ))),
     }
 }
@@ -1129,6 +1166,7 @@ fn mesa_program_index(program: MesaProgram) -> u32 {
         MesaProgram::CellText => 3,
         MesaProgram::Image => 4,
         MesaProgram::SolidColor => 5,
+        MesaProgram::RectangleColor => 6,
     }
 }
 
@@ -1171,6 +1209,10 @@ fn mesa_program_shader_sources(program: MesaProgram) -> (String, String) {
         ),
         MesaProgram::SolidColor => (
             MESA_SOLID_VERTEX_SHADER_SOURCE.to_owned(),
+            MESA_SOLID_FRAGMENT_SHADER_SOURCE.to_owned(),
+        ),
+        MesaProgram::RectangleColor => (
+            MESA_RECTANGLE_VERTEX_SHADER_SOURCE.to_owned(),
             MESA_SOLID_FRAGMENT_SHADER_SOURCE.to_owned(),
         ),
     }
@@ -1244,7 +1286,7 @@ fn mesa_program_bindings(program: MesaProgram, draw: &MesaDraw) -> Result<Vec<Bi
             mesa_texture_binding(draw, 0, 1)?,
             Binding3D::Sampler { binding: 2 },
         ]),
-        MesaProgram::SolidColor => Ok(vec![
+        MesaProgram::SolidColor | MesaProgram::RectangleColor => Ok(vec![
             mesa_inline_buffer_binding(&draw.constant_buffers, 0, 0, 0)?,
             mesa_inline_buffer_binding(&draw.constant_buffers, 1, 0, 1)?,
         ]),
@@ -1817,12 +1859,16 @@ async fn render_mesa_draw(
         .target
         .ok_or_else(|| invalid("Mesa virgl draw has no framebuffer"))?;
     let expected_vertex_buffers = match program {
-        MesaProgram::Probe => 2,
+        MesaProgram::Probe | MesaProgram::RectangleColor => 2,
         MesaProgram::BackgroundColor | MesaProgram::CellBackground => 0,
         MesaProgram::CellText | MesaProgram::Image | MesaProgram::SolidColor => 1,
     };
     if draw.vertex_buffers.len() != expected_vertex_buffers {
-        return Err(invalid("Mesa virgl draw has an incompatible vertex layout"));
+        return Err(invalid(format!(
+            "Mesa virgl draw has an incompatible vertex layout program={program:?} \
+             expected={expected_vertex_buffers} actual={}",
+            draw.vertex_buffers.len(),
+        )));
     }
     let mut resources = HashSet::from([target]);
     resources.extend(
@@ -3693,6 +3739,23 @@ mod tests {
         );
         assert!(!is_color_target_format(0));
         assert!(color_target_format(0).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn mesa_rectangle_scaled_vertex_formats_are_supported() {
+        assert_eq!(
+            mesa_vertex_format(VIRGL_FORMAT_R16G16_USCALED).unwrap(),
+            wgpu::VertexFormat::Uint16x2
+        );
+        assert_eq!(
+            mesa_vertex_format(VIRGL_FORMAT_R16G16_SSCALED).unwrap(),
+            wgpu::VertexFormat::Sint16x2
+        );
+        validate_internal_shader(
+            MESA_RECTANGLE_VERTEX_SHADER_SOURCE,
+            naga::ShaderStage::Vertex,
+        )
+        .unwrap();
     }
 
     #[wasm_bindgen_test]
