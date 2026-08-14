@@ -1425,8 +1425,10 @@ pub(crate) async fn submit(
         .remove(&context_id)
         .ok_or_else(|| invalid("unknown context"))?;
     let result = if bytes.starts_with(&SUBMIT_MAGIC.to_le_bytes()) {
-        let submit = decode(bytes).map_err(invalid)?;
-        submit_inner(renderer, &mut context, submit, &allowed).await
+        match decode(bytes) {
+            Ok(submit) => submit_inner(renderer, &mut context, submit, &allowed).await,
+            Err(error) => Err(invalid(error)),
+        }
     } else {
         submit_mesa_triangle(renderer, &mut context, bytes, &allowed).await
     };

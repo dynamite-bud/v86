@@ -879,9 +879,12 @@ async function run_shader_acceptance_in_page()
     await backend.createContext3D(valid_context_id);
     await backend.createResource3D({
         resource_id,
+        target: 2,
+        bind: 1 << 1,
         format: 67,
         width,
         height,
+        byte_length: width * height * 4,
     });
     await backend.attachResource3D(valid_context_id, resource_id);
     const object_submit = submit([
