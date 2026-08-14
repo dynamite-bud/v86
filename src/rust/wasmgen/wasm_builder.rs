@@ -1630,6 +1630,7 @@ mod tests {
             (WasmBuilder::atomic_rmw_cmpxchg_i32, 0x48, 2),
             (WasmBuilder::atomic_rmw_cmpxchg_u16, 0x4b, 1),
             (WasmBuilder::atomic_rmw_cmpxchg_u8, 0x4a, 0),
+            (WasmBuilder::atomic_rmw_cmpxchg_i64, 0x49, 3),
         ];
         for &(emit, subopcode, align) in cases {
             // on the guest memory: flags align|0x40, then memidx, then offset
@@ -1821,6 +1822,16 @@ mod tests {
             m.atomic_rmw_cmpxchg_u8(GUEST_MEMORY_INDEX, 0);
             m.drop_();
 
+            // 64-bit cmpxchg (Stage L2: locked CMPXCHG8B); final value 42
+            m.const_i32(224);
+            m.const_i64(7);
+            m.store_unaligned_i64_to_guest(0);
+            m.const_i32(224);
+            m.const_i64(7);
+            m.const_i64(42);
+            m.atomic_rmw_cmpxchg_i64(GUEST_MEMORY_INDEX, 0);
+            m.drop_();
+
             m.atomic_fence();
 
             m.finish();
@@ -1828,5 +1839,32 @@ mod tests {
             let mut f = File::create(path).expect(path);
             f.write_all(&m.output).expect(path);
         }
+    }
+}
+
+// Stage L2 (LOCK-prefix JIT lowering) emitter additions, in a second impl
+// block at the end of the file so the default build's panic-Location line
+// numbers above stay put (same discipline as the other feature seams).
+// cfg'd out of the non-test default build entirely — the dev profile does
+// not strip dead code, so merely-unused additions would perturb the debug
+// artifact's byte identity.
+#[cfg(any(feature = "guest-ram-import", test))]
+impl WasmBuilder {
+    /// i64.atomic.rmw.cmpxchg — the locked CMPXCHG8B fast path.
+    pub fn atomic_rmw_cmpxchg_i64(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I64ATOMICRMWCMPXCHG,
+            op::MEM_ALIGN64,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    /// local.set of an existing i64 local (the i64 twin of `set_local`;
+    /// needed by the locked CAS loop's retry path).
+    #[allow(dead_code)]
+    pub fn set_local_i64(&mut self, local: &WasmLocalI64) {
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.idx());
     }
 }

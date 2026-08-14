@@ -11,17 +11,33 @@
 // (tests/threads/plain-race-vs-atomic.js demonstrates that plain RMWs lose
 // updates under this contention pattern with overwhelming probability).
 //
-// Phases (fresh machine each, JIT disabled via set_jit_config so the loop
-// stays on the interpreter paths — JIT LOCK lowering is Stage L2):
+// Interpreter phases (fresh machine each, JIT disabled via set_jit_config
+// so the loop stays on the Stage L1 interpreter paths):
 //   A. `lock inc dword [cell]`      — safe_read_write32 CAS loop
 //   B. `lock xadd [cell], ebx`      — CAS loop with a register-writing
 //                                     closure (exercises the retry
 //                                     snapshot/rollback machinery)
+//   B'. `lock xadd [cell], bl`      — byte form 0FC0: safe_read_write8 CAS
+//                                     (and, under JIT, the non-custom
+//                                     interpreter-call path; totals mod 256)
 //   C. `lock cmpxchg8b [cell8]`     — gram_atomic_rmw_cmpxchg_64, with the
 //                                     JS contender on a BigInt64Array view
 //   D. `lock inc dword [0xFFF]`     — page-crossing target: interim
 //                                     bus-lock fallback (guest-only; the
 //                                     cell must advance exactly N)
+//
+// JIT phases (Stage L2): the same programs re-run with a REAL
+// codegen_finalize (the Stage 4 proof-of-life implementation: validate,
+// instantiate over the same two memories, install into the table) and the
+// loop page force-compiled through the debug-only jit_force_generate_unsafe
+// export BEFORE the first main_loop, so every guest iteration executes the
+// compiled wasm CAS loop / locked slow path. Compiled execution is
+// evidenced by generation tracking (assert_compiled_evidence): every
+// codegen_finalize covered the code page, every jit_clear_func was of a
+// superseded own generation (recompiles with a larger entry-point set are
+// expected on long runs), and the final generation was still installed at
+// the end — installed hot code is unconditionally entered by the dispatch
+// loop.
 //
 // The machine harness follows the Stage 4 proof-of-life pattern (manual
 // instantiation, env stubs from starter.js wasm_shared_funcs); the
@@ -88,6 +104,25 @@ function program_lock_xadd(n)
     ];
 }
 
+// mov ecx, N; loop: mov bl, 1; lock xadd [cell], bl; dec ecx; jnz loop;
+// flag; hlt — byte form 0FC0, the non-custom interpreter call from JIT'd
+// code: under compiled execution atomicity comes from the
+// jit_lock_interp_mem_call! runtime-prefix bracket (Stage L2) routing the
+// body into L1's byte CAS. bl is reloaded every iteration because XADD
+// writes the old memory value back into it.
+function program_lock_xadd8(n)
+{
+    return [
+        0x66, 0xB9, ...le32(n),                         // mov ecx, n
+        0xB3, 0x01,                                     // mov bl, 1
+        0xF0, 0x0F, 0xC0, 0x1E, ...le32(CELL).slice(0, 2), // lock xadd [cell], bl
+        0x66, 0x49,                                     // dec ecx
+        0x75, 0xF4,                                     // jnz $-12
+        0xC6, 0x06, ...le32(FLAG).slice(0, 2), 0x01,    // mov byte [FLAG], 1
+        0xF4,                                           // hlt
+    ];
+}
+
 // EDX:EAX = [cell8]; esi = N;
 // retry: ECX:EBX = EDX:EAX + 1; lock cmpxchg8b [cell8]; jnz retry
 // (mismatch reloads EDX:EAX); dec esi; jnz retry; flag; hlt
@@ -118,6 +153,7 @@ function worker_main()
     // 1 ms park between bursts so the guest's CAS loops always find
     // uncontended windows (no livelock), until the guest posts its flag.
     const { buffer, mode } = workerData;
+    const i8 = new Int8Array(buffer);
     const i32 = new Int32Array(buffer);
     const i64 = new BigInt64Array(buffer);
     const flag_idx = FLAG >> 2;
@@ -131,6 +167,10 @@ function worker_main()
             {
                 Atomics.add(i64, CELL >> 3, 1n);
             }
+            else if(mode === "i8")
+            {
+                Atomics.add(i8, CELL, 1);
+            }
             else
             {
                 Atomics.add(i32, CELL >> 2, 1);
@@ -142,7 +182,7 @@ function worker_main()
     parentPort.postMessage(adds);
 }
 
-async function create_machine(gram_bytes, v86_bytes)
+async function create_machine(gram_bytes, v86_bytes, jit)
 {
     const guest_memory = new WebAssembly.Memory({
         initial: GUEST_PAGES,
@@ -163,6 +203,42 @@ async function create_machine(gram_bytes, v86_bytes)
     let exports;
     const read_string = (ptr, len) =>
         new TextDecoder().decode(new Uint8Array(exports.memory.buffer, ptr, len));
+
+    // JIT plumbing (Stage L2 phases): the Stage 4 proof-of-life
+    // codegen_finalize — validate the generated module, instantiate it over
+    // the same two memories under cpu.js's jit_imports shape, install into
+    // the shared table, and report completion only after the current wasm
+    // frame has returned to JS (cpu.js's async path)
+    const finalize_calls = [];
+    const jit_clears = [];
+    const pending_finished = [];
+    const flush_pending_finished = () =>
+    {
+        while(pending_finished.length)
+        {
+            pending_finished.shift()();
+        }
+    };
+    const codegen_finalize = (wasm_table_index, start, state_flags, ptr, len) =>
+    {
+        assert(jit, "codegen_finalize must not fire with the JIT disabled");
+        const bytes = new Uint8Array(exports.memory.buffer, ptr >>> 0, len >>> 0).slice();
+        assert.ok(WebAssembly.validate(bytes), "generated JIT module must validate");
+        const module = new WebAssembly.Module(bytes);
+        const jit_imports = Object.create(null);
+        jit_imports["m"] = exports.memory;
+        jit_imports["g"] = guest_memory;
+        for(const name of Object.keys(exports))
+        {
+            if(name.startsWith("_") || name.startsWith("zstd") || name.endsWith("_js")) continue;
+            jit_imports[name] = exports[name];
+        }
+        const instance = new WebAssembly.Instance(module, { "e": jit_imports });
+        table.set(wasm_table_index + WASM_TABLE_OFFSET, instance.exports["f"]);
+        finalize_calls.push({ wasm_table_index, start: start >>> 0 });
+        pending_finished.push(() =>
+            exports.codegen_finalize_finished(wasm_table_index, start, state_flags));
+    };
 
     // env stubs: starter.js wasm_shared_funcs shape (Stage 4 proof-of-life
     // harness pattern); gram exports provide every gram_* import
@@ -201,11 +277,10 @@ async function create_machine(gram_bytes, v86_bytes)
         "console_log_from_wasm": (ptr, len) => read_string(ptr, len),
         "dbg_trace_from_wasm": () => {},
 
-        // never called: the JIT is disabled below (Stage L1 is
-        // interpreter-only; Stage L2 adds the JIT LOCK lowering)
-        "codegen_finalize": () => { throw new Error("JIT is disabled in this test"); },
-        "jit_clear_func": wasm_table_index => {},
-        "jit_clear_all_funcs": () => {},
+        // real when jit (Stage L2 phases), asserting-throwing otherwise
+        "codegen_finalize": codegen_finalize,
+        "jit_clear_func": wasm_table_index => { jit_clears.push(wasm_table_index); },
+        "jit_clear_all_funcs": () => { jit_clears.push(-1); },
 
         "__indirect_function_table": table,
     };
@@ -215,7 +290,10 @@ async function create_machine(gram_bytes, v86_bytes)
 
     exports.rust_init();
     exports.set_guest_memory_shared(1);
-    exports.set_jit_config(0, 1); // spend no cycles compiling: interpreter only
+    if(!jit)
+    {
+        exports.set_jit_config(0, 1); // spend no cycles compiling: interpreter only
+    }
 
     const memory_size_view = new Uint32Array(exports.memory.buffer, 812, 1);
     memory_size_view[0] = MEMORY_SIZE;
@@ -232,7 +310,57 @@ async function create_machine(gram_bytes, v86_bytes)
         previous_ip: new Int32Array(exports.memory.buffer, 560, 1),
         segment_offsets: new Int32Array(exports.memory.buffer, 736, 8),
         in_hlt: new Uint8Array(exports.memory.buffer, 616, 1),
+        finalize_calls,
+        jit_clears,
+        flush_pending_finished,
     };
+}
+
+// Stage L2: force-compile the code page up front (debug-only export, one
+// shot of JIT_THRESHOLD heat) so every guest iteration below runs the
+// compiled locked lowering, and assert the compile actually happened and
+// covered the loop page.
+function force_jit(m, name)
+{
+    m.exports.jit_force_generate_unsafe(CODE);
+    m.flush_pending_finished();
+    assert.equal(m.finalize_calls.length, 1, `${name}: exactly one compilation`);
+    assert.equal(m.finalize_calls[0].start & ~0xFFF, CODE,
+        `${name}: compiled entry must be on the code page`);
+}
+
+// Compiled-execution evidence, tolerant of generational recompiles: a long
+// run interleaves main_loop slices, and when the compiled function exits at
+// an eip that is not a registered entry point, the interpreter both
+// executes and heats a new entry point, whereupon the page is recompiled
+// with the larger entry set and the superseded module's table index is
+// freed (jit.rs free_wasm_table_index via "unused after overwrite"). That
+// clear is a replacement, not a loss of compiled execution, so the
+// assertions are: every compilation covered the code page (the forced one
+// before the first slice included), every cleared index was one of our own
+// superseded generations (never -1 = jit_clear_all_funcs, never a foreign
+// index), and the final generation was still installed when the guest
+// finished — combined with the dispatch loop unconditionally entering
+// installed hot code, the guest's locked loop ran compiled.
+function assert_compiled_evidence(m, name)
+{
+    assert(m.finalize_calls.length >= 1, `${name}: at least the forced compilation`);
+    for(const f of m.finalize_calls)
+    {
+        assert.equal(f.start & ~0xFFF, CODE,
+            `${name}: every compilation must cover the code page`);
+    }
+    const installed = m.finalize_calls.map(f => f.wasm_table_index);
+    for(const cleared of m.jit_clears)
+    {
+        assert(installed.includes(cleared),
+            `${name}: cleared index ${cleared} must be a superseded own generation`);
+    }
+    const last = installed[installed.length - 1];
+    assert(!m.jit_clears.includes(last),
+        `${name}: the final compiled generation must survive the run`);
+    console.log(`${name}: compiled generations ${m.finalize_calls.length}, ` +
+        `superseded ${m.jit_clears.length}`);
 }
 
 function enter_program(m, bytes)
@@ -243,10 +371,14 @@ function enter_program(m, bytes)
     m.previous_ip[0] = CODE;
 }
 
-async function run_contended_phase(name, files, program, mode, expected_total)
+async function run_contended_phase(name, files, program, mode, expected_total, jit)
 {
-    const m = await create_machine(files.gram_bytes, files.v86_bytes);
+    const m = await create_machine(files.gram_bytes, files.v86_bytes, jit);
     enter_program(m, program);
+    if(jit)
+    {
+        force_jit(m, name);
+    }
 
     const flag_view = new Int32Array(m.guest_memory.buffer);
     const worker = new Worker(new URL(import.meta.url),
@@ -278,17 +410,28 @@ async function run_contended_phase(name, files, program, mode, expected_total)
     {
         assert(Date.now() < deadline, `${name}: guest loop did not finish in time`);
         m.exports.main_loop();
+        m.flush_pending_finished();
     }
     const adds = await next_message();
     await worker.terminate();
 
     assert(adds > 0, `${name}: the JS contender must actually contend`);
+    if(jit)
+    {
+        assert_compiled_evidence(m, name);
+    }
     let total;
     if(mode === "i64")
     {
         total = m.guest_dv.getBigUint64(CELL, true);
         assert.equal(total, expected_total + BigInt(adds),
             `${name}: exact total (guest ${expected_total} + js ${adds})`);
+    }
+    else if(mode === "i8")
+    {
+        total = m.guest_dv.getUint8(CELL);
+        assert.equal(total, (expected_total + adds) & 0xFF,
+            `${name}: exact total mod 256 (guest ${expected_total} + js ${adds})`);
     }
     else
     {
@@ -312,29 +455,58 @@ async function main()
     };
 
     await run_contended_phase("lock inc", files,
-        program_lock_inc(GUEST_ITERATIONS, CELL), "i32", GUEST_ITERATIONS);
+        program_lock_inc(GUEST_ITERATIONS, CELL), "i32", GUEST_ITERATIONS, false);
     await run_contended_phase("lock xadd", files,
-        program_lock_xadd(GUEST_ITERATIONS), "i32", GUEST_ITERATIONS);
+        program_lock_xadd(GUEST_ITERATIONS), "i32", GUEST_ITERATIONS, false);
+    await run_contended_phase("lock xadd8", files,
+        program_lock_xadd8(GUEST_ITERATIONS), "i8", GUEST_ITERATIONS, false);
     await run_contended_phase("lock cmpxchg8b", files,
-        program_lock_cmpxchg8b(GUEST_ITERATIONS), "i64", BigInt(GUEST_ITERATIONS));
+        program_lock_cmpxchg8b(GUEST_ITERATIONS), "i64", BigInt(GUEST_ITERATIONS), false);
+    await run_buslock_phase("interp", files, false);
 
-    // D: page-crossing locked target (interim bus-lock fallback), guest-only
-    {
-        const m = await create_machine(files.gram_bytes, files.v86_bytes);
-        enter_program(m, program_lock_inc(CROSS_ITERATIONS, CROSS));
-        const flag_view = new Int32Array(m.guest_memory.buffer);
-        const deadline = Date.now() + TIMEOUT_MS;
-        while(Atomics.load(flag_view, FLAG >> 2) === 0)
-        {
-            assert(Date.now() < deadline, "bus-lock phase: guest loop did not finish in time");
-            m.exports.main_loop();
-        }
-        const value = m.guest_dv.getUint32(CROSS, true);
-        assert.equal(value, CROSS_ITERATIONS, "page-crossing lock inc is exact");
-        console.log(`lock inc [0xFFF] (page-crossing bus lock): exact — ${value}`);
-    }
+    // Stage L2: the same exactness bar under COMPILED execution — the JIT
+    // CAS-loop fast path (DWORD via inc and the register-writing xadd
+    // closure, QWORD via cmpxchg8b), the interpreter-called byte form
+    // (xadd8: 0FC0's jit_lock_interp_mem_call! runtime-prefix bracket into
+    // L1's byte CAS), and the bus-locked JIT slow path (page-crossing inc)
+    await run_contended_phase("lock inc (jit)", files,
+        program_lock_inc(GUEST_ITERATIONS, CELL), "i32", GUEST_ITERATIONS, true);
+    await run_contended_phase("lock xadd (jit)", files,
+        program_lock_xadd(GUEST_ITERATIONS), "i32", GUEST_ITERATIONS, true);
+    await run_contended_phase("lock xadd8 (jit)", files,
+        program_lock_xadd8(GUEST_ITERATIONS), "i8", GUEST_ITERATIONS, true);
+    await run_contended_phase("lock cmpxchg8b (jit)", files,
+        program_lock_cmpxchg8b(GUEST_ITERATIONS), "i64", BigInt(GUEST_ITERATIONS), true);
+    await run_buslock_phase("jit", files, true);
 
     console.log("Tests passed");
+}
+
+// page-crossing locked target (interim bus-lock fallback), guest-only
+async function run_buslock_phase(name, files, jit)
+{
+    const m = await create_machine(files.gram_bytes, files.v86_bytes, jit);
+    enter_program(m, program_lock_inc(CROSS_ITERATIONS, CROSS));
+    if(jit)
+    {
+        force_jit(m, `bus-lock (${name})`);
+    }
+    const flag_view = new Int32Array(m.guest_memory.buffer);
+    const deadline = Date.now() + TIMEOUT_MS;
+    while(Atomics.load(flag_view, FLAG >> 2) === 0)
+    {
+        assert(Date.now() < deadline,
+            `bus-lock phase (${name}): guest loop did not finish in time`);
+        m.exports.main_loop();
+        m.flush_pending_finished();
+    }
+    const value = m.guest_dv.getUint32(CROSS, true);
+    assert.equal(value, CROSS_ITERATIONS, `page-crossing lock inc is exact (${name})`);
+    if(jit)
+    {
+        assert_compiled_evidence(m, `bus-lock (${name})`);
+    }
+    console.log(`lock inc [0xFFF] (page-crossing bus lock, ${name}): exact — ${value}`);
 }
 
 if(isMainThread)

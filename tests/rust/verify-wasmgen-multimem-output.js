@@ -86,6 +86,9 @@ for(const [name, module_bytes, shared] of [
     {
         assert.equal(guest.getUint8(addr), 42, `${name}: u8 atomic rmw at ${addr}`);
     }
+
+    // 64-bit atomic cmpxchg (Stage L2: locked CMPXCHG8B lowering)
+    assert.equal(guest.getBigUint64(224, true), 42n, `${name}: i64 atomic cmpxchg at 224`);
 }
 
 // engines reject shared/non-shared import mismatches at link time,
