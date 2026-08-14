@@ -203,6 +203,7 @@ index caabb2e..1aa3172 100644
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8A8_SRGB);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8X8_SRGB);
 +   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8B8A8_SRGB);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8_UNORM);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8B8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8A8_UNORM);
 +   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8X8_UNORM);
