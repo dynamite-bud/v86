@@ -129,7 +129,7 @@ index caabb2e..1aa3172 100644
     memset(&eb, 0, sizeof(struct drm_virtgpu_execbuffer));
     eb.command = (unsigned long)(void*)cbuf->buf;
     eb.size = cbuf->base.cdw * 4;
-@@ -1005,12 +1031,106 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
+@@ -1005,12 +1031,107 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
     return ret;
  }
  
