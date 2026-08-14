@@ -89,8 +89,9 @@ diff --git a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c b/src/gallium/winsy
 index caabb2e..1aa3172 100644
 --- a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
 +++ b/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,8 @@
  #include <stdio.h>
++#include <stdlib.h>
  #include <sys/ioctl.h>
  #include <sys/stat.h>
 +#include <sys/eventfd.h>
@@ -101,7 +102,7 @@ index caabb2e..1aa3172 100644
     if (cbuf->base.cdw == 0)
        return 0;
  
-+   if (qws->webgpuvirt) {
++   if (qws->webgpuvirt && getenv("V86_MESA_WEBGPUVIRT_TRACE")) {
 +      fprintf(stderr, "WEBGPUVIRT_MESA_SUBMIT dwords=%u resources=%u",
 +              cbuf->base.cdw, cbuf->cres);
 +      for (unsigned i = 0; i < cbuf->base.cdw;) {
