@@ -138,6 +138,7 @@ const benchmark_runner = benchmark_enabled ?
     (await import("../tests/benchmark/virtio-gpu-codex.js"))
         .create_virtio_gpu_codex_benchmark({
             renderer,
+            accelerated,
             machine: params.get("benchmark_machine"),
         }) :
     null;

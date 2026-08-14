@@ -152,8 +152,8 @@ async function run_benchmark(emulator, options, diagnostics, page_started)
         scenario: {
             appliance: "openbox-ghostty-codex",
             renderer: options.renderer,
-            guest_renderer: "llvmpipe",
-            accelerated_3d: false,
+            guest_renderer: options.accelerated ? "webgpuvirt" : "llvmpipe",
+            accelerated_3d: options.accelerated,
         },
         machine: await machine_info(options.machine),
         method: {
@@ -373,8 +373,8 @@ function failure_result(options, diagnostics, error)
         scenario: {
             appliance: "openbox-ghostty-codex",
             renderer: options.renderer,
-            guest_renderer: "llvmpipe",
-            accelerated_3d: false,
+            guest_renderer: options.accelerated ? "webgpuvirt" : "llvmpipe",
+            accelerated_3d: options.accelerated,
         },
         error: error instanceof Error ? error.stack || error.message : String(error),
         failures: diagnostics.snapshot(null, null),
