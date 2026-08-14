@@ -2814,6 +2814,9 @@ async fn render(
     if current_pass.is_some() || passes.is_empty() {
         return Err(invalid("unterminated or empty render submit"));
     }
+    let validation_scope = renderer
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
 
     let mut encoder = renderer
         .device
@@ -2936,6 +2939,10 @@ async fn render(
     } else {
         renderer.wait_idle().await?;
     }
+    if let Some(error) = await_compilation(renderer, validation_scope).await? {
+        return Err(invalid(format!("render validation failed: {error}")));
+    }
+    renderer.check_fault()?;
     Ok(())
 }
 
