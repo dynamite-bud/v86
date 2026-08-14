@@ -57,11 +57,7 @@ RUN set -eux; \
     expected_commit=$MESA_COMMIT; \
     . /tmp/mesa-artifacts.lock; \
     test "$expected_commit" = "$MESA_COMMIT"; \
-    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT"; \
-    printf '%s  %s\n' "$MESA_GALLIUM_SHA256" \
-        /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so | sha256sum -c -; \
-    printf '%s  %s\n' "$MESA_DRI_SHA256" \
-        /opt/webgpuvirt/usr/local/lib/dri/virtio_gpu_dri.so | sha256sum -c -
+    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT"
 
 FROM scratch AS mesa-artifacts
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /lib/
@@ -71,7 +67,7 @@ FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af
 
 ENV KERNEL=lts
 
-COPY world.lock packages.lock artifacts.lock /tmp/
+COPY world.lock packages.lock artifacts.lock mesa-artifacts.lock /tmp/
 RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
     apk info -v | sort | cmp - /tmp/packages.lock
 
@@ -80,6 +76,12 @@ COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-
 COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /usr/local/lib/
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /usr/local/lib/dri
+RUN set -eux; \
+    . /tmp/mesa-artifacts.lock; \
+    printf '%s  %s\n' "$MESA_GALLIUM_SHA256" \
+        /usr/local/lib/libgallium-26.1.6.so | sha256sum -c -; \
+    printf '%s  %s\n' "$MESA_DRI_SHA256" \
+        /usr/local/lib/dri/virtio_gpu_dri.so | sha256sum -c -
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \
@@ -92,6 +94,7 @@ RUN set -eux; \
     install -m 0755 /tmp/codex-linux-i386-musl/codex /usr/local/bin/codex; \
     install -D -m 0644 /tmp/codex-linux-i386-musl/I386-BUILD.txt /usr/share/doc/codex/I386-BUILD.txt; \
     install -D -m 0644 /tmp/artifacts.lock /usr/share/v86-appliance/artifacts.lock; \
+    install -D -m 0644 /tmp/mesa-artifacts.lock /usr/share/v86-appliance/mesa-artifacts.lock; \
     install -D -m 0644 /tmp/packages.lock /usr/share/v86-appliance/packages.lock; \
     ghostty --version; \
     codex --version; \
