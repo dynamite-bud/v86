@@ -1,32 +1,51 @@
-// XWAH-9 Phase 4 Stage W1: the vCPU worker runtime skeleton
-// (docs/smp-phase4-design.md §6). Receives the spawn payload
+// XWAH-9 Phase 4 Stages W1+W2: the vCPU worker runtime
+// (docs/smp-phase4-design.md §6, §9). Receives the spawn payload
 // { wasm_source, gram_bytes, guest_memory, index, total, main_time_origin,
-//   memory_size }, instantiates gram + the multimem main module over the
-// SHARED guest memory (the same build_gram_env shape starter.js uses), runs
-// rust_init / set_smp_cpus / set_guest_memory_shared, performs the clock
-// origin handshake, and parks in the doorbell wait loop. No io.js, no
-// devices, no CPU.js facade in the worker: the env import surface follows
-// the §6 disposition table — io_port_*/mmap_* are blocking mailbox RPCs to
-// the device host, codegen_finalize/jit_clear_* are worker-local (own
-// WebAssembly.Table, own instance memory, WebAssembly.instantiate in the
-// worker), diagnostics go out via postMessage, the clock is worker-local.
+//   memory_size, machine? }, instantiates gram + the multimem main module
+// over the SHARED guest memory (the same build_gram_env shape starter.js
+// uses), runs rust_init / set_smp_cpus / set_guest_memory_shared, performs
+// the clock origin handshake, and runs. No io.js, no devices, no CPU.js
+// facade in the worker: the env import surface follows the §6 disposition
+// table — io_port_*/mmap_* are blocking mailbox RPCs to the device host,
+// codegen_finalize/jit_clear_* are worker-local (own WebAssembly.Table, own
+// instance memory, instantiated in the worker), diagnostics go out via
+// postMessage, the clock is worker-local.
 //
-// W1 is a SKELETON: the wake handler publishes a heartbeat and (under the
-// worker-skeleton test's hooks) exercises one mailbox RPC batch and the
-// worker-side codegen_finalize proof — it does NOT run main_loop. Stage W2
-// puts the real machine loop here.
+// Two modes, selected by the payload:
+//
+// - `machine` present (Stage W2, topology (c)): this worker IS the machine.
+//   It mirrors CPU.init's instance setup (worker mode, acpi flag, cpuid
+//   level, jit config, reset), then runs the cooperative machine loop:
+//   drain the jit-dirty ring, replay the device-IRQ ring into
+//   device_raise_irq/device_lower_irq on THIS instance (which owns
+//   PIC+IOAPIC+LAPICs — the (c) wire, design §9 W2 note), call the real
+//   main_loop (count>1 takes the landed main_loop_smp unchanged), and use
+//   the returned idle deadline as the doorbell-wait timeout — the worker-
+//   side replacement of src/main.js's timer-worker yield. run_hardware_
+//   timers is worker-local and returns only this instance's apic_timer
+//   deadline; PIT/RTC/ACPI tick on the device host and arrive as ring
+//   events. JIT finalize is synchronous here (workers may compile
+//   synchronously; the loop never returns to the event loop while running).
+//
+// - no `machine` (the W1 skeleton, kept for tests/threads/worker-skeleton
+//   .js): the wake handler publishes a heartbeat and, under the test hooks,
+//   exercises one mailbox RPC batch and the codegen_finalize proof.
 //
 // Environment-agnostic: runs as a browser module worker (self.onmessage)
-// and as a Node worker_thread (tests/threads/worker-skeleton.js) through the
-// thin channel adapter below.
+// and as a Node worker_thread through the thin channel adapter below.
 
 import { WASM_TABLE_SIZE, WASM_TABLE_OFFSET } from "../const.js";
 import { get_rand_int } from "../lib.js";
 import { build_gram_env } from "./gram_env.js";
 import {
     ctl_base_for, ctl_size, ctl_probe_offset, SMPCTL_PROBE_FIELD_COUNT,
+    ctl_machine_offset,
     CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK, CTL_COMMAND_TERMINATE,
+    CTL_COMMAND_RESET,
     CTL_RUN_STATE_RUNNABLE, CTL_RUN_STATE_PARKED, CTL_RUN_STATE_HALTED,
+    CTL_MACHINE_JIT_DIRTY_RING, CTL_MACHINE_DEV_IRQ_RING,
+    CTL_JIT_DIRTY_RING_CAP, CTL_DEV_IRQ_RING_CAP, CTL_DEV_IRQ_RAISE_BIT,
+    ring_pop,
     doorbell_read, doorbell_wait, run_state_publish, heartbeat_publish,
     command_read, command_ack,
     mailbox_record_word, mailbox_request, MAILBOX_OP_OUT, MAILBOX_OP_IN,
@@ -85,6 +104,10 @@ async function run_worker(payload)
     const total = payload.total;
     const memory_size = payload.memory_size;
     const guest_memory = payload.guest_memory;
+    // machine mode (Stage W2, topology (c)): this worker runs the whole
+    // machine's vCPUs; the payload carries the CPU.init settings the worker
+    // instance must mirror
+    const machine = payload.machine || null;
 
     // clock origin handshake (design §6 microtick row): same monotonic
     // clock as the main thread, offset by the difference of the two
@@ -106,8 +129,9 @@ async function run_worker(payload)
     const i32 = new Int32Array(guest_memory.buffer);
     const record = mailbox_record_word(ctl_base, index);
 
-    const rpc = (op, addr, size, value) =>
-        mailbox_request(i32, record, op, addr, size, value, RPC_TIMEOUT_MS);
+    const rpc = (op, addr, size, value, value_hi, value_2, value_3) =>
+        mailbox_request(i32, record, op, addr, size, value, RPC_TIMEOUT_MS,
+            value_hi, value_2, value_3);
 
     // worker-local JIT plumbing (§6 codegen_finalize row): own table, own
     // instance memory, WebAssembly.instantiate in this worker
@@ -116,6 +140,11 @@ async function run_worker(payload)
     let jit_imports = null;
     const finalize_log = [];
     const pending_finalize = [];
+    // machine mode: codegen_finalize_finished callbacks deferred to the
+    // loop boundary — codegen_finalize is called from INSIDE
+    // jit_analyze_and_generate, and calling back into the module there
+    // re-enters its jit state mid-borrow (RefCell panic)
+    const pending_finished = [];
 
     const read_sized_string = (offset, len) =>
         new TextDecoder().decode(new Uint8Array(exports.memory.buffer, offset, len));
@@ -129,8 +158,11 @@ async function run_worker(payload)
         "io_port_write16": (port, value) => { rpc(MAILBOX_OP_OUT, port, 2, value); },
         "io_port_write32": (port, value) => { rpc(MAILBOX_OP_OUT, port, 4, value); },
 
-        // the LAPIC window never reaches here (Rust intercept); wide writes
-        // are split into dword RPCs in W1 — W2 finalizes the op surface
+        // the LAPIC/IOAPIC windows never reach here (Rust intercepts on
+        // THIS instance); wide writes are single-record RPCs (SIZE = byte
+        // width, VALUE_LO/HI/2/3 the payload — the W2 wide-op surface); the
+        // device host replays them as ordered dword writes, the historical
+        // JS mmap_write64/128 dword split
         "mmap_read8": addr => rpc(MAILBOX_OP_MMAP_READ, addr, 1, 0),
         "mmap_read32": addr => rpc(MAILBOX_OP_MMAP_READ, addr, 4, 0),
         "mmap_write8": (addr, value) => { rpc(MAILBOX_OP_MMAP_WRITE, addr, 1, value); },
@@ -138,22 +170,20 @@ async function run_worker(payload)
         "mmap_write32": (addr, value) => { rpc(MAILBOX_OP_MMAP_WRITE, addr, 4, value); },
         "mmap_write64": (addr, v0, v1) =>
         {
-            rpc(MAILBOX_OP_MMAP_WRITE, addr, 4, v0);
-            rpc(MAILBOX_OP_MMAP_WRITE, addr + 4, 4, v1);
+            rpc(MAILBOX_OP_MMAP_WRITE, addr, 8, v0, v1);
         },
         "mmap_write128": (addr, v0, v1, v2, v3) =>
         {
-            rpc(MAILBOX_OP_MMAP_WRITE, addr, 4, v0);
-            rpc(MAILBOX_OP_MMAP_WRITE, addr + 4, 4, v1);
-            rpc(MAILBOX_OP_MMAP_WRITE, addr + 8, 4, v2);
-            rpc(MAILBOX_OP_MMAP_WRITE, addr + 12, 4, v3);
+            rpc(MAILBOX_OP_MMAP_WRITE, addr, 16, v0, v1, v2, v3);
         },
 
         // --- worker-local (§6) ---
         "microtick": microtick,
-        // W1 stub: no devices in the worker; W2+ returns only the
-        // instance's own apic_timer deadline (PIT/RTC/ACPI stay main-side)
-        "run_hardware_timers": (acpi, t) => t + 100,
+        // worker-local per §6: only this instance's LAPIC timer deadline;
+        // PIT/RTC/ACPI tick on the device host and arrive as ring events
+        // (the skeleton stub keeps its inert W1 value)
+        "run_hardware_timers": (acpi, t) =>
+            machine ? (acpi ? exports["apic_timer"](t) : 100) : t + 100,
         "get_rand_int": () => get_rand_int(),
         // park/notify replaces stop_idling in worker mode (§3)
         "stop_idling": () => {},
@@ -185,9 +215,24 @@ async function run_worker(payload)
         },
 
         // --- worker-local JIT (§6): compile and install into this
-        // instance's own table; caches are per-instance by construction ---
+        // instance's own table; caches are per-instance by construction.
+        // Machine mode compiles SYNCHRONOUSLY (legal in workers): the
+        // machine loop never returns to the event loop while running, so a
+        // promise-based finalize would never settle. The finished callback
+        // is deferred to the loop boundary — this env import runs INSIDE
+        // jit_analyze_and_generate, and re-entering the module here
+        // borrows its jit state twice ---
         "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len) =>
         {
+            if(machine)
+            {
+                const code = new Uint8Array(exports.memory.buffer, ptr >>> 0, len >>> 0);
+                const result = new WebAssembly.Instance(
+                    new WebAssembly.Module(code), { "e": jit_imports });
+                wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, result.exports["f"]);
+                pending_finished.push(wasm_table_index, start, state_flags);
+                return;
+            }
             // copy out of the instance memory before yielding
             const code = new Uint8Array(exports.memory.buffer, ptr >>> 0, len >>> 0).slice();
             const finalized = WebAssembly.instantiate(code, { "e": jit_imports }).then(result =>
@@ -232,6 +277,27 @@ async function run_worker(payload)
     new Uint32Array(exports.memory.buffer, 812, 1)[0] = memory_size;
     exports["allocate_memory"](memory_size);
     exports["set_smp_cpus"](total);
+
+    if(machine)
+    {
+        // Mirror CPU.init's instance setup (src/cpu.js): this instance IS
+        // the machine — the main thread's instance never executes guest
+        // code and serves only as the device host.
+        if(typeof exports["set_worker_mode"] !== "function")
+        {
+            throw new Error("machine mode requires a wasm build with set_worker_mode " +
+                "(rebuild the multimem artifact)");
+        }
+        // relocates the cpu/lock.rs bus-lock cell to machine.buslock in the
+        // control region (design §9 W2; must precede any guest execution)
+        exports["set_worker_mode"](1);
+        machine["disable_jit"] && exports["set_jit_config"](0, 1);
+        machine["cpuid_level"] && exports["set_cpuid_level"](machine["cpuid_level"]);
+        // acpi_enabled global (cpu.js view at byte offset 552)
+        new Uint8Array(exports.memory.buffer, 552, 1)[0] = machine["acpi"] ? 1 : 0;
+        exports["set_tsc"](0, 0);
+        exports["reset_cpu"]();
+    }
 
     // jit imports: the cpu.js create_jit_imports shape plus "g" (the JIT
     // modules import guest RAM as memidx 1)
@@ -285,6 +351,13 @@ async function run_worker(payload)
         "origin_delta": origin_delta,
     });
 
+    if(machine)
+    {
+        machine_loop();
+        channel.close();
+        return;
+    }
+
     if(payload.test_force_jit)
     {
         await force_jit_proof();
@@ -292,6 +365,81 @@ async function run_worker(payload)
 
     park_loop();
     channel.close();
+
+    // The Stage W2 machine loop (topology (c), design §9 W2 note): the
+    // worker-side replacement of src/main.js's do_tick/yield cycle. Per
+    // iteration: honor the command protocol, drain cross-thread work (JIT
+    // dirt strictly before device IRQs — modified code must be invalidated
+    // before an interrupt can steer execution into it), run the real
+    // main_loop on this instance, and park on the doorbell for the idle
+    // deadline main_loop returned. The doorbell is read BEFORE the drains
+    // and main_loop, so any event posted while the machine ran turns the
+    // wait into an immediate wake — no lost-wakeup window.
+    function machine_loop()
+    {
+        const machine_base = ctl_base + ctl_machine_offset(total);
+        const jit_ring = machine_base + CTL_MACHINE_JIT_DIRTY_RING;
+        const irq_ring = machine_base + CTL_MACHINE_DEV_IRQ_RING;
+        channel.post({ type: "machine-ready" });
+        for(;;)
+        {
+            const seen = doorbell_read(i32, ctl_base, index);
+            const command = command_read(i32, ctl_base, index);
+            if(command === CTL_COMMAND_TERMINATE)
+            {
+                run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_HALTED);
+                channel.post({ type: "terminated" });
+                return;
+            }
+            if(command === CTL_COMMAND_PARK_REQ || command === CTL_COMMAND_PARKED_ACK)
+            {
+                command_ack(i32, ctl_base, index, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK);
+                run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_PARKED);
+                doorbell_wait(i32, ctl_base, index, seen, PARK_TIMEOUT_MS);
+                continue;
+            }
+            if(command === CTL_COMMAND_RESET)
+            {
+                // machine reboot requested by the device host (guest reset
+                // port write serviced there): reset THIS instance's CPU and
+                // ack by restoring RUN
+                exports["reset_cpu"]();
+                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_RUN);
+                continue;
+            }
+            run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_RUNNABLE);
+            heartbeat_publish(i32, ctl_base, index);
+            for(let page; (page = ring_pop(i32, jit_ring, CTL_JIT_DIRTY_RING_CAP)) !== undefined;)
+            {
+                const start = (page >>> 0) * 0x1000;
+                exports["jit_dirty_cache"](start, start + 0x1000);
+            }
+            for(let event; (event = ring_pop(i32, irq_ring, CTL_DEV_IRQ_RING_CAP)) !== undefined;)
+            {
+                if(event & CTL_DEV_IRQ_RAISE_BIT)
+                {
+                    exports["device_raise_irq"](event & 0xFF);
+                }
+                else
+                {
+                    exports["device_lower_irq"](event & 0xFF);
+                }
+            }
+            const t = exports["main_loop"]();
+            // deliver deferred codegen_finalize_finished callbacks (FIFO)
+            // now that the module is reentrant again (outside main_loop)
+            for(let i = 0; i < pending_finished.length; i += 3)
+            {
+                exports["codegen_finalize_finished"](
+                    pending_finished[i], pending_finished[i + 1], pending_finished[i + 2]);
+            }
+            pending_finished.length = 0;
+            if(t > 0)
+            {
+                doorbell_wait(i32, ctl_base, index, seen, Math.min(t, PARK_TIMEOUT_MS));
+            }
+        }
+    }
 
     // Worker-side codegen_finalize proof (W1 gate): force-compile a tiny
     // program written into the shared guest RAM through the debug export,

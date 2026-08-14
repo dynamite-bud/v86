@@ -1284,13 +1284,16 @@ CPU.prototype.create_memory = function(size, minimum_size)
         // starter.js created the memory one wasm page larger than the
         // (identically normalised) memory size: the JIT slow-path scratch
         // pages live at [size, size + 0x2000) (memory.rs
-        // gram_jit_scratch_base)
+        // gram_jit_scratch_base). Under smp_workers the shared control
+        // region follows (src/browser/smpctl.js ctl_pages; the page count
+        // is plumbed through wm alongside guest_memory itself).
         if(size + 0x2000 > buffer.byteLength)
         {
             throw new Error("Imported guest memory too small: memory_size=" + size +
                 " + jit scratch does not fit in " + buffer.byteLength + " bytes");
         }
-        dbg_assert(size + 0x10000 === buffer.byteLength,
+        const ctl_bytes = (this.wm.guest_memory_ctl_pages || 0) * 0x10000;
+        dbg_assert(size + 0x10000 + ctl_bytes === buffer.byteLength,
             "starter.js and create_memory disagree about the guest memory size");
 
         // direct views, not the view() proxy: the guest memory is created
@@ -2102,6 +2105,43 @@ CPU.prototype.load_bios = function()
             addr &= 0xFFFFF;
             this.mem8[addr] = value;
         }.bind(this));
+};
+
+/**
+ * XWAH-9 Phase 4 Stage W2 (docs/smp-phase4-design.md §9): put this CPU
+ * object into device-host mode — the guest executes inside the machine
+ * worker (src/browser/vcpu_worker.js), so the calls that would touch guest
+ * execution state on THIS instance are rerouted to the host:
+ *
+ * - device_raise_irq/device_lower_irq (every JS device model calls these
+ *   through the cpu object) become ordered device-IRQ ring posts; the
+ *   main instance's wasm device_raise_irq must NOT run its handle_irqs —
+ *   there is no guest on the main thread;
+ * - jit_dirty_cache (write_blob during DMA/IDE transfers) posts the dirty
+ *   pages to the worker, whose JIT cache is the live one;
+ * - main_loop becomes the host's device tick (PIT/RTC/ACPI timers live
+ *   here; the worker keeps its own LAPIC deadline);
+ * - reboot_internal additionally resets the worker's instance.
+ *
+ * Everything else (io.js tables, device models, mmap handlers, save Rust
+ * chipset state) stays as constructed — the mailbox server dispatches onto
+ * it.
+ *
+ * @param {!Object} host an SMPWorkerHost (src/browser/smp_worker_host.js)
+ */
+CPU.prototype.attach_smp_worker_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.device_raise_irq = irq => host.post_irq(irq, true);
+    this.device_lower_irq = irq => host.post_irq(irq, false);
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        reboot();
+        host.post_reset();
+    };
 };
 
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)

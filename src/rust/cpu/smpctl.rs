@@ -39,14 +39,25 @@
 //
 //   machine at CTL_BASE + n*0x280 + 0x40:
 //     0x00   tsc_offset     u64    (cmpxchg_64-based access)
-//     0x40   buslock        u32    W1 provides the accessors; the L1
-//                                  instance-local cell (cpu/lock.rs) moves
-//                                  here in W2, when worker mode guarantees
-//                                  the region is actually sized/mapped —
+//     0x40   buslock        u32    the shared bus-lock cell; cpu/lock.rs
+//                                  uses it instead of its L1 instance-local
+//                                  cell once set_worker_mode(1) ran (W2) —
 //                                  a plain multimem build has no ctl pages
+//                                  and never enters worker mode
 //     0x80   jit_dirty ring head u32, tail u32, 64xu32 phys pages. W1 ships
 //                           the single-producer push; the cross-worker
-//                           multi-producer protocol is W3's (design §6)
+//                           multi-producer protocol is W3's (design §6).
+//                           In topology (c) the producer is the device host
+//                           (main-thread JS: DMA/disk writes into guest
+//                           RAM), the consumer the machine worker
+//     0x1C0  dev_irq ring   head u32, tail u32, 256xu32 events (SPSC). The
+//                           topology-(c) device-IRQ wire (design §9 W2
+//                           note): the device host posts device_raise_irq/
+//                           device_lower_irq as ordered events
+//                           (irq | DEV_IRQ_RAISE_BIT); the machine worker
+//                           drains them at its loop boundary and replays
+//                           them into device_raise_irq/device_lower_irq on
+//                           ITS instance, which owns PIC+IOAPIC+LAPICs
 //
 // Everything is reached through the gram accessor layer (no new import
 // surface); on non-wasm targets (cargo test) the cell backend below operates
@@ -94,11 +105,23 @@ pub const MAILBOX_IDLE: i32 = 0;
 pub const MAILBOX_REQUEST: i32 = 1;
 pub const MAILBOX_RESPONSE: i32 = 2;
 
-// command[i] values (design §2/§8 quiesce protocol)
+// Mailbox op codes used by the Rust-side client below (the JS mirror keeps
+// the full table): IN_REP/OUT_REP are the W2 batched string-I/O ops — a rep
+// ins/outs page batch as ONE RPC. ADDR = port, SIZE = element width,
+// VALUE_LO = element count, VALUE_HI = guest-physical buffer address; the
+// device host performs the per-element port accesses in order against the
+// shared guest RAM and answers with the element count.
+pub const MAILBOX_OP_IN_REP: i32 = 5;
+pub const MAILBOX_OP_OUT_REP: i32 = 6;
+
+// command[i] values (design §2/§8 quiesce protocol; RESET is the W2
+// machine-reboot request — the worker runs reset_cpu on its instance and
+// acks by writing RUN back)
 pub const COMMAND_RUN: i32 = 0;
 pub const COMMAND_PARK_REQ: i32 = 1;
 pub const COMMAND_PARKED_ACK: i32 = 2;
 pub const COMMAND_TERMINATE: i32 = 3;
+pub const COMMAND_RESET: i32 = 4;
 
 // run_state_pub values: RunState (vcpu.rs) plus the published-only Halted
 pub const RUN_STATE_RUNNABLE: i32 = 0;
@@ -119,9 +142,16 @@ pub const ROUTING_ENTRY_STRIDE: u32 = 0x40;
 pub const MACHINE_TSC_OFFSET: u32 = 0x00;
 pub const MACHINE_BUSLOCK: u32 = 0x40;
 pub const MACHINE_JIT_DIRTY_RING: u32 = 0x80;
-pub const MACHINE_SIZE: u32 = 0x1C0;
+pub const MACHINE_DEV_IRQ_RING: u32 = 0x1C0;
+pub const MACHINE_SIZE: u32 = 0x600;
 
 pub const JIT_DIRTY_RING_CAP: u32 = 64;
+pub const DEV_IRQ_RING_CAP: u32 = 256;
+
+// dev_irq ring event encoding: irq number in the low byte, bit 8 = raise
+// (clear = lower). Raise/lower stay one ordered stream so level-triggered
+// lines replay exactly.
+pub const DEV_IRQ_RAISE_BIT: u32 = 1 << 8;
 
 // ring layout (eoi_ring and jit_dirty ring): head, tail, then the slots
 pub const RING_HEAD: u32 = 0x0;
@@ -145,7 +175,10 @@ const _: () = assert!(MAILBOX + MAILBOX_BYTES <= VCPU_STRIDE);
 const _: () = assert!(ROUTING_ENTRY_STRIDE % CACHE_LINE == 0);
 const _: () = assert!(MACHINE_BUSLOCK % CACHE_LINE == 0);
 const _: () = assert!(MACHINE_JIT_DIRTY_RING % CACHE_LINE == 0);
-const _: () = assert!(MACHINE_JIT_DIRTY_RING + RING_SLOTS + 4 * JIT_DIRTY_RING_CAP <= MACHINE_SIZE);
+const _: () =
+    assert!(MACHINE_JIT_DIRTY_RING + RING_SLOTS + 4 * JIT_DIRTY_RING_CAP <= MACHINE_DEV_IRQ_RING);
+const _: () = assert!(MACHINE_DEV_IRQ_RING % CACHE_LINE == 0);
+const _: () = assert!(MACHINE_DEV_IRQ_RING + RING_SLOTS + 4 * DEV_IRQ_RING_CAP <= MACHINE_SIZE);
 const _: () = assert!(MACHINE_SIZE % CACHE_LINE == 0);
 
 /// Offset of the routing table relative to CTL_BASE.
@@ -197,6 +230,7 @@ pub const PROBE_ROUTING_ENTRY: u32 = 10;
 pub const PROBE_MACHINE_TSC_OFFSET: u32 = 11;
 pub const PROBE_MACHINE_BUSLOCK: u32 = 12;
 pub const PROBE_MACHINE_JIT_DIRTY_RING: u32 = 13;
+pub const PROBE_MACHINE_DEV_IRQ_RING: u32 = 14;
 
 /// Exported for JS/tests: offset (relative to CTL_BASE) of a layout field —
 /// the cross-language layout check of the worker-skeleton test iterates over
@@ -220,6 +254,7 @@ pub fn get_smpctl_offset(field: u32, i: u32, n: u32) -> u32 {
         PROBE_MACHINE_TSC_OFFSET => machine_offset(n) + MACHINE_TSC_OFFSET,
         PROBE_MACHINE_BUSLOCK => machine_offset(n) + MACHINE_BUSLOCK,
         PROBE_MACHINE_JIT_DIRTY_RING => machine_offset(n) + MACHINE_JIT_DIRTY_RING,
+        PROBE_MACHINE_DEV_IRQ_RING => machine_offset(n) + MACHINE_DEV_IRQ_RING,
         _ => u32::MAX,
     }
 }
@@ -264,6 +299,12 @@ mod cell {
     pub unsafe fn read32_plain(addr: u32) -> i32 { memory::gram_read32(addr) }
     pub unsafe fn write32_plain(addr: u32, value: i32) { memory::gram_write32(addr, value) }
     pub unsafe fn notify(addr: u32, count: i32) -> i32 { memory::gram_notify(addr, count) }
+    /// memory.atomic.wait32 (worker threads only — traps on a browser main
+    /// thread, which never calls this). 0 = woken, 1 = not-equal, 2 =
+    /// timed out.
+    pub unsafe fn wait32(addr: u32, expected: i32, timeout_ns: i64) -> i32 {
+        memory::gram_wait32(addr, expected, timeout_ns)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -341,6 +382,9 @@ mod cell {
     pub unsafe fn read32_plain(addr: u32) -> i32 { load32(addr) }
     pub unsafe fn write32_plain(addr: u32, value: i32) { store32(addr, value) }
     pub unsafe fn notify(_addr: u32, _count: i32) -> i32 { 0 }
+    /// Native stand-in: single-threaded tests never block; report
+    /// "not-equal" so a (never-reached) wait loop would re-inspect.
+    pub unsafe fn wait32(_addr: u32, _expected: i32, _timeout_ns: i64) -> i32 { 1 }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -474,6 +518,42 @@ pub unsafe fn mailbox_state_load(i: u32) -> i32 {
     cell::load32(mailbox_addr(i) + 4 * MAILBOX_STATE)
 }
 
+/// Rust-side mailbox client (Stage W2): one blocking RPC on vCPU i's
+/// record, byte-identical protocol to smpctl.js mailbox_request — plain
+/// field writes published by the seq-cst STATE store + notify, then a
+/// wait32 loop until the device host answers RESPONSE. Worker threads only
+/// (wait32 traps on a browser main thread). A device host that never
+/// answers is fail-stop, like the JS client's timeout throw.
+pub unsafe fn mailbox_rpc(
+    i: u32,
+    op: i32,
+    addr: i32,
+    size: i32,
+    value_lo: i32,
+    value_hi: i32,
+) -> i32 {
+    mailbox_field_write(i, MAILBOX_OP, op);
+    mailbox_field_write(i, MAILBOX_ADDR, addr);
+    mailbox_field_write(i, MAILBOX_SIZE, size);
+    mailbox_field_write(i, MAILBOX_VALUE_LO, value_lo);
+    mailbox_field_write(i, MAILBOX_VALUE_HI, value_hi);
+    mailbox_state_store(i, MAILBOX_REQUEST);
+    let state_addr = mailbox_addr(i) + 4 * MAILBOX_STATE;
+    let mut timeouts = 0;
+    while cell::load32(state_addr) != MAILBOX_RESPONSE {
+        // 1 s wait slices; ~10 s without a response is a dead device host
+        if cell::wait32(state_addr, MAILBOX_REQUEST, 1_000_000_000) == 2 {
+            timeouts += 1;
+            if timeouts > 10 {
+                panic!("mailbox: device host never responded");
+            }
+        }
+    }
+    let result = mailbox_field_read(i, MAILBOX_VALUE_LO);
+    mailbox_state_store(i, MAILBOX_IDLE);
+    result
+}
+
 // ---- rings (eoi_ring per vCPU; jit_dirty ring in the machine block) ----
 //
 // SPSC: the producer owns head, the consumer owns tail. The slot write is
@@ -527,6 +607,26 @@ pub unsafe fn jit_dirty_ring_pop(n: u32) -> Option<i32> {
     ring_pop(
         base() + machine_offset(n) + MACHINE_JIT_DIRTY_RING,
         JIT_DIRTY_RING_CAP,
+    )
+}
+
+/// Push one device-IRQ event (`irq | DEV_IRQ_RAISE_BIT` for a raise, bare
+/// irq number for a lower) onto the topology-(c) device-IRQ ring. SPSC: the
+/// producer is the device host, the consumer the machine worker. False =
+/// full; the JS producer then queues the event and retries after the
+/// consumer drained (events must stay ordered, so nothing may be dropped).
+pub unsafe fn dev_irq_ring_push(n: u32, event: i32) -> bool {
+    ring_push(
+        base() + machine_offset(n) + MACHINE_DEV_IRQ_RING,
+        DEV_IRQ_RING_CAP,
+        event,
+    )
+}
+
+pub unsafe fn dev_irq_ring_pop(n: u32) -> Option<i32> {
+    ring_pop(
+        base() + machine_offset(n) + MACHINE_DEV_IRQ_RING,
+        DEV_IRQ_RING_CAP,
     )
 }
 
@@ -791,6 +891,41 @@ mod tests {
             assert!(!jit_dirty_ring_push(n, 0x999), "65th push must report full");
             assert_eq!(jit_dirty_ring_pop(n), Some(0x100));
             assert!(jit_dirty_ring_push(n, 0x999), "space after one pop");
+        }
+    }
+
+    #[test]
+    fn dev_irq_ring_orders_raise_and_lower() {
+        let n = 1;
+        setup(n);
+        unsafe {
+            assert_eq!(dev_irq_ring_pop(n), None);
+            // a level line's raise/lower/raise sequence must replay in order
+            for event in [
+                (1 | DEV_IRQ_RAISE_BIT) as i32,
+                1,
+                (1 | DEV_IRQ_RAISE_BIT) as i32,
+                (12 | DEV_IRQ_RAISE_BIT) as i32,
+            ] {
+                assert!(dev_irq_ring_push(n, event));
+            }
+            assert_eq!(dev_irq_ring_pop(n), Some((1 | DEV_IRQ_RAISE_BIT) as i32));
+            assert_eq!(dev_irq_ring_pop(n), Some(1));
+            assert_eq!(dev_irq_ring_pop(n), Some((1 | DEV_IRQ_RAISE_BIT) as i32));
+            assert_eq!(dev_irq_ring_pop(n), Some((12 | DEV_IRQ_RAISE_BIT) as i32));
+            assert_eq!(dev_irq_ring_pop(n), None);
+            // full at capacity, space again after one pop
+            for event in 0..DEV_IRQ_RING_CAP as i32 {
+                assert!(dev_irq_ring_push(n, event));
+            }
+            assert!(
+                !dev_irq_ring_push(n, 0x77),
+                "push past capacity must report full"
+            );
+            assert_eq!(dev_irq_ring_pop(n), Some(0));
+            assert!(dev_irq_ring_push(n, 0x77), "space after one pop");
+            // the jit_dirty ring is a distinct region
+            assert_eq!(jit_dirty_ring_pop(n), None);
         }
     }
 

@@ -28,50 +28,78 @@
 //   (`pte_set_accessed_dirty`, hooked in by `write_pte_ad!`, memory.rs).
 
 use crate::cpu::cpu::{
-    read_reg32, translate_address_write, translate_address_write_and_can_skip_dirty,
+    get_seg, read_reg16, read_reg32, test_privileges_for_io, translate_address_read,
+    translate_address_write, translate_address_write_and_can_skip_dirty,
     translate_address_write_jit, virt_boundary_read16, virt_boundary_read32s,
-    virt_boundary_write16, virt_boundary_write32, write_reg32, EAX, EBX, ECX, EDX, FLAG_ZERO,
-    PAGE_TABLE_PRESENT_MASK,
+    virt_boundary_write16, virt_boundary_write32, write_reg32, DX, EAX, EBX, ECX, EDI, EDX, ES,
+    ESI, FLAG_DIRECTION, FLAG_ZERO, PAGE_TABLE_PRESENT_MASK,
 };
 use crate::cpu::global_pointers::{
-    flags, flags_changed, instruction_pointer, last_op1, last_op_size, last_result, prefixes, reg32,
+    flags, flags_changed, instruction_pointer, last_op1, last_op_size, last_result, prefixes,
+    previous_ip, reg32,
 };
 use crate::cpu::memory;
+use crate::cpu::smpctl;
 use crate::jit;
 use crate::page::Page;
 use crate::prefix;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// Interim bus-lock cell (Stage L1; Stage W1 relocates it into the shared
-/// control region, `machine.buslock` — design §2/§5). Serializes the locked
-/// fallback classes (misaligned, page-crossing, MMIO-target LOCK ops)
-/// against each other. L1 predates workers: no second instance of this
-/// module exists yet, so an **instance-local** cell covers all the traffic
-/// that exists today — JS-side contenders race via aligned gram atomics on
-/// guest cells, which by design ignore the bus lock (the documented
-/// split-lock hole of design §5). The acquire/release protocol is already
-/// the cross-instance one W1 needs; only the cell's home moves.
+/// Interim bus-lock cell (Stage L1). Serializes the locked fallback classes
+/// (misaligned, page-crossing, MMIO-target LOCK ops) against each other.
+/// Outside worker mode no second instance of this module executes, so an
+/// **instance-local** cell covers all the traffic that exists — JS-side
+/// contenders race via aligned gram atomics on guest cells, which by design
+/// ignore the bus lock (the documented split-lock hole of design §5).
 static BUS_LOCK: AtomicU32 = AtomicU32::new(0);
 
-/// Acquire the interim bus lock and fence. The compare_exchange can never
-/// actually spin in L1 (single thread; the bus-locked sections neither
-/// re-enter nor unwind), but it is the protocol the control-region cell
-/// keeps. The fence is gram.wasm's real `atomic.fence`:
-/// core::sync::atomic::fence compiles to nothing in this module (built
-/// without the wasm atomics target feature, so LLVM drops singlethread
-/// fences), which is why ordering must be established inside gram.wasm.
+/// Worker mode (Stage W2): set once by the vCPU worker runtime
+/// (vcpu_worker.js) right after `set_smp_cpus`, before any guest code runs.
+/// While set, the bus lock lives in the shared control region
+/// (`machine.buslock`, smpctl.rs) instead of the instance-local cell — the
+/// region provably exists then, because only worker mode sizes the guest
+/// memory with the ctl pages. In topology (c) a single instance executes and
+/// either home would do; (b) needs the shared cell, so the mechanism lands
+/// with the first worker topology (design §9 W1 deferral note).
+static mut WORKER_MODE: bool = false;
+
+#[no_mangle]
+pub unsafe fn set_worker_mode(v: u32) { WORKER_MODE = v != 0 }
+
+pub unsafe fn in_worker_mode() -> bool { WORKER_MODE }
+
+/// Acquire the bus lock and fence. Outside worker mode the instance-local
+/// compare_exchange can never actually spin (single thread; the bus-locked
+/// sections neither re-enter nor unwind), but it is the protocol the
+/// control-region cell keeps — and in worker mode the same CAS protocol
+/// runs against `machine.buslock` through gram's seq-cst cmpxchg. The fence
+/// is gram.wasm's real `atomic.fence`: core::sync::atomic::fence compiles
+/// to nothing in this module (built without the wasm atomics target
+/// feature, so LLVM drops singlethread fences), which is why ordering must
+/// be established inside gram.wasm.
 pub unsafe fn bus_lock_acquire() {
-    while BUS_LOCK
-        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {}
+    if WORKER_MODE {
+        let n = crate::cpu::vcpu::count() as u32;
+        while !smpctl::buslock_try_acquire(n) {}
+    }
+    else {
+        while BUS_LOCK
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {}
+    }
     memory::gram_fence();
 }
 
 pub unsafe fn bus_lock_release() {
     memory::gram_fence();
-    BUS_LOCK.store(0, Ordering::SeqCst);
+    if WORKER_MODE {
+        smpctl::buslock_release(crate::cpu::vcpu::count() as u32);
+    }
+    else {
+        BUS_LOCK.store(0, Ordering::SeqCst);
+    }
 }
 
 /// CAS-retry snapshot. A locked instruction's closure may read and write
@@ -645,4 +673,130 @@ pub unsafe fn safe_write64_locked_slow_jit(
     eip_and_wasm_table_index: i32,
 ) -> i32 {
     locked_write_slow_jit(addr, 64, value, eip_and_wasm_table_index)
+}
+
+// ---- XWAH-9 Phase 4 Stage W2: batched string I/O (topology (c)) ----
+//
+// Under worker mode every io_port_* env call is a blocking mailbox RPC to
+// the device host (~6 µs protocol + wake latency). A guest `rep ins/outs`
+// — IDE/ATAPI PIO data above all — issues one port access per element,
+// which multiplies that cost by the element count (measured: an ISO boot
+// makes ~1.8M io_port_read32 RPCs and blows the W2 boot gate 11×). These
+// helpers collapse one page-bounded rep batch into ONE RPC
+// (MAILBOX_OP_IN_REP/OUT_REP, smpctl.rs): the device host performs the
+// per-element port accesses in exactly the guest's order against the
+// shared guest RAM, so device semantics (streaming data ports, status
+// transitions, IRQs raised mid-batch) are the same as the per-element
+// loop's — only the boundary crossings collapse.
+//
+// Called from the very ends of the ins/outs rep entry points (string.rs);
+// returns false to fall through to the untouched generic string loop.
+// Deliberately conservative: 32-bit address size, direction up, aligned,
+// non-mmap target, count >= 2 — everything else takes the historical path.
+
+/// One page-bounded `rep ins` batch. True = the instruction (or its page
+/// slice, with EIP rewound for re-entry) is fully handled.
+pub unsafe fn ins_rep_batched(is_asize_32: bool, size_bytes: i32) -> bool {
+    if !WORKER_MODE || !is_asize_32 || *flags & FLAG_DIRECTION != 0 {
+        return false;
+    }
+    let count = read_reg32(ECX) as u32;
+    if count < 2 {
+        return false;
+    }
+    let port = read_reg16(DX);
+    if !test_privileges_for_io(port, size_bytes) {
+        // #GP raised inside the check, like the string_instruction path
+        return true;
+    }
+    let es = match get_seg(ES) {
+        Ok(seg) => seg,
+        Err(()) => return true,
+    };
+    let dst = read_reg32(EDI);
+    if (es + dst) & (size_bytes - 1) != 0 {
+        return false;
+    }
+    let (phys_dst, skip_dirty_page) = match translate_address_write_and_can_skip_dirty(es + dst) {
+        Ok(x) => x,
+        Err(()) => return true, // page fault raised
+    };
+    if memory::in_mapped_range(phys_dst) {
+        return false;
+    }
+    let n = u32::min(count, (0x1000 - (phys_dst & 0xFFF)) / size_bytes as u32);
+    if n < 2 {
+        return false;
+    }
+    if !skip_dirty_page {
+        jit::jit_dirty_page(Page::page_of(phys_dst));
+    }
+    // vCPU record 0: topology (c) has exactly one machine worker; (b)
+    // parameterizes this by the worker's vCPU index
+    let done = smpctl::mailbox_rpc(
+        0,
+        smpctl::MAILBOX_OP_IN_REP,
+        port,
+        size_bytes,
+        n as i32,
+        phys_dst as i32,
+    ) as u32;
+    dbg_assert!(done == n);
+    write_reg32(EDI, dst + (n as i32) * size_bytes);
+    write_reg32(ECX, (count - n) as i32);
+    if count != n {
+        // this batch only covered one page: re-enter the instruction for
+        // the rest (the string_instruction fast-path contract)
+        *instruction_pointer = *previous_ip;
+    }
+    true
+}
+
+/// One page-bounded `rep outs` batch; the mirror of `ins_rep_batched`.
+pub unsafe fn outs_rep_batched(is_asize_32: bool, seg: i32, size_bytes: i32) -> bool {
+    if !WORKER_MODE || !is_asize_32 || *flags & FLAG_DIRECTION != 0 {
+        return false;
+    }
+    let count = read_reg32(ECX) as u32;
+    if count < 2 {
+        return false;
+    }
+    let port = read_reg16(DX);
+    if !test_privileges_for_io(port, size_bytes) {
+        return true;
+    }
+    let ds = match get_seg(seg) {
+        Ok(base) => base,
+        Err(()) => return true,
+    };
+    let src = read_reg32(ESI);
+    if (ds + src) & (size_bytes - 1) != 0 {
+        return false;
+    }
+    let phys_src = match translate_address_read(ds + src) {
+        Ok(x) => x,
+        Err(()) => return true,
+    };
+    if memory::in_mapped_range(phys_src) {
+        return false;
+    }
+    let n = u32::min(count, (0x1000 - (phys_src & 0xFFF)) / size_bytes as u32);
+    if n < 2 {
+        return false;
+    }
+    let done = smpctl::mailbox_rpc(
+        0,
+        smpctl::MAILBOX_OP_OUT_REP,
+        port,
+        size_bytes,
+        n as i32,
+        phys_src as i32,
+    ) as u32;
+    dbg_assert!(done == n);
+    write_reg32(ESI, src + (n as i32) * size_bytes);
+    write_reg32(ECX, (count - n) as i32);
+    if count != n {
+        *instruction_pointer = *previous_ip;
+    }
+    true
 }

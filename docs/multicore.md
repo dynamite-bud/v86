@@ -69,7 +69,7 @@ Host parallelism is future work, staged as follows (issue XWAH-9):
 | --- | --- | --- |
 | 0–2 | Groundwork, SMP platform correctness, time-sliced SMP | Landed (this is `cpus: N`) |
 | 3 | Sharable guest RAM (`v86-multimem.wasm` + gram accessor modules) | Landed (this is `guest_memory_backend: "imported"`) |
-| 4 | Worker-per-vCPU execution, LOCK-prefix atomics, IPI doorbells | Not started |
+| 4 | Worker-per-vCPU execution, LOCK-prefix atomics, IPI doorbells | In progress (LOCK atomics and the machine-in-a-worker topology landed — `smp_workers`; per-vCPU workers next) |
 | 5 | Integration: docs, API audit, CI | In progress |
 
 ## The imported guest memory backend
@@ -289,6 +289,42 @@ execution.
 | Interpreter cost on the imported backend | ~1.66× with the JIT disabled (every interpreter guest-RAM access is a cross-instance call). Steady state is ~1.1 % interpreted, so JIT-on workloads see ~1× (non-shared) to ~1.12× (shared) | [smp-phase3-design.md](smp-phase3-design.md) §4 Stage 6; `docs/jit-profile-2026-08.md` (branch `feature/XWAH-11/jit-profiling-baseline`) |
 | Safari multi-memory pending | The multi-memory validation matrix passes on V8 (Node 24) and Chrome 151; Firefox is untested and Safari is the open go/no-go for the imported backend beyond Chromium/Gecko. The probe fails cleanly on unsupported engines | [smp-phase3-design.md](smp-phase3-design.md) §1 S1, §5 |
 | No host parallelism | All vCPUs share one host thread until Phase 4 | issue XWAH-9 |
+
+## Worker execution (experimental)
+
+`smp_workers: true | "auto"` (XWAH-9 Phase 4 Stage W2,
+[smp-phase4-design.md](smp-phase4-design.md) §9) moves guest execution off
+the main thread: the whole machine's vCPUs — the landed time-sliced
+scheduler unchanged — run inside ONE dedicated worker
+(`src/browser/vcpu_worker.js`) over the shared imported guest memory, while
+the main thread becomes the device host. Devices, io.js, and the UI stay on
+main; the worker's blocking port-I/O/MMIO RPCs are serviced over a
+SharedArrayBuffer mailbox, device IRQs travel through an ordered
+raise/lower event ring consumed at the worker's slice boundaries, and
+PIT/RTC/ACPI tick on main while the worker keeps its own LAPIC timer
+deadline. This is topology (c) of the phase design — it buys main-thread
+responsiveness (input, rendering, embedder JS never block on guest
+execution), not yet host parallelism; per-vCPU workers are the next stage.
+
+Requirements (probed; `true` throws, `"auto"` degrades with a debug log):
+WebAssembly multi-memory, `SharedArrayBuffer` (cross-origin isolation in
+browsers), `Worker`, the built-in wasm loader (no `wasm_fn`), and the
+worker entry point reachable at `smp_worker_url` (it is deliberately not
+part of the bundled library). The resolved mode is observable via the
+`"smp-mode"` event / `emulator.smp_mode` property.
+
+Current limitations in worker mode: `save_state`/`restore_state`/
+`initial_state` throw or degrade (cross-worker state assembly lands with
+Stage W4), `multiboot` is unsupported, `get_instruction_counter` reads a
+stale main-thread counter, and the three semantic shifts flagged in the API
+table above (racy `read_memory`, approximate counters, decoupled event
+timing) are now real. Chrome/V8 (incl. Node worker_threads) is the verified
+engine; the Firefox/Safari cells follow the Phase 3 probe matrix. Tested by
+`tests/threads/machine-in-worker.js` (boots Linux with `cpus: 1` and the
+Alpine SMP fixture with `cpus: 2` fully inside the worker, plus
+mailbox-under-load and hlt/wake-race stress) and
+`tests/threads/machine-in-worker-boottime.js` (the ≤ 1.25× boot-time gate
+vs time-sliced execution over the same memory backend).
 
 ## Testing
 

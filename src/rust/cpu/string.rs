@@ -650,16 +650,36 @@ pub unsafe fn scasd_no_rep(is_asize_32: bool) {
     string_instruction(is_asize_32, 0, Instruction::Scas, Size::D, Rep::None)
 }
 
+// The worker-mode string-I/O batch (XWAH-9 Phase 4 Stage W2,
+// cpu/lock.rs): a page-bounded rep ins/outs becomes ONE device-host RPC
+// instead of one io_port_* env call per element. The hook returns false
+// outside worker mode (and for every conservative exclusion), falling
+// through to the untouched generic loop below. NOTE for byte identity:
+// these entry points sit at the end of the file with no panic-location-
+// bearing code after them, so the cfg-gated lines cannot shift any
+// Location recorded in the default artifact.
 #[no_mangle]
 pub unsafe fn outsb_rep(is_asize_32: bool, seg: i32) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::outs_rep_batched(is_asize_32, seg, 1) {
+        return;
+    }
     string_instruction(is_asize_32, seg, Instruction::Outs, Size::B, Rep::Z)
 }
 #[no_mangle]
 pub unsafe fn outsw_rep(is_asize_32: bool, seg: i32) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::outs_rep_batched(is_asize_32, seg, 2) {
+        return;
+    }
     string_instruction(is_asize_32, seg, Instruction::Outs, Size::W, Rep::Z)
 }
 #[no_mangle]
 pub unsafe fn outsd_rep(is_asize_32: bool, seg: i32) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::outs_rep_batched(is_asize_32, seg, 4) {
+        return;
+    }
     string_instruction(is_asize_32, seg, Instruction::Outs, Size::D, Rep::Z)
 }
 #[no_mangle]
@@ -677,14 +697,26 @@ pub unsafe fn outsd_no_rep(is_asize_32: bool, seg: i32) {
 
 #[no_mangle]
 pub unsafe fn insb_rep(is_asize_32: bool) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::ins_rep_batched(is_asize_32, 1) {
+        return;
+    }
     string_instruction(is_asize_32, 0, Instruction::Ins, Size::B, Rep::Z)
 }
 #[no_mangle]
 pub unsafe fn insw_rep(is_asize_32: bool) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::ins_rep_batched(is_asize_32, 2) {
+        return;
+    }
     string_instruction(is_asize_32, 0, Instruction::Ins, Size::W, Rep::Z)
 }
 #[no_mangle]
 pub unsafe fn insd_rep(is_asize_32: bool) {
+    #[cfg(feature = "guest-ram-import")]
+    if crate::cpu::lock::ins_rep_batched(is_asize_32, 4) {
+        return;
+    }
     string_instruction(is_asize_32, 0, Instruction::Ins, Size::D, Rep::Z)
 }
 #[no_mangle]

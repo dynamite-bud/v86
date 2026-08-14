@@ -463,16 +463,35 @@ export interface V86Options {
     guest_memory_shared?: "auto" | boolean;
 
     /**
-     * NOTE: Experimental (XWAH-9 Phase 4), accepted but not yet active.
-     * Requests worker-per-vCPU execution (docs/smp-phase4-design.md). In the
-     * current stage (W1) the option is validated and, with
-     * `guest_memory_backend: "imported"`, sizes the guest memory with the
-     * shared control region; guest execution is unchanged until the worker
-     * topology stage (W2) lands. `true` will be a hard requirement, `"auto"`
-     * a capability-based degrade ladder.
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). Requests worker
+     * execution (docs/smp-phase4-design.md §8/§9): the whole machine's
+     * vCPUs run inside one dedicated worker over the shared imported guest
+     * memory while the main thread serves devices. Forces
+     * `guest_memory_backend: "imported"` with a shared memory. `true` is a
+     * hard requirement — the constructor throws synchronously naming the
+     * missing capability (multi-memory, SharedArrayBuffer/COI, Worker) or
+     * unsupported option combination (`initial_state`, `multiboot`,
+     * `wasm_fn`); `"auto"` degrades down the ladder (workers → time-sliced
+     * over imported memory → time-sliced) with a debug log. The resolved
+     * mode is reported through the `"smp-mode"` event and the `smp_mode`
+     * property. Under worker execution, `save_state`/`restore_state` throw
+     * (state assembly across workers lands with a later stage) and
+     * `get_instruction_counter` reads a stale main-thread counter. See
+     * docs/multicore.md.
      * @default false
      */
     smp_workers?: boolean | "auto";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). URL (or Node path/URL)
+     * of the machine-worker entry point, `src/browser/vcpu_worker.js` — a
+     * standalone module deliberately outside the bundled library. Defaults
+     * to `"src/browser/vcpu_worker.js"` relative to the document (browsers)
+     * or `"./src/browser/vcpu_worker.js"` relative to the working directory
+     * (Node); embedders with a different layout must set it for
+     * `smp_workers` to spawn.
+     */
+    smp_worker_url?: string | URL;
 
     /**
      * The memory size in bytes, should be a power of 2.
@@ -765,6 +784,19 @@ export interface V86Options {
 
 export class V86 {
     constructor(options: V86Options);
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). The resolved SMP
+     * execution mode, set at init-complete (also delivered as the
+     * `"smp-mode"` bus event): where guest code executes, the effective
+     * vCPU count after option clamping, and the guest-memory backing.
+     * `null` until initialization completes.
+     */
+    smp_mode: {
+        execution: "workers" | "time-sliced",
+        cpus_effective: number,
+        guest_memory: { backend: "linear" | "imported", shared: boolean },
+    } | null;
 
     /**
      * Start emulation. Do nothing if emulator is running already. Can be asynchronous.

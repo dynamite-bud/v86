@@ -50,14 +50,27 @@ export const CTL_ROUTING_ENTRY_STRIDE = 0x40;
 export const CTL_MACHINE_TSC_OFFSET = 0x00;
 export const CTL_MACHINE_BUSLOCK = 0x40;
 export const CTL_MACHINE_JIT_DIRTY_RING = 0x80;
-export const CTL_MACHINE_SIZE = 0x1C0;
+export const CTL_MACHINE_DEV_IRQ_RING = 0x1C0;
+export const CTL_MACHINE_SIZE = 0x600;
 export const CTL_JIT_DIRTY_RING_CAP = 64;
+export const CTL_DEV_IRQ_RING_CAP = 256;
 
-// command[i] values (quiesce protocol, design §8)
+// ring layout (jit_dirty and dev_irq rings): head, tail, then the slots
+export const CTL_RING_HEAD = 0x0;
+export const CTL_RING_TAIL = 0x4;
+export const CTL_RING_SLOTS = 0x8;
+
+// dev_irq ring event encoding (topology (c), design §9 W2 note): irq number
+// in the low byte, bit 8 = raise (clear = lower)
+export const CTL_DEV_IRQ_RAISE_BIT = 1 << 8;
+
+// command[i] values (quiesce protocol, design §8; RESET is the W2
+// machine-reboot request, acked by the worker writing RUN back)
 export const CTL_COMMAND_RUN = 0;
 export const CTL_COMMAND_PARK_REQ = 1;
 export const CTL_COMMAND_PARKED_ACK = 2;
 export const CTL_COMMAND_TERMINATE = 3;
+export const CTL_COMMAND_RESET = 4;
 
 // run_state_pub values: RunState (vcpu.rs) plus the published-only Halted
 export const CTL_RUN_STATE_RUNNABLE = 0;
@@ -125,7 +138,7 @@ export function ctl_base_for(memory_size)
 
 // field ids of the get_smpctl_offset probe export (smpctl.rs); the
 // worker-skeleton test iterates over these to prove the two layouts agree
-export const SMPCTL_PROBE_FIELD_COUNT = 14;
+export const SMPCTL_PROBE_FIELD_COUNT = 15;
 
 /**
  * JS twin of the Rust get_smpctl_offset(field, i, n) probe export.
@@ -152,6 +165,7 @@ export function ctl_probe_offset(field, i, n)
         case 11: return ctl_machine_offset(n) + CTL_MACHINE_TSC_OFFSET;
         case 12: return ctl_machine_offset(n) + CTL_MACHINE_BUSLOCK;
         case 13: return ctl_machine_offset(n) + CTL_MACHINE_JIT_DIRTY_RING;
+        case 14: return ctl_machine_offset(n) + CTL_MACHINE_DEV_IRQ_RING;
         default: return -1 >>> 0;
     }
 }
@@ -165,7 +179,7 @@ export function ctl_probe_offset(field, i, n)
 /**
  * Post vCPU i's doorbell: bump the version counter and wake any waiter.
  * Returns the pre-post counter value.
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -180,7 +194,7 @@ export function doorbell_post(i32, ctl_base, i)
 /**
  * Read vCPU i's doorbell counter (the "seen" value a parked worker passes to
  * doorbell_wait).
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -193,7 +207,7 @@ export function doorbell_read(i32, ctl_base, i)
  * Park on vCPU i's doorbell until it moves past `seen` (worker threads only:
  * Atomics.wait throws on a browser main thread). Returns the Atomics.wait
  * outcome string.
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  * @param {number} seen
@@ -205,7 +219,7 @@ export function doorbell_wait(i32, ctl_base, i, seen, timeout_ms)
 }
 
 /**
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  * @param {number} state
@@ -216,7 +230,7 @@ export function run_state_publish(i32, ctl_base, i, state)
 }
 
 /**
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -227,7 +241,7 @@ export function run_state_read(i32, ctl_base, i)
 
 /**
  * Bump vCPU i's wake counter (W1 skeleton liveness diagnostic).
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -237,7 +251,7 @@ export function heartbeat_publish(i32, ctl_base, i)
 }
 
 /**
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -247,7 +261,7 @@ export function heartbeat_read(i32, ctl_base, i)
 }
 
 /**
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  */
@@ -257,7 +271,7 @@ export function command_read(i32, ctl_base, i)
 }
 
 /**
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  * @param {number} command
@@ -270,7 +284,7 @@ export function command_write(i32, ctl_base, i, command)
 /**
  * Acknowledge a command: replace `expected` with `ack` atomically. Returns
  * false when the command word changed in between.
- * @param {Int32Array} i32
+ * @param {!Int32Array} i32
  * @param {number} ctl_base
  * @param {number} i
  * @param {number} expected
@@ -280,6 +294,52 @@ export function command_ack(i32, ctl_base, i, expected, ack)
 {
     const w = ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >> 2;
     return Atomics.compareExchange(i32, w, expected, ack) === expected;
+}
+
+// ---- SPSC rings (jit_dirty and dev_irq, machine block) ----
+//
+// The producer owns head, the consumer owns tail. The slot write is plain;
+// the seq-cst head store publishes it (same rule as the mailbox). Byte base
+// = ctl_base + ctl_machine_offset(n) + CTL_MACHINE_*_RING.
+
+/**
+ * Push one value. Returns false when the ring is full — the caller must
+ * queue and retry, never drop (event order is load-bearing).
+ * @param {!Int32Array} i32
+ * @param {number} ring byte offset of the ring
+ * @param {number} cap
+ * @param {number} value
+ */
+export function ring_push(i32, ring, cap, value)
+{
+    const head = Atomics.load(i32, ring + CTL_RING_HEAD >> 2) >>> 0;
+    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >> 2) >>> 0;
+    if(((head - tail) >>> 0) >= cap)
+    {
+        return false;
+    }
+    i32[ring + CTL_RING_SLOTS + 4 * (head % cap) >> 2] = value;
+    Atomics.store(i32, ring + CTL_RING_HEAD >> 2, head + 1 | 0);
+    return true;
+}
+
+/**
+ * Pop one value, or undefined when the ring is empty.
+ * @param {!Int32Array} i32
+ * @param {number} ring byte offset of the ring
+ * @param {number} cap
+ */
+export function ring_pop(i32, ring, cap)
+{
+    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >> 2) >>> 0;
+    const head = Atomics.load(i32, ring + CTL_RING_HEAD >> 2) >>> 0;
+    if(head === tail)
+    {
+        return undefined;
+    }
+    const value = i32[ring + CTL_RING_SLOTS + 4 * (tail % cap) >> 2];
+    Atomics.store(i32, ring + CTL_RING_TAIL >> 2, tail + 1 | 0);
+    return value;
 }
 
 // ---- mailbox (Layer A RPC protocol, tests/threads/mailbox-protocol.js) ----
@@ -293,8 +353,8 @@ export const MAILBOX_SIZE = 3;
 export const MAILBOX_VALUE_LO = 4;
 export const MAILBOX_VALUE_HI = 5;
 export const MAILBOX_SEQ = 6;
-// W1 extension into the record's reserved area: the upper quadword of
-// mmap_write128 RPCs (W2 finalizes the op surface)
+// Upper quadword of single-record mmap_write128 RPCs (the W2 wide-op
+// surface: SIZE carries the byte width 8/16, VALUE_LO/HI/2/3 the payload)
 export const MAILBOX_VALUE_2 = 7;
 export const MAILBOX_VALUE_3 = 8;
 
@@ -303,11 +363,19 @@ export const MAILBOX_REQUEST = 1;
 export const MAILBOX_RESPONSE = 2;
 
 // op codes: OUT/IN keep the normative Layer A values; mmap ops are the §6
-// worker-runtime additions (SIZE carries the access width in bytes)
+// worker-runtime additions (SIZE carries the access width in bytes);
+// IN_REP/OUT_REP are the W2 batched string-I/O ops — one page-bounded
+// rep ins/outs batch as ONE RPC (ADDR = port, SIZE = element width,
+// VALUE_LO = element count, VALUE_HI = guest-physical buffer; the device
+// host performs the per-element port accesses in order against the shared
+// guest RAM and answers with the element count). The Rust-side client is
+// smpctl.rs mailbox_rpc.
 export const MAILBOX_OP_OUT = 1;
 export const MAILBOX_OP_IN = 2;
 export const MAILBOX_OP_MMAP_READ = 3;
 export const MAILBOX_OP_MMAP_WRITE = 4;
+export const MAILBOX_OP_IN_REP = 5;
+export const MAILBOX_OP_OUT_REP = 6;
 
 /**
  * Word index of vCPU i's mailbox record within the control-region view.
@@ -325,21 +393,31 @@ export function mailbox_record_word(ctl_base, i)
  * Plain field writes, then the seq-cst STATE store publishes them; blocks in
  * Atomics.wait until the device host flips STATE to RESPONSE (worker threads
  * only). Throws on timeout — a dead device host is fail-stop (design §8).
- * @param {Int32Array} ctl the view containing the record
+ * Wide mmap writes are single-record (design §9 W2): a 64-bit write carries
+ * SIZE=8 with VALUE_LO/VALUE_HI, a 128-bit write SIZE=16 with
+ * VALUE_LO/HI/2/3; the device host dispatches them as ordered dword writes
+ * (the historical JS mmap_write64/128 dword split).
+ * @param {!Int32Array} ctl the view containing the record
  * @param {number} record word index of the record (mailbox_record_word)
  * @param {number} op
  * @param {number} addr
  * @param {number} size
  * @param {number} value
  * @param {number} timeout_ms
+ * @param {number=} value_hi
+ * @param {number=} value_2
+ * @param {number=} value_3
  */
-export function mailbox_request(ctl, record, op, addr, size, value, timeout_ms)
+export function mailbox_request(ctl, record, op, addr, size, value, timeout_ms,
+                                value_hi, value_2, value_3)
 {
     ctl[record + MAILBOX_OP] = op;
     ctl[record + MAILBOX_ADDR] = addr;
     ctl[record + MAILBOX_SIZE] = size;
     ctl[record + MAILBOX_VALUE_LO] = value;
-    ctl[record + MAILBOX_VALUE_HI] = 0;
+    ctl[record + MAILBOX_VALUE_HI] = value_hi | 0;
+    ctl[record + MAILBOX_VALUE_2] = value_2 | 0;
+    ctl[record + MAILBOX_VALUE_3] = value_3 | 0;
     Atomics.store(ctl, record + MAILBOX_STATE, MAILBOX_REQUEST);
     Atomics.notify(ctl, record + MAILBOX_STATE);
     while(Atomics.load(ctl, record + MAILBOX_STATE) !== MAILBOX_RESPONSE)
@@ -358,13 +436,13 @@ export function mailbox_request(ctl, record, op, addr, size, value, timeout_ms)
 /**
  * Device-host side: service one pending request, if any. The seq-cst STATE
  * load acquires the requester's plain field writes; `handler(op, addr, size,
- * value_lo, value_hi, seq)` returns the response value for reads and
- * undefined for writes (the record's VALUE_LO is only written when a value
- * is returned, preserving the Layer A byte behavior). Returns true when a
- * request was serviced.
- * @param {Int32Array} ctl
+ * value_lo, value_hi, seq, value_2, value_3)` returns the response value for
+ * reads and undefined for writes (the record's VALUE_LO is only written when
+ * a value is returned, preserving the Layer A byte behavior). Returns true
+ * when a request was serviced.
+ * @param {!Int32Array} ctl
  * @param {number} record
- * @param {function(number, number, number, number, number, number): (number|undefined)} handler
+ * @param {function(number, number, number, number, number, number, number, number): (number|undefined)} handler
  */
 export function mailbox_service(ctl, record, handler)
 {
@@ -378,7 +456,9 @@ export function mailbox_service(ctl, record, handler)
         ctl[record + MAILBOX_SIZE],
         ctl[record + MAILBOX_VALUE_LO],
         ctl[record + MAILBOX_VALUE_HI],
-        ctl[record + MAILBOX_SEQ]);
+        ctl[record + MAILBOX_SEQ],
+        ctl[record + MAILBOX_VALUE_2],
+        ctl[record + MAILBOX_VALUE_3]);
     if(result !== undefined)
     {
         ctl[record + MAILBOX_VALUE_LO] = result | 0;
@@ -393,7 +473,7 @@ export function mailbox_service(ctl, record, handler)
  * (the main thread must never block). A stale snapshot resolves immediately
  * ("not-equal") and the caller just re-inspects. Resolves to false on
  * timeout, true otherwise.
- * @param {Int32Array} ctl
+ * @param {!Int32Array} ctl
  * @param {number} record
  * @param {number} timeout_ms
  */
