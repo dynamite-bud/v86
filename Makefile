@@ -462,6 +462,7 @@ rust-test-intensive:
 .PHONY: threads-test
 threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/atomics-exactness.js
+	./tests/threads/guest-lock-exactness.js
 	./tests/threads/mailbox-protocol.js
 	./tests/threads/multimem-instance.js
 	./tests/threads/plain-race-vs-atomic.js
@@ -479,6 +480,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
 	./tests/api/multimem-negative.js
 	./tests/api/multimem.js
+	./tests/threads/guest-lock-exactness.js
 	./tests/threads/multimem-instance.js
 
 api-tests: build/v86-debug.wasm filesystem-unit-test

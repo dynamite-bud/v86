@@ -38,6 +38,24 @@
 //       compare-and-swap returning the OLD value; same alignment rule. The
 //       8/16-bit forms compare against the zero-extended low bits of
 //       `expected` (wasm rmw.cmpxchg_u semantics).
+//   gram_atomic_rmw_cmpxchg_64(addr: i32, expected: i64, replacement: i64) -> i64
+//       64-bit compare-and-swap returning the OLD value; addr must be
+//       8-byte aligned (Phase 4 Stage L1: locked CMPXCHG8B).
+//   gram_atomic_load_32(addr: i32) -> i32     seq-cst load; addr 4-aligned
+//   gram_atomic_store_32(addr: i32, value: i32)  seq-cst store; addr 4-aligned
+//   gram_notify(addr: i32, count: i32) -> i32
+//       memory.atomic.notify: wakes up to `count` agents waiting on the
+//       4-aligned address, returning how many were woken. Validates and
+//       runs on both variants (no waiter can exist on a non-shared memory,
+//       so it always returns 0 there).
+//   gram_wait32(addr: i32, expected: i32, timeout_ns: i64) -> i32
+//       memory.atomic.wait32: blocks until notified, mismatched, or timed
+//       out (negative timeout = infinite); returns 0 "ok" / 1 "not-equal" /
+//       2 "timed-out". Generated in BOTH variants (the opcode validates on
+//       unshared memories under the threads-spec relaxation), but at
+//       runtime waiting is shared-only: on a non-shared memory the
+//       instruction traps (it could never be woken). Callers must also be
+//       agents that may block (workers; browser main threads throw).
 //   gram_fence()                              atomic.fence (seq-cst)
 //
 // Decisions, verified empirically (spike S1 and tests/rust/verify-gram-wasm.js):
@@ -124,7 +142,12 @@ const MEMORY_COPY = 0x0a;
 const MEMORY_FILL = 0x0b;
 
 const FE_PREFIX = 0xfe;
+const ATOMIC_NOTIFY = 0x00;
+const ATOMIC_WAIT32 = 0x01;
 const ATOMIC_FENCE = 0x03;
+const I32_ATOMIC_LOAD = 0x10;
+const I32_ATOMIC_STORE = 0x17;
+const I64_ATOMIC_RMW_CMPXCHG = 0x49;
 // i32.atomic.rmw*.<op>: base opcode of each 7-opcode group, plus the offset
 // selecting the i32 form for the access size
 const ATOMIC_RMW_BASE = { add: 0x1e, sub: 0x25, and: 0x2c, or: 0x33, xor: 0x3a, xchg: 0x41, cmpxchg: 0x48 };
@@ -237,6 +260,22 @@ for(const op of ["add", "sub", "and", "or", "xor", "xchg", "cmpxchg"])
         }
     }
 }
+
+// Phase 4 Stage L1 additions (docs/smp-phase4-design.md §2/§5): 64-bit CAS
+// for locked CMPXCHG8B, seq-cst 32-bit load/store, and the notify/wait pair
+// the worker stages park on.
+fn("gram_atomic_rmw_cmpxchg_64", [TYPE_I32, TYPE_I64, TYPE_I64], [TYPE_I64],
+    [LOCAL_GET, 0, LOCAL_GET, 1, LOCAL_GET, 2, FE_PREFIX, I64_ATOMIC_RMW_CMPXCHG, ...memarg(3, 0)]);
+fn("gram_atomic_load_32", [TYPE_I32], [TYPE_I32],
+    [LOCAL_GET, 0, FE_PREFIX, I32_ATOMIC_LOAD, ...memarg(2, 0)]);
+fn("gram_atomic_store_32", [TYPE_I32, TYPE_I32], [],
+    [LOCAL_GET, 0, LOCAL_GET, 1, FE_PREFIX, I32_ATOMIC_STORE, ...memarg(2, 0)]);
+fn("gram_notify", [TYPE_I32, TYPE_I32], [TYPE_I32],
+    [LOCAL_GET, 0, LOCAL_GET, 1, FE_PREFIX, ATOMIC_NOTIFY, ...memarg(2, 0)]);
+// wait32 validates on both variants but traps at runtime on the non-shared
+// one (see the ABI comment above)
+fn("gram_wait32", [TYPE_I32, TYPE_I32, TYPE_I64], [TYPE_I32],
+    [LOCAL_GET, 0, LOCAL_GET, 1, LOCAL_GET, 2, FE_PREFIX, ATOMIC_WAIT32, ...memarg(2, 0)]);
 
 fn("gram_fence", [], [], [FE_PREFIX, ATOMIC_FENCE, 0x00]);
 

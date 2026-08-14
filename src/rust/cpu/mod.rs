@@ -7,6 +7,8 @@ pub mod global_pointers;
 pub mod instructions;
 pub mod instructions_0f;
 pub mod ioapic;
+#[cfg(feature = "guest-ram-import")]
+pub mod lock;
 pub mod memory;
 pub mod misc_instr;
 pub mod modrm;

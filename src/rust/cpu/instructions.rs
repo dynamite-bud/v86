@@ -824,11 +824,29 @@ pub unsafe fn instr32_85_mem(addr: i32, r: i32) {
     test32(return_on_pagefault!(safe_read32s(addr)), read_reg32(r));
 }
 pub unsafe fn instr32_85_reg(r1: i32, r: i32) { test32(read_reg32(r1), read_reg32(r)); }
+// XCHG mem is implicitly locked regardless of an explicit LOCK prefix
+// (design doc §5): the multimem twins force the locked safe_read_write
+// path (cpu::lock).
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn instr_86_mem(addr: i32, r: i32) { safe_read_write8(addr, &|x| xchg8(x, r)) }
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn instr_86_mem(addr: i32, r: i32) {
+    crate::cpu::lock::safe_read_write8_locked(addr, &|x| xchg8(x, r))
+}
 pub unsafe fn instr_86_reg(r1: i32, r: i32) { write_reg8(r1, xchg8(read_reg8(r1), r)); }
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn instr16_87_mem(addr: i32, r: i32) { safe_read_write16(addr, &|x| xchg16(x, r)) }
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn instr16_87_mem(addr: i32, r: i32) {
+    crate::cpu::lock::safe_read_write16_locked(addr, &|x| xchg16(x, r))
+}
 pub unsafe fn instr16_87_reg(r1: i32, r: i32) { write_reg16(r1, xchg16(read_reg16(r1), r)); }
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn instr32_87_mem(addr: i32, r: i32) { safe_read_write32(addr, &|x| xchg32(x, r)) }
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn instr32_87_mem(addr: i32, r: i32) {
+    crate::cpu::lock::safe_read_write32_locked(addr, &|x| xchg32(x, r))
+}
 pub unsafe fn instr32_87_reg(r1: i32, r: i32) { write_reg32(r1, xchg32(read_reg32(r1), r)); }
 pub unsafe fn instr_88_reg(r2: i32, r: i32) { write_reg8(r2, read_reg8(r)); }
 pub unsafe fn instr_88_mem(addr: i32, r: i32) {
@@ -2140,9 +2158,12 @@ pub unsafe fn instr_F0() {
     if false {
         dbg_log!("lock");
     }
-    // TODO
-    // This triggers UD when used with
-    // some instructions that don't write to memory
+    // The multimem build (guest-ram-import) reads the prefix downstream:
+    // the LOCKable _mem forms lower to gram atomics and the generated
+    // dispatch #UDs their _reg twins (crate::ud_if_lock_prefix!, Phase 4
+    // Stage L1). The default build still discards the prefix silently.
+    // Remaining fidelity gap in both builds: LOCK on instructions outside
+    // the LOCKable set (e.g. MOV, shifts) should also #UD.
     *prefixes |= prefix::PREFIX_LOCK;
     run_prefix_instruction();
     *prefixes = 0;
@@ -2512,3 +2533,11 @@ pub unsafe fn instr32_FF_6_mem(addr: i32) {
 pub unsafe fn instr32_FF_6_reg(r1: i32) {
     return_on_pagefault!(push32(read_reg32(r1)));
 }
+
+// Stage L1 (XWAH-9 Phase 4): under the multimem build the LOCK-aware
+// safe_read_write twins in cpu::lock shadow the plain cpu::cpu versions
+// for every caller in this file (an explicit import takes precedence over
+// the `cpu::cpu::*` glob above). Lives at the end of the file so the
+// default build's panic-Location line numbers stay byte-identical.
+#[cfg(feature = "guest-ram-import")]
+use crate::cpu::lock::{safe_read_write16, safe_read_write32, safe_read_write8};

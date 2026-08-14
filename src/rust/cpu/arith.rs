@@ -1021,6 +1021,7 @@ pub unsafe fn bt_mem(virt_addr: i32, mut bit_offset: i32) {
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
     *flags_changed &= !1;
 }
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
     let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
     let bit_base = memory::read8(phys_addr);
@@ -1029,6 +1030,7 @@ pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
     *flags_changed &= !1;
     memory::write8(phys_addr, bit_base ^ 1 << bit_offset);
 }
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
     let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
     let bit_base = memory::read8(phys_addr);
@@ -1037,6 +1039,7 @@ pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
     *flags_changed &= !1;
     memory::write8(phys_addr, bit_base & !(1 << bit_offset));
 }
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
     let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
     let bit_base = memory::read8(phys_addr);
@@ -1044,6 +1047,80 @@ pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
     *flags = *flags & !1 | bit_base >> bit_offset & 1;
     *flags_changed &= !1;
     memory::write8(phys_addr, bit_base | 1 << bit_offset);
+}
+
+// Multimem twins of the BTC/BTR/BTS mem forms (XWAH-9 Phase 4 Stage L1,
+// design §5): the locked byte RMW is one seq-cst gram xor/and/or — a single
+// byte is always naturally aligned — with CF computed from the returned old
+// value. Locked MMIO targets take the interim bus lock around the plain
+// body; unlocked calls keep the plain body (in sync with the defaults
+// above).
+
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
+    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    bit_offset &= 7;
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        if !memory::in_mapped_range(phys_addr) {
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
+            let bit_base = memory::gram_atomic_rmw_xor_8(phys_addr, 1 << bit_offset);
+            *flags = *flags & !1 | bit_base >> bit_offset & 1;
+            *flags_changed &= !1;
+            return;
+        }
+        crate::cpu::lock::bus_lock_acquire();
+    }
+    let bit_base = memory::read8(phys_addr);
+    *flags = *flags & !1 | bit_base >> bit_offset & 1;
+    *flags_changed &= !1;
+    memory::write8(phys_addr, bit_base ^ 1 << bit_offset);
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        crate::cpu::lock::bus_lock_release();
+    }
+}
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
+    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    bit_offset &= 7;
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        if !memory::in_mapped_range(phys_addr) {
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
+            let bit_base = memory::gram_atomic_rmw_and_8(phys_addr, !(1 << bit_offset) & 0xFF);
+            *flags = *flags & !1 | bit_base >> bit_offset & 1;
+            *flags_changed &= !1;
+            return;
+        }
+        crate::cpu::lock::bus_lock_acquire();
+    }
+    let bit_base = memory::read8(phys_addr);
+    *flags = *flags & !1 | bit_base >> bit_offset & 1;
+    *flags_changed &= !1;
+    memory::write8(phys_addr, bit_base & !(1 << bit_offset));
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        crate::cpu::lock::bus_lock_release();
+    }
+}
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
+    let phys_addr = return_on_pagefault!(translate_address_write(virt_addr + (bit_offset >> 3)));
+    bit_offset &= 7;
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        if !memory::in_mapped_range(phys_addr) {
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
+            let bit_base = memory::gram_atomic_rmw_or_8(phys_addr, 1 << bit_offset);
+            *flags = *flags & !1 | bit_base >> bit_offset & 1;
+            *flags_changed &= !1;
+            return;
+        }
+        crate::cpu::lock::bus_lock_acquire();
+    }
+    let bit_base = memory::read8(phys_addr);
+    *flags = *flags & !1 | bit_base >> bit_offset & 1;
+    *flags_changed &= !1;
+    memory::write8(phys_addr, bit_base | 1 << bit_offset);
+    if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
+        crate::cpu::lock::bus_lock_release();
+    }
 }
 
 #[no_mangle]

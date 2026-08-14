@@ -555,6 +555,37 @@ mod gram_ext {
         pub fn gram_memset(addr: u32, value: i32, count: u32);
         pub fn gram_memcpy(src_addr: u32, dst_addr: u32, count: u32);
 
+        // Atomic accessors (Phase 4 Stage L1, design doc §5): seq-cst wasm
+        // atomics executed inside gram.wasm over the guest memory. Addresses
+        // must be naturally aligned for the access size or the engine traps
+        // — callers (the locked interpreter paths in cpu.rs) split off
+        // misaligned/page-crossing targets to the interim bus lock first.
+        // RMW ops return the OLD value (zero-extended for the 8-bit forms).
+        pub fn gram_atomic_load_32(addr: u32) -> i32;
+        #[allow(dead_code)] // consumer lands with the worker stages (W1+)
+        pub fn gram_atomic_store_32(addr: u32, value: i32);
+        pub fn gram_atomic_rmw_or_8(addr: u32, value: i32) -> i32;
+        pub fn gram_atomic_rmw_and_8(addr: u32, value: i32) -> i32;
+        pub fn gram_atomic_rmw_xor_8(addr: u32, value: i32) -> i32;
+        pub fn gram_atomic_rmw_cmpxchg_8(addr: u32, expected: i32, replacement: i32) -> i32;
+        pub fn gram_atomic_rmw_cmpxchg_16(addr: u32, expected: i32, replacement: i32) -> i32;
+        pub fn gram_atomic_rmw_cmpxchg_32(addr: u32, expected: i32, replacement: i32) -> i32;
+        pub fn gram_atomic_rmw_cmpxchg_64(addr: u32, expected: u64, replacement: u64) -> u64;
+
+        // Real `atomic.fence` (seq-cst). This module is built WITHOUT the
+        // wasm atomics target feature (phase-3 design Addendum 2 item 1),
+        // where core::sync::atomic::fence lowers to nothing (singlethread
+        // fences are dropped), so ordering-bearing fences must execute
+        // inside gram.wasm, which is assembled with atomic opcodes.
+        pub fn gram_fence();
+
+        // memory.atomic.notify / wait32 (W1+ consumers; see the gram ABI
+        // header for the runtime shared-only rule on wait32).
+        #[allow(dead_code)]
+        pub fn gram_notify(addr: u32, count: i32) -> i32;
+        #[allow(dead_code)]
+        pub fn gram_wait32(addr: u32, expected: i32, timeout_ns: i64) -> i32;
+
         // NOT implemented by gram.wasm (a single-memory module over guest
         // RAM cannot address this module's memory): JS provides it as a
         // typed-array copy from the guest memory's buffer into this
@@ -687,4 +718,134 @@ pub unsafe fn gram_memcpy(src_addr: u32, dst_addr: u32, count: u32) {
 #[inline(always)]
 pub unsafe fn gram_copy_out(src_addr: u32, dst: *mut u8, count: u32) {
     gram_ext::gram_copy_out(src_addr, dst, count)
+}
+
+// Atomic gram accessors (Phase 4 Stage L1). All seq-cst, naturally-aligned
+// only (the engine traps otherwise); RMW forms return the OLD value. See
+// the gram_ext extern block for the full contract.
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_load_32(addr: u32) -> i32 { gram_ext::gram_atomic_load_32(addr) }
+
+#[cfg(feature = "guest-ram-import")]
+#[allow(dead_code)] // consumer lands with the worker stages (W1+)
+#[inline(always)]
+pub unsafe fn gram_atomic_store_32(addr: u32, value: i32) {
+    gram_ext::gram_atomic_store_32(addr, value)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_or_8(addr: u32, value: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_or_8(addr, value)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_and_8(addr: u32, value: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_and_8(addr, value)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_xor_8(addr: u32, value: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_xor_8(addr, value)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_cmpxchg_8(addr: u32, expected: i32, replacement: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_cmpxchg_8(addr, expected, replacement)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_cmpxchg_16(addr: u32, expected: i32, replacement: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_cmpxchg_16(addr, expected, replacement)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_cmpxchg_32(addr: u32, expected: i32, replacement: i32) -> i32 {
+    gram_ext::gram_atomic_rmw_cmpxchg_32(addr, expected, replacement)
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_atomic_rmw_cmpxchg_64(addr: u32, expected: u64, replacement: u64) -> u64 {
+    gram_ext::gram_atomic_rmw_cmpxchg_64(addr, expected, replacement)
+}
+
+/// Seq-cst `atomic.fence`, executed inside gram.wasm (this module's own
+/// core::sync::atomic::fence lowers to nothing without the wasm atomics
+/// target feature — see the gram_ext comment).
+#[cfg(feature = "guest-ram-import")]
+#[inline(always)]
+pub unsafe fn gram_fence() { gram_ext::gram_fence() }
+
+#[cfg(feature = "guest-ram-import")]
+#[allow(dead_code)] // consumer lands with the worker stages (W1+)
+#[inline(always)]
+pub unsafe fn gram_notify(addr: u32, count: i32) -> i32 { gram_ext::gram_notify(addr, count) }
+
+/// Runtime rule: shared guest memory only (traps on non-shared), from an
+/// agent that may block — see the gram ABI header.
+#[cfg(feature = "guest-ram-import")]
+#[allow(dead_code)] // consumer lands with the worker stages (W1+)
+#[inline(always)]
+pub unsafe fn gram_wait32(addr: u32, expected: i32, timeout_ns: i64) -> i32 {
+    gram_ext::gram_wait32(addr, expected, timeout_ns)
+}
+
+// ---- Stage L1 line-neutral hook macros (XWAH-9 Phase 4) ----
+//
+// These follow the gram accessor macro discipline above: the default arm
+// expands to exactly the historical tokens, so the default artifact stays
+// byte-identical, and the hook call replaces a single line at the call
+// site so the panic-Location records (file/line/column) of the surrounding
+// default code do not move either. The feature arm routes into
+// cpu::lock (see src/rust/cpu/lock.rs).
+
+/// do_page_walk's A/D write: the default build writes the low byte of the
+/// already-computed entry as it always has; the multimem build runs the
+/// PRESENT-rechecking cmpxchg loop (design §5).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! write_pte_ad {
+    ($entry_addr:expr, $new_entry:expr) => {
+        memory::write8($entry_addr, $new_entry)
+    };
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! write_pte_ad {
+    ($entry_addr:expr, $new_entry:expr) => {
+        $crate::cpu::lock::pte_set_accessed_dirty($entry_addr, $new_entry)
+    };
+}
+
+/// The first statement of `instr16_0FC7_1_mem` (CMPXCHG8B): the default
+/// build keeps the historical writability check; the multimem build
+/// additionally dispatches LOCKed executions to cpu::lock::cmpxchg8b_locked
+/// (single gram cmpxchg_64 when 8-aligned and non-mmap, interim bus lock
+/// otherwise), returning early when handled.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! cmpxchg8b_prologue {
+    ($addr:expr) => {
+        return_on_pagefault!(writable_or_pagefault($addr, 8))
+    };
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! cmpxchg8b_prologue {
+    ($addr:expr) => {
+        return_on_pagefault!(writable_or_pagefault($addr, 8));
+        if $crate::cpu::lock::cmpxchg8b_locked($addr) {
+            return;
+        }
+    };
 }
