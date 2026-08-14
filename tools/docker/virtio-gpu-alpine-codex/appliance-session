@@ -46,6 +46,8 @@ if grep -qw 'v86_gpu_shader=1' /proc/cmdline; then
     exec tail -f /dev/null
 fi
 if grep -qw 'v86_gpu_resources=1' /proc/cmdline; then
+    LD_LIBRARY_PATH=/usr/lib \
+    LIBGL_DRIVERS_PATH=/usr/lib/dri \
     /usr/local/bin/virtio-gpu-triangle --shader-v3 >&3 2>&3 || fail shader-v3-resources
     exec tail -f /dev/null
 fi

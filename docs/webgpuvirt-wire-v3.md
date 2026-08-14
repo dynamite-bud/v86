@@ -149,6 +149,20 @@ Every render submit is completely validated before creating a command encoder or
 
 ## Proving workload
 
-`make virtio-gpu-webgpuvirt-triangle-test` owns port 8082 and proves the version-3 contract in real Chromium. The i386 guest first renders a deterministic textured/blended triangle with Mesa llvmpipe as the software reference. It then creates a host render target, two vertex buffers, an index buffer, a sampled texture, and a uniform buffer through standard Linux/libdrm ioctls; uploads GEM backing; submits two SPIR-V modules, a two-slot vertex layout, three bindings, and one indexed draw; presents the result through the existing scanout; and checks matching red-center/blue-corner pixels. Acceptance also requires zero invalid commands, backend failures, WebGPU validation errors, and leaked objects after device-loss recovery.
+`make virtio-gpu-webgpuvirt-triangle-test` owns port 8082 and proves the
+version-3 contract in real Chromium. The i386 guest first renders a
+deterministic textured/blended triangle with Mesa llvmpipe as the software
+reference. It then creates a host render target, two vertex buffers, an index
+buffer, a sampled texture, and a uniform buffer through standard Linux/libdrm
+ioctls; uploads GEM backing; submits two SPIR-V modules, a two-slot vertex
+layout, three bindings, and one indexed draw; presents the result through the
+existing scanout; and checks matching red-center/blue-corner pixels.
+Acceptance also requires zero invalid commands, backend failures, WebGPU
+validation errors, and leaked objects after device-loss recovery.
 
-This is a transport and renderer proof, not the Mesa `webgpuvirt` Gallium driver. Normal appliance and direct-JavaScript configurations remain 2D-only; the accelerated Ghostty path remains opt-in and incomplete.
+This remains the transport and renderer proof. The separate
+`make virtio-gpu-codex-accelerated-test` gate exercises the checksum-locked
+Mesa `webgpuvirt` winsys, measured virgl command translation, and Ghostty
+OpenGL startup. The default appliance and direct JavaScript backend remain
+2D-only; acceleration is explicit and available only with Rust/Wasm `wgpu`.
+Neither gate claims general virgl, GLSL, Vulkan, or OpenGL compatibility.
