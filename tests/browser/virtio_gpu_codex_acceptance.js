@@ -16,8 +16,8 @@ const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
 assert.ok(
-    ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark"]
-        .includes(SCENARIO),
+    ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark",
+        "benchmark-accelerated"].includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
@@ -180,9 +180,10 @@ async function run_scenario(browser_ws, base_url, renderer)
         else if(SCENARIO === "mesa") url.searchParams.set("mesa", "1");
         else if(SCENARIO === "accelerated") url.searchParams.set("accelerated", "1");
         else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
-        else if(SCENARIO === "benchmark")
+        else if(SCENARIO === "benchmark" || SCENARIO === "benchmark-accelerated")
         {
             url.searchParams.set("benchmark", "1");
+            if(SCENARIO === "benchmark-accelerated") url.searchParams.set("accelerated", "1");
             if(BENCHMARK_MACHINE) url.searchParams.set("benchmark_machine", BENCHMARK_MACHINE);
         }
         await cdp.call("Page.navigate", { url: url.href });
@@ -505,7 +506,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 leaked_3d_objects: recovery.contexts + recovery.resources + recovery.attachments,
             };
         }
-        if(SCENARIO === "benchmark")
+        if(SCENARIO === "benchmark" || SCENARIO === "benchmark-accelerated")
         {
             await wait_for(async() => {
                 const benchmark = await evaluate(cdp,
@@ -522,8 +523,10 @@ async function run_scenario(browser_ws, base_url, renderer)
                 "window.virtioGpuBenchmark.result");
             assert.equal(benchmark.schema_version, 1);
             assert.equal(benchmark.scenario.renderer, renderer);
-            assert.equal(benchmark.scenario.guest_renderer, "llvmpipe");
-            assert.equal(benchmark.scenario.accelerated_3d, false);
+            const accelerated = SCENARIO === "benchmark-accelerated";
+            assert.equal(benchmark.scenario.guest_renderer,
+                accelerated ? "webgpuvirt" : "llvmpipe");
+            assert.equal(benchmark.scenario.accelerated_3d, accelerated);
             assert.equal(benchmark.method.warmup_runs, 2);
             assert.equal(benchmark.method.measured_runs, 5);
             assert.equal(benchmark.raw_runs.length, 5);
