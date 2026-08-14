@@ -45,7 +45,23 @@ if grep -qw 'v86_gpu_shader=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-triangle --shader-v2 >&3 2>&3 || fail shader-v2
     exec tail -f /dev/null
 fi
-
+if grep -qw 'v86_gpu_resources=1' /proc/cmdline; then
+    /usr/local/bin/virtio-gpu-triangle --shader-v3 >&3 2>&3 || fail shader-v3-resources
+    exec tail -f /dev/null
+fi
+if grep -qw 'v86_gpu_mesa=1' /proc/cmdline; then
+    printf '%s\n' '<driconf><device><application name="v86 webgpuvirt triangle" executable="virtio-gpu-triangle"><option name="always_have_depth_buffer" value="false"/></application></device></driconf>' > "$HOME/.drirc"
+    LD_LIBRARY_PATH=/usr/local/lib \
+    LIBGL_DRIVERS_PATH=/usr/local/lib/dri \
+    LIBGL_DEBUG=verbose \
+    EGL_LOG_LEVEL=debug \
+    MESA_DEBUG=1 \
+    MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu \
+    V86_MESA_WEBGPUVIRT=1 \
+        /usr/local/bin/virtio-gpu-triangle --shader-v3 >&3 2>&3 ||
+        fail mesa-webgpuvirt
+    exec tail -f /dev/null
+fi
 
 if grep -qw 'v86_gpu_triangle=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-triangle >&3 2>&3 || fail triangle
@@ -70,8 +86,23 @@ export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CURRENT_DESKTOP=OPENBOX
 export XDG_SESSION_DESKTOP=openbox
 export XDG_SESSION_TYPE=x11
-export LIBGL_ALWAYS_SOFTWARE=1
-export GSK_RENDERER=gl
+if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
+    printf '%s\n' '<driconf><device><application name="Ghostty webgpuvirt" executable="ghostty"><option name="always_have_depth_buffer" value="false"/></application></device></driconf>' > "$HOME/.drirc"
+    export LD_LIBRARY_PATH=/usr/local/lib
+    export LIBGL_DRIVERS_PATH=/usr/local/lib/dri
+    export MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu
+    export GDK_DISABLE=egl
+    export MESA_GL_VERSION_OVERRIDE=4.3
+    export MESA_GLSL_VERSION_OVERRIDE=430
+    export GSK_RENDERER=cairo
+    unset LIBGL_ALWAYS_SOFTWARE
+else
+    export LD_LIBRARY_PATH=/usr/lib
+    export LIBGL_DRIVERS_PATH=/usr/lib/dri
+    unset MESA_LOADER_DRIVER_OVERRIDE
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GSK_RENDERER=gl
+fi
 
 benchmark_mode=false
 if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then

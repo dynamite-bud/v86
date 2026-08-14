@@ -6,6 +6,10 @@ benchmark_mode=false
 if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
     benchmark_mode=true
 fi
+renderer_pattern=llvmpipe
+if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
+    renderer_pattern=webgpuvirt
+fi
 
 
 attempt=0
@@ -15,7 +19,8 @@ while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
 done
 
-if glxinfo -B >/tmp/v86-glxinfo.log 2>&1 && grep -qi llvmpipe /tmp/v86-glxinfo.log; then
+if glxinfo -B >/tmp/v86-glxinfo.log 2>&1 &&
+   grep -qi "$renderer_pattern" /tmp/v86-glxinfo.log; then
     touch /tmp/v86-appliance-gl-ready
 else
     cat /tmp/v86-openbox.log >>/tmp/v86-appliance.log
