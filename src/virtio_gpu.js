@@ -2183,12 +2183,12 @@ function create_webgpu_capset(capabilities, version)
         view.setUint32(format_offset + V86_WEBGPU_CAPSET_FORMAT_STRIDE,
             VIRTIO_GPU_FORMAT_R8_UNORM, true);
         view.setUint32(format_offset + V86_WEBGPU_CAPSET_FORMAT_STRIDE + 4,
-            (1 << 0) | (1 << 3) | (1 << 4) | (1 << 6), true);
+            (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 6), true);
         view.setUint32(format_offset + V86_WEBGPU_CAPSET_FORMAT_STRIDE + 8, 1, true);
         view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE,
             VIRTIO_GPU_FORMAT_R8_UINT, true);
         view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE + 4,
-            (1 << 0) | (1 << 3) | (1 << 4) | (1 << 6), true);
+            (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 6), true);
         view.setUint32(format_offset + 2 * V86_WEBGPU_CAPSET_FORMAT_STRIDE + 8, 1, true);
         view.setUint32(180, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);
         view.setUint32(184, V86_WEBGPU_CAPSET_MAX_COMPILATIONS, true);

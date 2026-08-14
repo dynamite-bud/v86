@@ -22,8 +22,8 @@ The payload is 912 bytes. Version 3 changes or defines these fields:
 | 108 | `le32` | eight vertex attributes per pipeline |
 | 128 | `le64` | maximum buffer size: 4194304 bytes |
 | 144 | format record | format 67 (`R8G8B8A8_UNORM`), usage `0x7b`, sample count bit `0x1` |
-| 156 | format record | format 64 (`R8_UNORM`), usage `0x59`, sample count bit `0x1` |
-| 168 | format record | format 177 (`R8_UINT`), usage `0x59`, sample count bit `0x1` |
+| 156 | format record | format 64 (`R8_UNORM`), usage `0x5b`, sample count bit `0x1` |
+| 168 | format record | format 177 (`R8_UINT`), usage `0x5b`, sample count bit `0x1` |
 | 180 | `le32` | one global in-flight compilation |
 | 184 | `le32` | one in-flight compilation per context |
 | 188 | `le32` | pipeline-compilation timeout: 5000 ms |
@@ -44,6 +44,10 @@ Version 3 accepts these standard `RESOURCE_CREATE_3D` shapes:
 
 - buffers: target 0, format 64 (`R8_UNORM` as the byte-addressable wire format), `width == byte_length`, unit height/depth/array/sample/level, and a nonempty subset of bind bits `0x4054`;
 - textures: target 2 or 5, a listed texture format, unit depth/array/sample/level, and a nonempty subset of render-target, sampler-view, and scanout bind bits.
+Format 177 (`R8_UINT`) is the measured Ghostty glyph-atlas compatibility
+record. The renderer stores it as WebGPU `r8unorm`, and the bounded translated
+shader consumes normalized alpha. This does not advertise general integer
+texture or integer-sampling semantics.
 
 The renderer allocates buffer resources with WebGPU `COPY_SRC`, `COPY_DST`, `VERTEX`, `UNIFORM`, and `STORAGE` usage. The private record still determines how a buffer may be consumed. Standard `TRANSFER_TO_HOST_3D` uploads the attached GEM backing. Buffer uploads must be four-byte aligned and contiguous. Texture rows are repacked to WebGPU's row alignment when necessary. Linux 6.18 requires zero `stride` and `layer_stride` for these non-blob GEM resources; width and format determine the effective stride.
 
