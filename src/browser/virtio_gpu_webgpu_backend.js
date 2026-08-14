@@ -113,32 +113,32 @@ export class JsWebGpuRenderer
         {
             throw new Error("The canvas cannot create a WebGPU context");
         }
-        const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+        const adapter = await gpu["requestAdapter"]({ powerPreference: "high-performance" });
         if(!adapter)
         {
             throw new Error("No WebGPU adapter can present to the canvas");
         }
-        const device = await adapter.requestDevice({ requiredFeatures: [], requiredLimits: {} });
+        const device = await adapter["requestDevice"]({ requiredFeatures: [], requiredLimits: {} });
         const texture_usage = globalThis["GPUTextureUsage"];
         const buffer_usage = globalThis["GPUBufferUsage"];
         if(!texture_usage || !buffer_usage)
         {
-            device.destroy();
+            device["destroy"]();
             throw new Error("WebGPU usage constants are unavailable");
         }
 
-        const format = gpu.getPreferredCanvasFormat();
-        const sampler = device.createSampler({
+        const format = gpu["getPreferredCanvasFormat"]();
+        const sampler = device["createSampler"]({
             label: "v86 virtio-gpu direct sampler",
             magFilter: "nearest",
             minFilter: "nearest",
         });
-        const present_params = device.createBuffer({
+        const present_params = device["createBuffer"]({
             label: "v86 virtio-gpu direct present parameters",
             size: 32,
-            usage: buffer_usage.UNIFORM | buffer_usage.COPY_DST,
+            usage: buffer_usage["UNIFORM"] | buffer_usage["COPY_DST"],
         });
-        const shader = device.createShaderModule({
+        const shader = device["createShaderModule"]({
             label: "v86 virtio-gpu direct present shader",
             code: PRESENT_SHADER,
         });
@@ -156,9 +156,9 @@ export class JsWebGpuRenderer
                 targets: [{ format }],
             },
         };
-        const pipeline = typeof device.createRenderPipelineAsync === "function" ?
-            await device.createRenderPipelineAsync(pipeline_descriptor) :
-            device.createRenderPipeline(pipeline_descriptor);
+        const pipeline = typeof device["createRenderPipelineAsync"] === "function" ?
+            await device["createRenderPipelineAsync"](pipeline_descriptor) :
+            device["createRenderPipeline"](pipeline_descriptor);
 
         const renderer = new JsWebGpuRenderer({
             canvas,
@@ -179,14 +179,19 @@ export class JsWebGpuRenderer
     constructor(options)
     {
         this.canvas = options.canvas;
+        /** @type {*} */
         this.context = options.context;
+        /** @type {*} */
         this.device = options.device;
-        this.queue = options.device.queue;
+        /** @type {*} */
+        this.queue = options.device["queue"];
         this.format = options.format;
+        /** @type {*} */
         this.pipeline = options.pipeline;
         this.sampler = options.sampler;
         this.present_params = options.present_params;
         this.present_params_data = new Uint32Array(8);
+        /** @type {*} */
         this.texture_usage = options.texture_usage;
         this.max_host_memory_bytes = options.max_host_memory_bytes;
         this.host_memory_bytes = 0;
@@ -201,22 +206,22 @@ export class JsWebGpuRenderer
 
     monitor_device()
     {
-        if(typeof this.device.addEventListener === "function")
+        if(typeof this.device["addEventListener"] === "function")
         {
-            this.device.addEventListener("uncapturederror", event => {
-                const error = event && event.error;
+            this.device["addEventListener"]("uncapturederror", event => {
+                const error = event && event["error"];
                 this.record_fault("Uncaptured WebGPU error: " +
-                    (error && error.message || String(error)));
+                    (error && error["message"] || String(error)));
             });
         }
-        if(this.device.lost && typeof this.device.lost.then === "function")
+        if(this.device["lost"] && typeof this.device["lost"].then === "function")
         {
-            this.device.lost.then(info => {
+            this.device["lost"].then(info => {
                 if(!this.disposed)
                 {
                     this.record_fault("WebGPU device lost (" +
-                        (info && info.reason || "unknown") + "): " +
-                        (info && info.message || ""));
+                        (info && info["reason"] || "unknown") + "): " +
+                        (info && info["message"] || ""));
                 }
             });
         }
@@ -233,7 +238,8 @@ export class JsWebGpuRenderer
         {
             throw new Error("Duplicate resource " + resource_id);
         }
-        const max_dimension = this.device.limits && this.device.limits.maxTextureDimension2D;
+        const max_dimension = this.device["limits"] &&
+            this.device["limits"]["maxTextureDimension2D"];
         if(max_dimension && (width > max_dimension || height > max_dimension))
         {
             throw new Error("Resource dimensions exceed WebGPU limits");
@@ -244,20 +250,20 @@ export class JsWebGpuRenderer
             throw new Error("GPU host memory limit exceeded");
         }
 
-        const texture = this.device.createTexture({
+        const texture = this.device["createTexture"]({
             label: "v86 virtio-gpu direct resource",
             size: { width, height, depthOrArrayLayers: 1 },
             mipLevelCount: 1,
             sampleCount: 1,
             dimension: "2d",
             format: "rgba8unorm",
-            usage: this.texture_usage.COPY_DST | this.texture_usage.TEXTURE_BINDING,
+            usage: this.texture_usage["COPY_DST"] | this.texture_usage["TEXTURE_BINDING"],
         });
-        const bind_group = this.device.createBindGroup({
+        const bind_group = this.device["createBindGroup"]({
             label: "v86 virtio-gpu direct resource bind group",
-            layout: this.pipeline.getBindGroupLayout(0),
+            layout: this.pipeline["getBindGroupLayout"](0),
             entries: [
-                { binding: 0, resource: texture.createView() },
+                { binding: 0, resource: texture["createView"]() },
                 { binding: 1, resource: this.sampler },
                 { binding: 2, resource: { buffer: this.present_params } },
             ],
@@ -282,7 +288,7 @@ export class JsWebGpuRenderer
         {
             throw new Error("Unknown resource " + resource_id);
         }
-        resource.texture.destroy();
+        resource.texture["destroy"]();
         this.resources.delete(resource_id);
         this.host_memory_bytes -= resource.byte_length;
         if(this.scanout && this.scanout.resource_id === resource_id)
@@ -345,13 +351,13 @@ export class JsWebGpuRenderer
         const data_layout = rect.height === 1 ?
             { offset: 0 } :
             { offset: 0, bytesPerRow: bytes_per_row, rowsPerImage: rect.height };
-        this.queue.writeTexture(
+        this.queue["writeTexture"](
             { texture: resource.texture, origin: { x: rect.x, y: rect.y, z: 0 } },
             upload_data,
             data_layout,
             { width: rect.width, height: rect.height, depthOrArrayLayers: 1 }
         );
-        this.queue.submit([]);
+        this.queue["submit"]([]);
     }
 
     set_scanout(resource_id, x, y, width, height)
@@ -386,26 +392,26 @@ export class JsWebGpuRenderer
         this.present_params_data[5] = resource.height;
         this.present_params_data[6] = resource.format;
         this.present_params_data[7] = 0;
-        this.queue.writeBuffer(this.present_params, 0, this.present_params_data);
+        this.queue["writeBuffer"](this.present_params, 0, this.present_params_data);
         this.configure_surface(this.scanout.width, this.scanout.height);
         const surface_texture = this.acquire_surface_texture();
-        const encoder = this.device.createCommandEncoder({
+        const encoder = this.device["createCommandEncoder"]({
             label: "v86 virtio-gpu direct present encoder",
         });
-        const pass = encoder.beginRenderPass({
+        const pass = encoder["beginRenderPass"]({
             label: "v86 virtio-gpu direct present pass",
             colorAttachments: [{
-                view: surface_texture.createView(),
+                view: surface_texture["createView"](),
                 clearValue: { r: 0, g: 0, b: 0, a: 1 },
                 loadOp: "clear",
                 storeOp: "store",
             }],
         });
-        pass.setPipeline(this.pipeline);
-        pass.setBindGroup(0, resource.bind_group);
-        pass.draw(3, 1, 0, 0);
-        pass.end();
-        this.queue.submit([encoder.finish()]);
+        pass["setPipeline"](this.pipeline);
+        pass["setBindGroup"](0, resource.bind_group);
+        pass["draw"](3, 1, 0, 0);
+        pass["end"]();
+        this.queue["submit"]([encoder["finish"]()]);
         this.check_fault();
         return true;
     }
@@ -413,7 +419,7 @@ export class JsWebGpuRenderer
     async wait_idle()
     {
         this.check_fault();
-        await this.queue.onSubmittedWorkDone();
+        await this.queue["onSubmittedWorkDone"]();
         this.check_fault();
     }
 
@@ -441,12 +447,12 @@ export class JsWebGpuRenderer
         this.destroy_resources();
         this.scanout = null;
         this.host_memory_bytes = 0;
-        this.present_params.destroy();
-        if(typeof this.context.unconfigure === "function")
+        this.present_params["destroy"]();
+        if(typeof this.context["unconfigure"] === "function")
         {
-            this.context.unconfigure();
+            this.context["unconfigure"]();
         }
-        this.device.destroy();
+        this.device["destroy"]();
     }
 
     free()
@@ -464,11 +470,11 @@ export class JsWebGpuRenderer
         }
         this.canvas.width = width;
         this.canvas.height = height;
-        this.context.configure({
+        this.context["configure"]({
             device: this.device,
             format: this.format,
             alphaMode: "opaque",
-            usage: this.texture_usage.RENDER_ATTACHMENT,
+            usage: this.texture_usage["RENDER_ATTACHMENT"],
         });
         this.surface_width = width;
         this.surface_height = height;
@@ -480,7 +486,7 @@ export class JsWebGpuRenderer
         {
             try
             {
-                return this.context.getCurrentTexture();
+                return this.context["getCurrentTexture"]();
             }
             catch(error)
             {
@@ -488,11 +494,11 @@ export class JsWebGpuRenderer
                 {
                     throw new Error("WebGPU surface could not be recovered: " + error);
                 }
-                this.context.configure({
+                this.context["configure"]({
                     device: this.device,
                     format: this.format,
                     alphaMode: "opaque",
-                    usage: this.texture_usage.RENDER_ATTACHMENT,
+                    usage: this.texture_usage["RENDER_ATTACHMENT"],
                 });
             }
         }
@@ -514,7 +520,7 @@ export class JsWebGpuRenderer
     {
         for(const resource of this.resources.values())
         {
-            resource.texture.destroy();
+            resource.texture["destroy"]();
         }
         this.resources.clear();
     }
