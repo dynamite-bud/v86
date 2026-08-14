@@ -867,6 +867,7 @@ struct MesaVertexElement {
     format: u32,
 }
 
+#[derive(Clone)]
 struct MesaShader {
     stage: u32,
     expected_length: usize,
@@ -880,7 +881,7 @@ struct MesaBufferBinding {
     size: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MesaState {
     shaders: HashMap<u32, MesaShader>,
     bound_shaders: [Option<u32>; 2],
@@ -1394,6 +1395,32 @@ async fn submit_mesa_triangle(
     bytes: &[u8],
     allowed_resources: &HashSet<u32>,
 ) -> Result<(), String> {
+    let original_mesa = context.mesa.clone();
+    let original_protocol_major = context.protocol_major;
+    let original_shader_bytes = context.shader_bytes;
+    let original_shader_ids = context.shaders.keys().copied().collect::<HashSet<_>>();
+    let original_pipeline_ids = context.pipelines.keys().copied().collect::<HashSet<_>>();
+    let result = submit_mesa_triangle_inner(renderer, context, bytes, allowed_resources).await;
+    if result.is_err() {
+        context.mesa = original_mesa;
+        context.protocol_major = original_protocol_major;
+        context.shader_bytes = original_shader_bytes;
+        context
+            .shaders
+            .retain(|id, _| original_shader_ids.contains(id));
+        context
+            .pipelines
+            .retain(|id, _| original_pipeline_ids.contains(id));
+    }
+    result
+}
+
+async fn submit_mesa_triangle_inner(
+    renderer: &mut Renderer,
+    context: &mut Context3D,
+    bytes: &[u8],
+    allowed_resources: &HashSet<u32>,
+) -> Result<(), String> {
     if bytes.is_empty() || bytes.len() & 3 != 0 || bytes.len() > MAX_SUBMIT_BYTES {
         return Err(invalid("malformed Mesa virgl submit"));
     }
@@ -1748,6 +1775,9 @@ async fn submit_mesa_triangle(
             },
         }
         offset = end;
+    }
+    if draws.len() > 1 {
+        return Err(invalid("multiple Mesa draws in one submit are unsupported"));
     }
 
     for draw in draws {
