@@ -381,7 +381,7 @@ pub fn write32(addr: u32, value: u32) {
         // LAPICs beyond the current vCPU's own
         0xB0 => write_eoi(&mut apics, current, value),
         0x20 | 0xD0 | 0xE0 => write_routing_register(&mut apics, current, addr, value),
-        0x300 => write_icr0(&mut apics, current, value),
+        0x300 => crate::apic_icr0_hook!(&mut apics, current, value),
         _ => write32_internal(&mut apics[current], addr, value),
     }
 }
@@ -407,7 +407,7 @@ fn write_routing_register(apics: &mut [Apic], current: usize, addr: u32, value: 
         },
         _ => dbg_assert!(false),
     }
-    ioapic::reevaluate(apics);
+    crate::apic_routing_changed_hook!(apics, current);
 }
 
 // EOI is per-CPU: it retires the highest in-service vector of the current
@@ -422,7 +422,7 @@ fn write_eoi(apics: &mut [Apic], current: usize, value: u32) {
         register_clear_bit(&mut apic.isr, highest_isr);
         if register_get_bit(&apic.tmr, highest_isr) {
             // Send eoi to all IO APICs
-            ioapic::remote_eoi(apics, highest_isr);
+            crate::apic_remote_eoi_hook!(apics, highest_isr);
         }
     }
     else {
@@ -521,12 +521,12 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
             if APIC_LOG_VERBOSE {
                 dbg_log!("Set tpr: {:02x}", value & 0xFF);
             }
-            apic.tpr = value & 0xFF;
+            crate::apic_tpr_hook!(apic, value);
         },
 
         0xF0 => {
             dbg_log!("Set spurious vector: {:08x}", value);
-            apic.spurious_vector = value;
+            crate::apic_spurious_hook!(apic, value);
         },
 
         0x280 => {
@@ -816,7 +816,7 @@ fn deliver(apic: &mut Apic, target: usize, vector: u8, mode: u8, is_level: bool)
             // target may be the sender itself (AP self-INIT): consumption
             // handles a current-vCPU target (see process_pending_init_sipi).
             dbg_log!("APIC: INIT to LAPIC id={:02x} latched", apic.apic_id >> 24);
-            vcpu::set_pending_init(target);
+            crate::vcpu_latch_init_hook!(target);
         }
         return;
     }
@@ -984,4 +984,413 @@ fn register_get_highest_bit(v: &[u32; 8]) -> Option<u8> {
     }
 
     None
+}
+
+// ---- XWAH-9 Phase 4 Stage W3: the shared interrupt wire (design §4) ----
+//
+// Appended at the end of the file so the default build's panic-Location
+// line numbers above stay put; every in-body hook replaces exactly one
+// line at its call site. In worker roles (per-vCPU worker or the (b)
+// device host) interrupt SENDS resolve destinations against the routing
+// SNAPSHOT in the shared control region instead of the local APICS table:
+// only the target's own instance may touch its authoritative LAPIC.
+// Staleness races of the snapshot are exactly the races real hardware
+// has (design §4).
+
+/// route() twin over the routing snapshot: match every vCPU's published
+/// (apic_id, LDR, DFR) against the destination, arbitrate lowest-priority
+/// over published TPR + runnable, then deliver locally (own vCPU) or post
+/// to the target's pending bitmaps / ipi_special latch.
+#[cfg(feature = "guest-ram-import")]
+pub fn route_shared(
+    apics: &mut [Apic],
+    vector: u8,
+    mode: u8,
+    is_level: bool,
+    destination: u8,
+    destination_mode: u8,
+) -> bool {
+    let matches = |i: usize| {
+        lapic_matches_destination(&snapshot_apic(i as u32), destination, destination_mode)
+    };
+    let mut delivered = false;
+    if mode == IOAPIC_DELIVERY_LOWEST_PRIORITY {
+        if let Some(i) = arbitrate_lowest_priority_shared(matches) {
+            deliver_shared(apics, i, vector, mode, is_level);
+            delivered = true;
+        }
+    }
+    else {
+        for i in 0..vcpu::count() {
+            if matches(i) {
+                deliver_shared(apics, i, vector, mode, is_level);
+                delivered = true;
+            }
+        }
+    }
+    if !delivered {
+        dbg_log!(
+            "APIC drop (shared): no snapshot entry matches destination={:02x} ({}) vector={:02x} delivery_mode={}",
+            destination,
+            DESTINATION_MODES[destination_mode as usize],
+            vector,
+            DELIVERY_MODES[mode as usize],
+        );
+    }
+    delivered
+}
+
+/// A destination-matching view of vCPU i's published routing entry: the
+/// snapshot fields dropped into a stack Apic so the exact
+/// lapic_matches_destination logic applies unchanged.
+#[cfg(feature = "guest-ram-import")]
+fn snapshot_apic(i: u32) -> Apic {
+    let n = vcpu::count() as u32;
+    unsafe {
+        Apic {
+            apic_id: crate::cpu::smpctl::routing_read(n, i, crate::cpu::smpctl::ROUTING_APIC_ID)
+                as u32,
+            local_destination: crate::cpu::smpctl::routing_read(
+                n,
+                i,
+                crate::cpu::smpctl::ROUTING_LDR,
+            ) as u32,
+            destination_format: crate::cpu::smpctl::routing_read(
+                n,
+                i,
+                crate::cpu::smpctl::ROUTING_DFR,
+            ) as u32,
+            tpr: crate::cpu::smpctl::routing_read(n, i, crate::cpu::smpctl::ROUTING_TPR) as u32,
+            ..APIC_RESET_STATE
+        }
+    }
+}
+
+#[cfg(feature = "guest-ram-import")]
+fn snapshot_runnable(i: u32) -> bool {
+    let n = vcpu::count() as u32;
+    unsafe { crate::cpu::smpctl::routing_read(n, i, crate::cpu::smpctl::ROUTING_RUNNABLE) != 0 }
+}
+
+/// arbitrate_lowest_priority twin over the snapshot (published TPR, the
+/// runnable bit from run_state_pub — design §4).
+#[cfg(feature = "guest-ram-import")]
+pub fn arbitrate_lowest_priority_shared(is_candidate: impl Fn(usize) -> bool) -> Option<usize> {
+    let n = vcpu::count();
+    (0..n)
+        .filter(|&i| is_candidate(i) && snapshot_runnable(i as u32))
+        .min_by_key(|&i| (snapshot_apic(i as u32).tpr, i))
+        .or_else(|| {
+            (0..n)
+                .filter(|&i| is_candidate(i))
+                .min_by_key(|&i| (snapshot_apic(i as u32).tpr, i))
+        })
+}
+
+/// deliver() twin for worker roles: the own vCPU delivers into its
+/// authoritative LAPIC exactly as today; every other target becomes a
+/// control-region post + doorbell. INIT to the BSP keeps its warm-reset
+/// ignore; SIPI keeps the AP_STARTUP_ENABLED gate (the target itself
+/// enforces the WaitForSipi state on consumption); NMI posts the latch
+/// bit, which the target drops (unsupported), mirroring deliver().
+#[cfg(feature = "guest-ram-import")]
+pub fn deliver_shared(apics: &mut [Apic], target: usize, vector: u8, mode: u8, is_level: bool) {
+    use crate::cpu::worker;
+    if worker::vcpu_index() == Some(target as u32) {
+        deliver(&mut apics[target], target, vector, mode, is_level);
+        return;
+    }
+    if mode == IOAPIC_DELIVERY_INIT {
+        if target == 0 {
+            dbg_log!("APIC (shared): INIT to BSP ignored (warm reset not implemented)");
+        }
+        else {
+            unsafe { worker::post_init(target as u32) };
+        }
+        return;
+    }
+    if mode == IOAPIC_DELIVERY_NMI {
+        unsafe { worker::post_nmi(target as u32) };
+        return;
+    }
+    if mode == APIC_DELIVERY_STARTUP {
+        if !vcpu::ap_startup_enabled() {
+            dbg_log!(
+                "APIC (shared): Startup IPI vector={:02x} to vcpu {} dropped (AP startup gated)",
+                vector,
+                target
+            );
+            return;
+        }
+        unsafe { worker::post_sipi(target as u32, vector) };
+        return;
+    }
+    if vector < 0x10 || vector == 0xFF {
+        dbg_assert!(false, "TODO: Invalid vector: {:x}", vector);
+    }
+    unsafe { worker::post_fixed(target as u32, vector, is_level) };
+}
+
+/// Merge remotely posted vectors into vCPU i's authoritative LAPIC
+/// (design §3 step 3). The tmr merge is set-only: posts never clear a
+/// level bit — a same-vector edge post after a level post leaves tmr set,
+/// whose EOI then pings a remote IOAPIC line that no longer matches
+/// (harmless no-op), instead of ever losing a level EOI.
+#[cfg(feature = "guest-ram-import")]
+pub fn merge_pending(i: usize, word: usize, irr_bits: u32, tmr_bits: u32) {
+    let mut apics = get_apics();
+    dbg_assert!(i < apics.len());
+    let apic = &mut apics[i];
+    apic.tmr[word] |= tmr_bits;
+    apic.irr[word] |= irr_bits;
+}
+
+/// Publish the current vCPU's routing entry from its authoritative LAPIC
+/// (write_routing_register/TPR/spurious hooks below pass the borrowed
+/// Apic; this variant locks the table itself for worker.rs call sites).
+#[cfg(feature = "guest-ram-import")]
+pub fn publish_current_routing() {
+    let apics = get_apics();
+    let current = current(&apics);
+    publish_routing_from(&apics[current]);
+}
+
+#[cfg(feature = "guest-ram-import")]
+pub fn publish_routing_from(apic: &Apic) {
+    let i = vcpu::current();
+    let n = vcpu::count() as u32;
+    let runnable = vcpu::run_state(i) == vcpu::RunState::Runnable;
+    unsafe {
+        crate::cpu::smpctl::routing_publish(
+            n,
+            i as u32,
+            apic.apic_id as i32,
+            apic.local_destination as i32,
+            apic.destination_format as i32,
+            apic.tpr as i32,
+            (apic.spurious_vector & 0x100 != 0) as i32,
+            runnable as i32,
+        );
+    }
+}
+
+/// route()'s dispatch seam (both call sites: write_icr0's no-shorthand
+/// arm and ioapic::check_irq): worker roles resolve against the snapshot.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_route_hook {
+    ($apics:expr, $vector:expr, $mode:expr, $level:expr, $dest:expr, $dest_mode:expr $(,)?) => {
+        $crate::cpu::apic::route($apics, $vector, $mode, $level, $dest, $dest_mode)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_route_hook {
+    ($apics:expr, $vector:expr, $mode:expr, $level:expr, $dest:expr, $dest_mode:expr $(,)?) => {
+        if $crate::cpu::worker::role_active() {
+            $crate::cpu::apic::route_shared($apics, $vector, $mode, $level, $dest, $dest_mode)
+        }
+        else {
+            $crate::cpu::apic::route($apics, $vector, $mode, $level, $dest, $dest_mode)
+        }
+    };
+}
+
+/// write_icr0's dispatch seam (write32's 0x300 arm): worker roles run the
+/// full snapshot-resolving twin below; the default arm is the exact
+/// historical call, so no potentially panicking expression moves into the
+/// macro (panic-Location spans of the default build stay put).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_icr0_hook {
+    ($apics:expr, $current:expr, $value:expr) => {
+        write_icr0($apics, $current, $value)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_icr0_hook {
+    ($apics:expr, $current:expr, $value:expr) => {
+        if $crate::cpu::worker::role_active() {
+            write_icr0_shared($apics, $current, $value)
+        }
+        else {
+            write_icr0($apics, $current, $value)
+        }
+    };
+}
+
+/// write_icr0 twin for worker roles (design §4 "ICR sends"): identical
+/// decode + icr0 store + INIT-deassert ignore, but destination resolution
+/// and shorthand fan-out run over the routing snapshot and deliveries go
+/// through deliver_shared. Keep the decode in sync with write_icr0.
+#[cfg(feature = "guest-ram-import")]
+pub fn write_icr0_shared(apics: &mut [Apic], current: usize, value: u32) {
+    let vector = (value & 0xFF) as u8;
+    let delivery_mode = ((value >> 8) & 7) as u8;
+    let destination_mode = ((value >> 11) & 1) as u8;
+    let is_assert = value & 1 << 14 != 0;
+    let is_level = value & ioapic::IOAPIC_CONFIG_TRIGGER_MODE_LEVEL
+        == ioapic::IOAPIC_CONFIG_TRIGGER_MODE_LEVEL;
+    let destination_shorthand = (value >> 18) & 3;
+    let destination = (apics[current].icr1 >> 24) as u8;
+    dbg_log!(
+        "APIC write icr0 (shared): {:08x} vector={:02x} destination_mode={} delivery_mode={} destination_shorthand={}",
+        value,
+        vector,
+        DESTINATION_MODES[destination_mode as usize],
+        DELIVERY_MODES[delivery_mode as usize],
+        ["no", "self", "all with self", "all without self"][destination_shorthand as usize]
+    );
+
+    let value = value & !(1 << 12);
+    apics[current].icr0 = value;
+
+    if delivery_mode == IOAPIC_DELIVERY_INIT && is_level && !is_assert {
+        // INIT-deassert: explicitly ignored, exactly like write_icr0
+        dbg_log!("APIC (shared): INIT-deassert IPI ignored");
+        return;
+    }
+
+    if destination_shorthand == 0 {
+        route_shared(
+            apics,
+            vector,
+            delivery_mode,
+            is_level,
+            destination,
+            destination_mode,
+        );
+    }
+    else if destination_shorthand == 1 {
+        deliver_shared(apics, current, vector, delivery_mode, is_level);
+    }
+    else if destination_shorthand == 2 || destination_shorthand == 3 {
+        let is_candidate = |i: usize| destination_shorthand == 2 || i != current;
+        if delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY {
+            if let Some(i) = arbitrate_lowest_priority_shared(is_candidate) {
+                deliver_shared(apics, i, vector, delivery_mode, is_level);
+            }
+        }
+        else {
+            for i in 0..vcpu::count() {
+                if is_candidate(i) {
+                    deliver_shared(apics, i, vector, delivery_mode, is_level);
+                }
+            }
+        }
+    }
+    else {
+        dbg_assert!(false);
+    }
+}
+
+/// write_eoi's level leg: a per-vCPU worker cannot call ioapic::remote_eoi
+/// (the IOAPIC lives on the device host) — the vector goes onto the
+/// worker's eoi_ring and the host doorbell (design §4).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_remote_eoi_hook {
+    ($apics:expr, $vector:expr) => {
+        ioapic::remote_eoi($apics, $vector)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_remote_eoi_hook {
+    ($apics:expr, $vector:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            unsafe { $crate::cpu::worker::eoi_forward($vector) }
+        }
+        else {
+            ioapic::remote_eoi($apics, $vector)
+        }
+    };
+}
+
+/// write_routing_register's tail: a per-vCPU worker publishes its new
+/// routing entry and wakes the device host to reevaluate held IOAPIC
+/// lines; every other role keeps the same-instance reevaluate.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_routing_changed_hook {
+    ($apics:expr, $current:expr) => {
+        ioapic::reevaluate($apics)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_routing_changed_hook {
+    ($apics:expr, $current:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            publish_routing_from(&$apics[$current]);
+            unsafe { $crate::cpu::worker::notify_host() }
+        }
+        else {
+            ioapic::reevaluate($apics)
+        }
+    };
+}
+
+/// The TPR write (0x80): a per-vCPU worker republishes its routing entry
+/// (lowest-priority arbitration reads published TPR — design §4).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_tpr_hook {
+    ($apic:expr, $value:expr) => {
+        $apic.tpr = $value & 0xFF
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_tpr_hook {
+    ($apic:expr, $value:expr) => {
+        $apic.tpr = $value & 0xFF;
+        if $crate::cpu::worker::in_vcpu_worker() {
+            publish_routing_from($apic);
+        }
+    };
+}
+
+/// The spurious-vector write (0xF0): republishes the software-enable bit.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! apic_spurious_hook {
+    ($apic:expr, $value:expr) => {
+        $apic.spurious_vector = $value
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! apic_spurious_hook {
+    ($apic:expr, $value:expr) => {
+        $apic.spurious_vector = $value;
+        if $crate::cpu::worker::in_vcpu_worker() {
+            publish_routing_from($apic);
+        }
+    };
+}
+
+/// deliver()'s INIT latch: reachable in a per-vCPU worker only with the
+/// own vCPU as target (an AP self-INIT via shorthand); the latch then
+/// goes through the own ipi_special cell and is consumed at the next loop
+/// boundary — the (b) twin of the vcpu.rs latch.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! vcpu_latch_init_hook {
+    ($target:expr) => {
+        vcpu::set_pending_init($target)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! vcpu_latch_init_hook {
+    ($target:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            unsafe { $crate::cpu::worker::post_init($target as u32) }
+        }
+        else {
+            vcpu::set_pending_init($target)
+        }
+    };
 }

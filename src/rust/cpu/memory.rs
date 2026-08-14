@@ -91,7 +91,7 @@ pub fn read8(addr: u32) -> i32 {
             apic::read32((addr - APIC_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
         }
         else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
-            ioapic::read32((addr - IOAPIC_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
+            crate::ioapic_mmio_read8_hook!(addr)
         }
         else {
             unsafe { ext::mmap_read8(addr) }
@@ -134,7 +134,7 @@ pub fn read32s(addr: u32) -> i32 {
             apic::read32(addr - APIC_MEM_ADDRESS) as i32
         }
         else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
-            ioapic::read32(addr - IOAPIC_MEM_ADDRESS) as i32
+            crate::ioapic_mmio_read32_hook!(addr)
         }
         else {
             unsafe { ext::mmap_read32(addr) }
@@ -281,7 +281,7 @@ pub unsafe fn mmap_write32(addr: u32, value: i32) {
         handle_irqs();
     }
     else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
-        ioapic::write32(addr - IOAPIC_MEM_ADDRESS, value as u32);
+        crate::ioapic_mmio_write32_hook!(addr, value);
         handle_irqs();
     }
     else {
@@ -846,6 +846,75 @@ macro_rules! cmpxchg8b_prologue {
         return_on_pagefault!(writable_or_pagefault($addr, 8));
         if $crate::cpu::lock::cmpxchg8b_locked($addr) {
             return;
+        }
+    };
+}
+
+// ---- XWAH-9 Phase 4 Stage W3: IOAPIC MMIO forwarding seams ----
+//
+// In a per-vCPU worker (topology (b)) the IOAPIC lives on the device
+// host's instance, so the 0xFEC00000 window forwards as an ordinary mmap
+// RPC (design §4: cold, setup-time) — the env import reaches the device
+// host, whose read8/read32s/write32 exports run this same intercept on
+// the main instance's authoritative IOAPIC. Every other role keeps the
+// local intercept. Each hook replaces exactly one line at its call site.
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! ioapic_mmio_read8_hook {
+    ($addr:expr) => {
+        ioapic::read32(($addr - IOAPIC_MEM_ADDRESS) & !3) as i32 >> 8 * ($addr & 3) & 0xFF
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! ioapic_mmio_read8_hook {
+    ($addr:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            unsafe { ext::mmap_read8($addr) }
+        }
+        else {
+            ioapic::read32(($addr - IOAPIC_MEM_ADDRESS) & !3) as i32 >> 8 * ($addr & 3) & 0xFF
+        }
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! ioapic_mmio_read32_hook {
+    ($addr:expr) => {
+        ioapic::read32($addr - IOAPIC_MEM_ADDRESS) as i32
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! ioapic_mmio_read32_hook {
+    ($addr:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            unsafe { ext::mmap_read32($addr) }
+        }
+        else {
+            ioapic::read32($addr - IOAPIC_MEM_ADDRESS) as i32
+        }
+    };
+}
+
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! ioapic_mmio_write32_hook {
+    ($addr:expr, $value:expr) => {
+        ioapic::write32($addr - IOAPIC_MEM_ADDRESS, $value as u32)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! ioapic_mmio_write32_hook {
+    ($addr:expr, $value:expr) => {
+        if $crate::cpu::worker::in_vcpu_worker() {
+            unsafe { ext::mmap_write32($addr, $value) }
+        }
+        else {
+            ioapic::write32($addr - IOAPIC_MEM_ADDRESS, $value as u32)
         }
     };
 }

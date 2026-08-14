@@ -50,10 +50,11 @@ const TERMINATE_TIMEOUT_MS = 2000;
 /**
  * Environment adapter around a dedicated worker running vcpu_worker.js:
  * browser `Worker` or Node `worker_threads` (via process.getBuiltinModule,
- * so no import syntax the bundler would have to understand).
+ * so no import syntax the bundler would have to understand). Shared with
+ * the topology-(b) host (smp_vcpu_host.js).
  * @param {string} worker_url
  */
-function spawn_worker(worker_url)
+export function spawn_worker(worker_url)
 {
     const is_node = typeof process === "object" && typeof process.versions === "object" &&
         typeof process.versions.node === "string" &&

@@ -19,3 +19,5 @@ pub mod sse_instr;
 pub mod string;
 pub mod vcpu;
 pub mod vga;
+#[cfg(feature = "guest-ram-import")]
+pub mod worker;

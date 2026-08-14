@@ -16,12 +16,20 @@
 // Layout, N-scaled, every field in a 64-byte-aligned block so distinct
 // writers never share a cache line (design §2):
 //
-//   per vCPU i at CTL_BASE + i*0x240 (VCPU_STRIDE), offsets within the block:
+//   per vCPU i at CTL_BASE + i*0x340 (VCPU_STRIDE), offsets within the block:
 //     0x000  doorbell       u32    version counter; post = add + notify
 //     0x040  run_state_pub  u32    RunState published by the worker
 //     0x044  heartbeat      u32    W1 addition: wake counter, same writer as
 //                                  run_state_pub (no new false sharing)
+//     0x048  insn_pub       u32    W3: the worker's instruction counter,
+//                                  published per slice; main sums the cells
+//                                  for get_instruction_counter (design §8);
+//                                  same writer as run_state_pub
 //     0x080  command        u32    RUN / PARK_REQ / PARKED_ACK / TERMINATE
+//     0x084  pic_pending    u32    W3, vCPU 0 only: 8259-INTR flag posted by
+//                                  the device host, xchg-taken by the BSP
+//                                  worker before its PIC-ack RPC (design §4);
+//                                  same writer as command (the host)
 //     0x0C0  pending_irr    8xu32  fixed-vector bitmap, atomic-or to post
 //     0x100  pending_tmr    8xu32  level-trigger bitmap, same protocol
 //     0x140  ipi_special    u32    INIT/SIPI/NMI latch word (or/xchg)
@@ -30,14 +38,28 @@
 //                           tests/threads/mailbox-protocol.js layout
 //                           (u32 indices: STATE, OP, ADDR, SIZE, VALUE_LO,
 //                           VALUE_HI, SEQ, rest reserved)
+//     0x240  jit_inbox      W3 cross-worker JIT shootdown inbox (design §6;
+//                           topology (b)): spinlocked multi-producer push,
+//                           single consumer (the block's own worker).
+//                           0x240 lock u32, 0x244 head u32, 0x248 overflow
+//                           u32 (producer-side line); 0x280 tail u32
+//                           (consumer-owned line); 0x2C0 32xu32 slots.
+//                           Event = phys page number | JIT_EVENT_PROTECT_BIT
+//                           (protect = "another instance compiled this
+//                           page"); no bit = dirty ("invalidate this page").
+//                           Overflow sets the flag instead of dropping: the
+//                           consumer recovers with jit_clear_all +
+//                           full_clear_tlb (the code-page bitmaps below are
+//                           the persistent protection source, so nothing is
+//                           lost).
 //
-//   routing_table at CTL_BASE + n*0x240:
+//   routing_table at CTL_BASE + n*0x340:
 //     0x00   version        u32    bumped on every publish
 //     0x40 + i*0x40          entry i: apic_id, ldr, dfr, tpr, enabled,
 //                           runnable (u32 each; per-entry cache line — each
 //                           worker publishes only its own entry)
 //
-//   machine at CTL_BASE + n*0x280 + 0x40:
+//   machine at CTL_BASE + routing end:
 //     0x00   tsc_offset     u64    (cmpxchg_64-based access)
 //     0x40   buslock        u32    the shared bus-lock cell; cpu/lock.rs
 //                                  uses it instead of its L1 instance-local
@@ -45,8 +67,8 @@
 //                                  a plain multimem build has no ctl pages
 //                                  and never enters worker mode
 //     0x80   jit_dirty ring head u32, tail u32, 64xu32 phys pages. W1 ships
-//                           the single-producer push; the cross-worker
-//                           multi-producer protocol is W3's (design §6).
+//                           the single-producer push; topology (b) replaces
+//                           this with the per-vCPU jit inboxes above.
 //                           In topology (c) the producer is the device host
 //                           (main-thread JS: DMA/disk writes into guest
 //                           RAM), the consumer the machine worker
@@ -58,6 +80,20 @@
 //                           drains them at its loop boundary and replays
 //                           them into device_raise_irq/device_lower_irq on
 //                           ITS instance, which owns PIC+IOAPIC+LAPICs
+//     0x600  host_doorbell  u32    W3: worker -> device-host wake counter
+//                                  (level-EOI rings, routing-snapshot
+//                                  changes); main parks in Atomics.waitAsync
+//                                  on it — the worker-to-main mirror of the
+//                                  per-vCPU doorbells
+//
+//   code_bitmaps at CTL_BASE + machine end (W3, topology (b)): one bitmap
+//   per vCPU, one bit per guest phys page, owned (written) exclusively by
+//   that vCPU's worker: set when the worker starts compiling the page,
+//   cleared when its local invalidation removes installed code. TLB fills
+//   OR the OTHER workers' bitmaps to decide whether a write to the page
+//   must take the dirty-notify slow path (docs/smp-phase4-design.md §9 W3
+//   note). Sized from memory_size, so the region is NOT part of the const
+//   layout: ctl_total_size/ctl_code_bitmap_offset below.
 //
 // Everything is reached through the gram accessor layer (no new import
 // surface); on non-wasm targets (cargo test) the cell backend below operates
@@ -72,22 +108,38 @@ pub const CACHE_LINE: u32 = 64;
 /// the two JIT slow-path scratch pages (memory.rs gram_jit_scratch_base).
 pub const CTL_BASE_GAP: u32 = 0x10000;
 
-pub const VCPU_STRIDE: u32 = 0x240;
+pub const VCPU_STRIDE: u32 = 0x340;
 
 // per-vCPU field offsets (relative to the vCPU's block)
 pub const DOORBELL: u32 = 0x000;
 pub const RUN_STATE_PUB: u32 = 0x040;
 pub const HEARTBEAT: u32 = 0x044;
+pub const INSN_PUB: u32 = 0x048;
 pub const COMMAND: u32 = 0x080;
+pub const PIC_PENDING: u32 = 0x084;
 pub const PENDING_IRR: u32 = 0x0C0;
 pub const PENDING_TMR: u32 = 0x100;
 pub const IPI_SPECIAL: u32 = 0x140;
 pub const EOI_RING: u32 = 0x180;
 pub const MAILBOX: u32 = 0x200;
+pub const JIT_INBOX: u32 = 0x240;
 
 pub const PENDING_WORDS: u32 = 8;
 pub const EOI_RING_CAP: u32 = 16;
 pub const MAILBOX_BYTES: u32 = 64;
+
+// jit_inbox sub-offsets (relative to JIT_INBOX) and event encoding
+pub const JIT_INBOX_LOCK: u32 = 0x00;
+pub const JIT_INBOX_HEAD: u32 = 0x04;
+pub const JIT_INBOX_OVERFLOW: u32 = 0x08;
+pub const JIT_INBOX_TAIL: u32 = 0x40;
+pub const JIT_INBOX_SLOTS: u32 = 0x80;
+pub const JIT_INBOX_CAP: u32 = 32;
+/// Set in a jit_inbox event: "another instance is compiling this page"
+/// (the consumer re-protects its TLB entries); clear: "this page was
+/// written" (the consumer invalidates its code for it). The low bits carry
+/// the phys page number (phys >> 12, < 2^20 for any 32-bit guest RAM).
+pub const JIT_EVENT_PROTECT_BIT: u32 = 1 << 24;
 
 // mailbox record u32 indices — normative layout from
 // tests/threads/mailbox-protocol.js (Layer A); STATE is the only
@@ -113,6 +165,10 @@ pub const MAILBOX_RESPONSE: i32 = 2;
 // shared guest RAM and answers with the element count.
 pub const MAILBOX_OP_IN_REP: i32 = 5;
 pub const MAILBOX_OP_OUT_REP: i32 = 6;
+// W3 (topology (b), design §4): the BSP worker's 8259 acknowledge RPC —
+// the device host runs pic_acknowledge_irq() on ITS instance's PIC and
+// answers the vector, or -1 when nothing is pending
+pub const MAILBOX_OP_PIC_ACK: i32 = 7;
 
 // command[i] values (design §2/§8 quiesce protocol; RESET is the W2
 // machine-reboot request — the worker runs reset_cpu on its instance and
@@ -143,7 +199,8 @@ pub const MACHINE_TSC_OFFSET: u32 = 0x00;
 pub const MACHINE_BUSLOCK: u32 = 0x40;
 pub const MACHINE_JIT_DIRTY_RING: u32 = 0x80;
 pub const MACHINE_DEV_IRQ_RING: u32 = 0x1C0;
-pub const MACHINE_SIZE: u32 = 0x600;
+pub const MACHINE_HOST_DOORBELL: u32 = 0x600;
+pub const MACHINE_SIZE: u32 = 0x640;
 
 pub const JIT_DIRTY_RING_CAP: u32 = 64;
 pub const DEV_IRQ_RING_CAP: u32 = 256;
@@ -163,7 +220,9 @@ const _: () = assert!(VCPU_STRIDE % CACHE_LINE == 0);
 const _: () = assert!(DOORBELL % CACHE_LINE == 0);
 const _: () = assert!(RUN_STATE_PUB % CACHE_LINE == 0);
 const _: () = assert!(HEARTBEAT == RUN_STATE_PUB + 4); // same writer, same line
+const _: () = assert!(INSN_PUB == HEARTBEAT + 4); // same writer, same line
 const _: () = assert!(COMMAND % CACHE_LINE == 0);
+const _: () = assert!(PIC_PENDING == COMMAND + 4); // same (host) writer, same line
 const _: () = assert!(PENDING_IRR % CACHE_LINE == 0);
 const _: () = assert!(PENDING_TMR % CACHE_LINE == 0);
 const _: () = assert!(PENDING_IRR + 4 * PENDING_WORDS <= PENDING_TMR);
@@ -171,14 +230,21 @@ const _: () = assert!(IPI_SPECIAL % CACHE_LINE == 0);
 const _: () = assert!(EOI_RING % CACHE_LINE == 0);
 const _: () = assert!(EOI_RING + RING_SLOTS + 4 * EOI_RING_CAP <= MAILBOX);
 const _: () = assert!(MAILBOX % CACHE_LINE == 0);
-const _: () = assert!(MAILBOX + MAILBOX_BYTES <= VCPU_STRIDE);
+const _: () = assert!(MAILBOX + MAILBOX_BYTES <= JIT_INBOX);
+const _: () = assert!(JIT_INBOX % CACHE_LINE == 0);
+const _: () = assert!((JIT_INBOX + JIT_INBOX_TAIL) % CACHE_LINE == 0);
+const _: () = assert!((JIT_INBOX + JIT_INBOX_SLOTS) % CACHE_LINE == 0);
+const _: () = assert!(JIT_INBOX + JIT_INBOX_SLOTS + 4 * JIT_INBOX_CAP <= VCPU_STRIDE);
 const _: () = assert!(ROUTING_ENTRY_STRIDE % CACHE_LINE == 0);
 const _: () = assert!(MACHINE_BUSLOCK % CACHE_LINE == 0);
 const _: () = assert!(MACHINE_JIT_DIRTY_RING % CACHE_LINE == 0);
 const _: () =
     assert!(MACHINE_JIT_DIRTY_RING + RING_SLOTS + 4 * JIT_DIRTY_RING_CAP <= MACHINE_DEV_IRQ_RING);
 const _: () = assert!(MACHINE_DEV_IRQ_RING % CACHE_LINE == 0);
-const _: () = assert!(MACHINE_DEV_IRQ_RING + RING_SLOTS + 4 * DEV_IRQ_RING_CAP <= MACHINE_SIZE);
+const _: () =
+    assert!(MACHINE_DEV_IRQ_RING + RING_SLOTS + 4 * DEV_IRQ_RING_CAP <= MACHINE_HOST_DOORBELL);
+const _: () = assert!(MACHINE_HOST_DOORBELL % CACHE_LINE == 0);
+const _: () = assert!(MACHINE_HOST_DOORBELL + 4 <= MACHINE_SIZE);
 const _: () = assert!(MACHINE_SIZE % CACHE_LINE == 0);
 
 /// Offset of the routing table relative to CTL_BASE.
@@ -194,8 +260,27 @@ pub const fn machine_offset(n: u32) -> u32 {
     routing_offset(n) + CACHE_LINE + n * ROUTING_ENTRY_STRIDE
 }
 
-/// Total control-region size for n vCPUs.
+/// Size of the const part of the control region (everything except the
+/// memory-size-scaled code bitmaps) for n vCPUs.
 pub const fn ctl_size(n: u32) -> u32 { machine_offset(n) + MACHINE_SIZE }
+
+/// Per-vCPU code-page bitmap stride in bytes: one bit per guest phys page,
+/// rounded up to whole cache lines so distinct owner workers never share a
+/// line (W3, design §9 W3 note).
+pub const fn code_bitmap_stride(memory_size: u32) -> u32 {
+    ((memory_size >> 15) + CACHE_LINE - 1) & !(CACHE_LINE - 1)
+}
+
+/// Offset of vCPU i's code-page bitmap relative to CTL_BASE.
+pub const fn code_bitmap_offset(n: u32, i: u32, memory_size: u32) -> u32 {
+    ctl_size(n) + i * code_bitmap_stride(memory_size)
+}
+
+/// Total control-region size, code bitmaps included. What JS must size the
+/// ctl pages for (the JS mirror is ctl_total_size in smpctl.js).
+pub const fn ctl_total_size(n: u32, memory_size: u32) -> u32 {
+    ctl_size(n) + n * code_bitmap_stride(memory_size)
+}
 
 /// CTL_BASE for a given guest-RAM size.
 pub const fn ctl_base_for(memory_size: u32) -> u32 { memory_size + CTL_BASE_GAP }
@@ -210,10 +295,26 @@ pub unsafe fn get_smpctl_base() -> u32 {
     ctl_base_for(memory_size)
 }
 
-/// Exported for JS: total control-region size for n vCPUs. The JS mirror
-/// (src/browser/smpctl.js) must compute the same value.
+/// Exported for JS: const-part control-region size for n vCPUs. The JS
+/// mirror (src/browser/smpctl.js) must compute the same value.
 #[no_mangle]
 pub fn get_smpctl_size(n: u32) -> u32 { ctl_size(n) }
+
+/// Exported for JS: total control-region size (code bitmaps included) for
+/// this instance's memory_size. Valid after JS set the memory_size global.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe fn get_smpctl_total_size(n: u32) -> u32 {
+    ctl_total_size(n, *crate::cpu::global_pointers::memory_size)
+}
+
+/// Exported for JS: offset (relative to CTL_BASE) of vCPU i's code-page
+/// bitmap for this instance's memory_size.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe fn get_smpctl_code_bitmap_offset(i: u32, n: u32) -> u32 {
+    code_bitmap_offset(n, i, *crate::cpu::global_pointers::memory_size)
+}
 
 // field ids of the get_smpctl_offset probe (mirrored in smpctl.js)
 pub const PROBE_DOORBELL: u32 = 0;
@@ -231,6 +332,10 @@ pub const PROBE_MACHINE_TSC_OFFSET: u32 = 11;
 pub const PROBE_MACHINE_BUSLOCK: u32 = 12;
 pub const PROBE_MACHINE_JIT_DIRTY_RING: u32 = 13;
 pub const PROBE_MACHINE_DEV_IRQ_RING: u32 = 14;
+pub const PROBE_INSN_PUB: u32 = 15;
+pub const PROBE_PIC_PENDING: u32 = 16;
+pub const PROBE_JIT_INBOX: u32 = 17;
+pub const PROBE_MACHINE_HOST_DOORBELL: u32 = 18;
 
 /// Exported for JS/tests: offset (relative to CTL_BASE) of a layout field —
 /// the cross-language layout check of the worker-skeleton test iterates over
@@ -255,6 +360,10 @@ pub fn get_smpctl_offset(field: u32, i: u32, n: u32) -> u32 {
         PROBE_MACHINE_BUSLOCK => machine_offset(n) + MACHINE_BUSLOCK,
         PROBE_MACHINE_JIT_DIRTY_RING => machine_offset(n) + MACHINE_JIT_DIRTY_RING,
         PROBE_MACHINE_DEV_IRQ_RING => machine_offset(n) + MACHINE_DEV_IRQ_RING,
+        PROBE_INSN_PUB => vcpu + INSN_PUB,
+        PROBE_PIC_PENDING => vcpu + PIC_PENDING,
+        PROBE_JIT_INBOX => vcpu + JIT_INBOX,
+        PROBE_MACHINE_HOST_DOORBELL => machine_offset(n) + MACHINE_HOST_DOORBELL,
         _ => u32::MAX,
     }
 }
@@ -281,6 +390,7 @@ mod cell {
         extern "C" {
             pub fn gram_atomic_rmw_add_32(addr: u32, value: i32) -> i32;
             pub fn gram_atomic_rmw_or_32(addr: u32, value: i32) -> i32;
+            pub fn gram_atomic_rmw_and_32(addr: u32, value: i32) -> i32;
             pub fn gram_atomic_rmw_xchg_32(addr: u32, value: i32) -> i32;
         }
     }
@@ -289,6 +399,7 @@ mod cell {
     pub unsafe fn store32(addr: u32, value: i32) { memory::gram_atomic_store_32(addr, value) }
     pub unsafe fn add32(addr: u32, value: i32) -> i32 { ext::gram_atomic_rmw_add_32(addr, value) }
     pub unsafe fn or32(addr: u32, value: i32) -> i32 { ext::gram_atomic_rmw_or_32(addr, value) }
+    pub unsafe fn and32(addr: u32, value: i32) -> i32 { ext::gram_atomic_rmw_and_32(addr, value) }
     pub unsafe fn xchg32(addr: u32, value: i32) -> i32 { ext::gram_atomic_rmw_xchg_32(addr, value) }
     pub unsafe fn cmpxchg32(addr: u32, expected: i32, replacement: i32) -> i32 {
         memory::gram_atomic_rmw_cmpxchg_32(addr, expected, replacement)
@@ -345,6 +456,14 @@ mod cell {
             let mut b = b.borrow_mut();
             let old = b[word(addr)];
             b[word(addr)] = old | value as u32;
+            old as i32
+        })
+    }
+    pub unsafe fn and32(addr: u32, value: i32) -> i32 {
+        BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            let old = b[word(addr)];
+            b[word(addr)] = old & value as u32;
             old as i32
         })
     }
@@ -432,6 +551,31 @@ pub unsafe fn run_state_read(i: u32) -> i32 { cell::load32(vcpu_field(i, RUN_STA
 pub unsafe fn heartbeat_publish(i: u32) -> i32 { cell::add32(vcpu_field(i, HEARTBEAT), 1) }
 
 pub unsafe fn heartbeat_read(i: u32) -> i32 { cell::load32(vcpu_field(i, HEARTBEAT)) }
+
+/// Publish vCPU i's instruction counter (W3, design §8): main sums the
+/// cells for the approximate machine-wide get_instruction_counter.
+pub unsafe fn insn_publish(i: u32, count: i32) { cell::store32(vcpu_field(i, INSN_PUB), count) }
+
+pub unsafe fn insn_read(i: u32) -> i32 { cell::load32(vcpu_field(i, INSN_PUB)) }
+
+// ---- 8259 INTR flag (W3, design §4: PIC doorbell to the BSP worker) ----
+
+pub unsafe fn pic_pending_set(i: u32) { cell::store32(vcpu_field(i, PIC_PENDING), 1) }
+
+/// Take the flag (atomic exchange with 0); non-zero = the 8259 asserted
+/// INTR since the last take and the BSP worker must issue the PIC-ack RPC.
+pub unsafe fn pic_pending_take(i: u32) -> i32 { cell::xchg32(vcpu_field(i, PIC_PENDING), 0) }
+
+// ---- host doorbell (W3: worker -> device-host wake) ----
+
+/// Wake the device host: bump the machine host_doorbell counter and notify
+/// the main thread's Atomics.waitAsync.
+pub unsafe fn host_doorbell_post(n: u32) -> i32 {
+    let addr = base() + machine_offset(n) + MACHINE_HOST_DOORBELL;
+    let old = cell::add32(addr, 1);
+    cell::notify(addr, i32::MAX);
+    old
+}
 
 // ---- command (quiesce protocol, design §8) ----
 
@@ -630,6 +774,111 @@ pub unsafe fn dev_irq_ring_pop(n: u32) -> Option<i32> {
     )
 }
 
+// ---- per-vCPU jit inbox (W3 cross-worker JIT shootdown, design §9 W3) ----
+//
+// Multi-producer (every other worker plus the device host, which pushes
+// from JS with the same protocol), single consumer (the block's own
+// worker). Producers serialize on the spinlock; the lock is held for a
+// handful of stores only. The consumer pops lock-free: producers publish
+// the slot with the seq-cst head store, the consumer owns the tail.
+// Overflow never drops silently: the flag makes the consumer recover with
+// jit_clear_all + full_clear_tlb, and the code bitmaps re-supply the lost
+// protect information at TLB refill.
+
+/// Push one event into vCPU i's inbox (JIT_EVENT_PROTECT_BIT | page, or a
+/// bare page number for a dirty event).
+pub unsafe fn jit_inbox_push(i: u32, event: i32) {
+    let inbox = vcpu_field(i, JIT_INBOX);
+    while cell::cmpxchg32(inbox + JIT_INBOX_LOCK, 0, 1) != 0 {}
+    let head = cell::load32(inbox + JIT_INBOX_HEAD) as u32;
+    let tail = cell::load32(inbox + JIT_INBOX_TAIL) as u32;
+    if head.wrapping_sub(tail) >= JIT_INBOX_CAP {
+        cell::store32(inbox + JIT_INBOX_OVERFLOW, 1);
+    }
+    else {
+        cell::write32_plain(inbox + JIT_INBOX_SLOTS + 4 * (head % JIT_INBOX_CAP), event);
+        cell::store32(inbox + JIT_INBOX_HEAD, head.wrapping_add(1) as i32);
+    }
+    cell::store32(inbox + JIT_INBOX_LOCK, 0);
+}
+
+/// Drain vCPU i's inbox into `f`. Returns true when the inbox overflowed
+/// since the last drain: the events up to the current head are then
+/// consumed WITHOUT being delivered and the caller must recover with
+/// jit_clear_all + full_clear_tlb (events pushed after the head snapshot
+/// stay queued for the next drain).
+pub unsafe fn jit_inbox_drain(i: u32, mut f: impl FnMut(i32)) -> bool {
+    let inbox = vcpu_field(i, JIT_INBOX);
+    let overflowed = cell::xchg32(inbox + JIT_INBOX_OVERFLOW, 0) != 0;
+    let head = cell::load32(inbox + JIT_INBOX_HEAD) as u32;
+    let mut tail = cell::load32(inbox + JIT_INBOX_TAIL) as u32;
+    if overflowed {
+        cell::store32(inbox + JIT_INBOX_TAIL, head as i32);
+        return true;
+    }
+    while tail != head {
+        f(cell::read32_plain(
+            inbox + JIT_INBOX_SLOTS + 4 * (tail % JIT_INBOX_CAP),
+        ));
+        tail = tail.wrapping_add(1);
+        cell::store32(inbox + JIT_INBOX_TAIL, tail as i32);
+    }
+    false
+}
+
+// ---- per-vCPU code-page bitmaps (W3, design §9 W3 note) ----
+//
+// One bit per guest phys page, owned exclusively by vCPU i's worker: set
+// when it starts compiling the page, cleared when its local invalidation
+// removes installed code. Readers (TLB fills of the OTHER workers) OR the
+// non-own bitmaps to decide whether writes to the page must take the
+// dirty-notify slow path. A stale set bit is conservative (extra slow-path
+// writes); a missing set bit would be a correctness hole, so bits are set
+// before the compiler reads the page's bytes.
+
+pub unsafe fn code_bitmap_set(n: u32, i: u32, memory_size: u32, page: u32) {
+    if page >= memory_size >> 12 {
+        return;
+    }
+    let addr = base() + code_bitmap_offset(n, i, memory_size) + 4 * (page >> 5);
+    cell::or32(addr, (1u32 << (page & 31)) as i32);
+}
+
+pub unsafe fn code_bitmap_clear(n: u32, i: u32, memory_size: u32, page: u32) {
+    if page >= memory_size >> 12 {
+        return;
+    }
+    let addr = base() + code_bitmap_offset(n, i, memory_size) + 4 * (page >> 5);
+    cell::and32(addr, !(1u32 << (page & 31)) as i32);
+}
+
+/// Whether any vCPU other than `own` has (or is compiling) code in `page`.
+pub unsafe fn code_bitmap_any_other(n: u32, own: u32, memory_size: u32, page: u32) -> bool {
+    if page >= memory_size >> 12 {
+        return false;
+    }
+    let word = 4 * (page >> 5);
+    let bit = 1u32 << (page & 31);
+    for i in 0..n {
+        if i != own
+            && cell::load32(base() + code_bitmap_offset(n, i, memory_size) + word) as u32 & bit != 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Clear vCPU i's whole bitmap (jit_clear_cache / worker re-init).
+pub unsafe fn code_bitmap_clear_all(n: u32, i: u32, memory_size: u32) {
+    let bitmap = base() + code_bitmap_offset(n, i, memory_size);
+    let mut offset = 0;
+    while offset < code_bitmap_stride(memory_size) {
+        cell::store32(bitmap + offset, 0);
+        offset += 4;
+    }
+}
+
 // ---- routing snapshot ----
 
 /// Publish vCPU i's routing entry and bump the table version. Senders match
@@ -706,13 +955,14 @@ mod tests {
             // per-vCPU field intervals within one stride, in layout order
             let fields = [
                 (DOORBELL, 4),
-                (RUN_STATE_PUB, 8), // + heartbeat
-                (COMMAND, 4),
+                (RUN_STATE_PUB, 12), // + heartbeat + insn_pub
+                (COMMAND, 8),        // + pic_pending
                 (PENDING_IRR, 4 * PENDING_WORDS),
                 (PENDING_TMR, 4 * PENDING_WORDS),
                 (IPI_SPECIAL, 4),
                 (EOI_RING, RING_SLOTS + 4 * EOI_RING_CAP),
                 (MAILBOX, MAILBOX_BYTES),
+                (JIT_INBOX, JIT_INBOX_SLOTS + 4 * JIT_INBOX_CAP),
             ];
             for w in fields.windows(2) {
                 let (off, len) = w[0];
@@ -947,6 +1197,76 @@ mod tests {
             assert_eq!(routing_version(n), 2);
             assert_eq!(routing_read(n, 1, ROUTING_TPR), 0x40);
             assert_eq!(routing_read(n, 1, ROUTING_RUNNABLE), 0);
+        }
+    }
+
+    #[test]
+    fn jit_inbox_push_drain_and_overflow() {
+        setup(2);
+        unsafe {
+            let mut got: Vec<i32> = Vec::new();
+            assert!(!jit_inbox_drain(1, |e| got.push(e)));
+            assert!(got.is_empty());
+            jit_inbox_push(1, 0x100);
+            jit_inbox_push(1, (JIT_EVENT_PROTECT_BIT | 0x101) as i32);
+            assert!(!jit_inbox_drain(1, |e| got.push(e)));
+            assert_eq!(got, vec![0x100, (JIT_EVENT_PROTECT_BIT | 0x101) as i32]);
+            // vCPU 0's inbox is untouched
+            assert!(!jit_inbox_drain(0, |_| panic!("inbox 0 must be empty")));
+            // fill past capacity: overflow is flagged, the flagged drain
+            // delivers nothing (clear-all recovery supersedes), later
+            // pushes survive
+            for e in 0..(JIT_INBOX_CAP as i32 + 5) {
+                jit_inbox_push(1, e);
+            }
+            got.clear();
+            assert!(jit_inbox_drain(1, |e| got.push(e)), "overflow must report");
+            assert!(got.is_empty(), "overflow drain must deliver nothing");
+            jit_inbox_push(1, 7);
+            assert!(!jit_inbox_drain(1, |e| got.push(e)));
+            assert_eq!(got, vec![7]);
+        }
+    }
+
+    #[test]
+    fn code_bitmaps_are_per_vcpu_and_bounded() {
+        let n = 2;
+        let ms = 1 << 20; // 1 MB guest RAM -> 256 pages
+        install_test_buffer(ctl_total_size(n, ms));
+        unsafe {
+            assert!(!code_bitmap_any_other(n, 0, ms, 5));
+            code_bitmap_set(n, 1, ms, 5);
+            assert!(code_bitmap_any_other(n, 0, ms, 5));
+            assert!(!code_bitmap_any_other(n, 1, ms, 5), "own bits excluded");
+            code_bitmap_clear(n, 1, ms, 5);
+            assert!(!code_bitmap_any_other(n, 0, ms, 5));
+            code_bitmap_set(n, 1, ms, 255);
+            assert!(code_bitmap_any_other(n, 0, ms, 255));
+            code_bitmap_clear_all(n, 1, ms);
+            assert!(!code_bitmap_any_other(n, 0, ms, 255));
+            // out-of-ram pages never set or match
+            code_bitmap_set(n, 1, ms, ms >> 12);
+            assert!(!code_bitmap_any_other(n, 0, ms, ms >> 12));
+        }
+    }
+
+    #[test]
+    fn pic_pending_insn_and_host_doorbell() {
+        let n = 1;
+        setup(n);
+        unsafe {
+            assert_eq!(pic_pending_take(0), 0);
+            pic_pending_set(0);
+            pic_pending_set(0);
+            assert_eq!(pic_pending_take(0), 1, "flag coalesces");
+            assert_eq!(pic_pending_take(0), 0, "take consumes");
+
+            assert_eq!(insn_read(0), 0);
+            insn_publish(0, 12345);
+            assert_eq!(insn_read(0), 12345);
+
+            assert_eq!(host_doorbell_post(n), 0);
+            assert_eq!(host_doorbell_post(n), 1);
         }
     }
 

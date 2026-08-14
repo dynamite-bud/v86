@@ -20,22 +20,35 @@
 
 export const CTL_CACHE_LINE = 64;
 export const CTL_BASE_GAP = 0x10000;
-export const CTL_VCPU_STRIDE = 0x240;
+export const CTL_VCPU_STRIDE = 0x340;
 
 // per-vCPU field byte offsets (relative to the vCPU's block)
 export const CTL_DOORBELL = 0x000;
 export const CTL_RUN_STATE_PUB = 0x040;
 export const CTL_HEARTBEAT = 0x044;
+export const CTL_INSN_PUB = 0x048;
 export const CTL_COMMAND = 0x080;
+export const CTL_PIC_PENDING = 0x084;
 export const CTL_PENDING_IRR = 0x0C0;
 export const CTL_PENDING_TMR = 0x100;
 export const CTL_IPI_SPECIAL = 0x140;
 export const CTL_EOI_RING = 0x180;
 export const CTL_MAILBOX = 0x200;
+export const CTL_JIT_INBOX = 0x240;
 
 export const CTL_PENDING_WORDS = 8;
 export const CTL_EOI_RING_CAP = 16;
 export const CTL_MAILBOX_BYTES = 64;
+
+// jit_inbox sub-offsets (relative to CTL_JIT_INBOX) and event encoding
+// (W3, docs/smp-phase4-design.md §9 W3 note)
+export const CTL_JIT_INBOX_LOCK = 0x00;
+export const CTL_JIT_INBOX_HEAD = 0x04;
+export const CTL_JIT_INBOX_OVERFLOW = 0x08;
+export const CTL_JIT_INBOX_TAIL = 0x40;
+export const CTL_JIT_INBOX_SLOTS = 0x80;
+export const CTL_JIT_INBOX_CAP = 32;
+export const CTL_JIT_EVENT_PROTECT_BIT = 1 << 24;
 
 // routing entry field byte offsets (relative to the entry)
 export const CTL_ROUTING_APIC_ID = 0x00;
@@ -51,7 +64,8 @@ export const CTL_MACHINE_TSC_OFFSET = 0x00;
 export const CTL_MACHINE_BUSLOCK = 0x40;
 export const CTL_MACHINE_JIT_DIRTY_RING = 0x80;
 export const CTL_MACHINE_DEV_IRQ_RING = 0x1C0;
-export const CTL_MACHINE_SIZE = 0x600;
+export const CTL_MACHINE_HOST_DOORBELL = 0x600;
+export const CTL_MACHINE_SIZE = 0x640;
 export const CTL_JIT_DIRTY_RING_CAP = 64;
 export const CTL_DEV_IRQ_RING_CAP = 256;
 
@@ -107,7 +121,8 @@ export function ctl_machine_offset(n)
 }
 
 /**
- * Total control-region size in bytes for n vCPUs. Must equal the Rust
+ * Const-part control-region size in bytes for n vCPUs (everything except
+ * the memory-size-scaled code bitmaps). Must equal the Rust
  * get_smpctl_size(n) export.
  * @param {number} n
  */
@@ -117,13 +132,48 @@ export function ctl_size(n)
 }
 
 /**
+ * Per-vCPU code-page bitmap stride in bytes (W3): one bit per guest phys
+ * page, rounded up to whole cache lines. Must equal the Rust
+ * code_bitmap_stride.
+ * @param {number} memory_size
+ */
+export function ctl_code_bitmap_stride(memory_size)
+{
+    return (memory_size >> 15) + CTL_CACHE_LINE - 1 & ~(CTL_CACHE_LINE - 1);
+}
+
+/**
+ * Byte offset of vCPU i's code-page bitmap relative to CTL_BASE. Must
+ * equal the Rust get_smpctl_code_bitmap_offset(i, n) export.
+ * @param {number} n
+ * @param {number} i
+ * @param {number} memory_size
+ */
+export function ctl_code_bitmap_offset(n, i, memory_size)
+{
+    return ctl_size(n) + i * ctl_code_bitmap_stride(memory_size);
+}
+
+/**
+ * Total control-region size, code bitmaps included. Must equal the Rust
+ * get_smpctl_total_size(n) export.
+ * @param {number} n
+ * @param {number} memory_size
+ */
+export function ctl_total_size(n, memory_size)
+{
+    return ctl_size(n) + n * ctl_code_bitmap_stride(memory_size);
+}
+
+/**
  * Control-region size in whole 64K wasm pages (what starter.js adds to the
  * guest memory when worker mode is requested).
  * @param {number} n
+ * @param {number} memory_size
  */
-export function ctl_pages(n)
+export function ctl_pages(n, memory_size)
 {
-    return Math.ceil(ctl_size(n) / 0x10000);
+    return Math.ceil(ctl_total_size(n, memory_size) / 0x10000);
 }
 
 /**
@@ -342,6 +392,78 @@ export function ring_pop(i32, ring, cap)
     return value;
 }
 
+// ---- per-vCPU jit inbox (W3, design §9 W3 note) ----
+//
+// Multi-producer push under the inbox spinlock (the same protocol as the
+// Rust smpctl::jit_inbox_push — the device host pushes DMA dirty events
+// from here). Overflow sets the flag instead of dropping: the consumer
+// recovers with jit_clear_all + full_clear_tlb and the code bitmaps
+// re-supply the protection, so nothing needs a JS backlog.
+
+/**
+ * @param {!Int32Array} i32
+ * @param {number} ctl_base
+ * @param {number} i target vCPU
+ * @param {number} event page number, | CTL_JIT_EVENT_PROTECT_BIT for
+ *     protect events
+ */
+export function jit_inbox_push(i32, ctl_base, i, event)
+{
+    const inbox = ctl_base + i * CTL_VCPU_STRIDE + CTL_JIT_INBOX;
+    while(Atomics.compareExchange(i32, inbox + CTL_JIT_INBOX_LOCK >> 2, 0, 1) !== 0)
+    {
+    }
+    const head = Atomics.load(i32, inbox + CTL_JIT_INBOX_HEAD >> 2) >>> 0;
+    const tail = Atomics.load(i32, inbox + CTL_JIT_INBOX_TAIL >> 2) >>> 0;
+    if(((head - tail) >>> 0) >= CTL_JIT_INBOX_CAP)
+    {
+        Atomics.store(i32, inbox + CTL_JIT_INBOX_OVERFLOW >> 2, 1);
+    }
+    else
+    {
+        i32[inbox + CTL_JIT_INBOX_SLOTS + 4 * (head % CTL_JIT_INBOX_CAP) >> 2] = event;
+        Atomics.store(i32, inbox + CTL_JIT_INBOX_HEAD >> 2, head + 1 | 0);
+    }
+    Atomics.store(i32, inbox + CTL_JIT_INBOX_LOCK >> 2, 0);
+}
+
+// ---- W3 host-side helpers (device host of topology (b)) ----
+
+/**
+ * Set vCPU i's 8259-INTR flag (paired with a doorbell_post; the BSP
+ * worker xchg-takes it before its PIC-ack RPC).
+ * @param {!Int32Array} i32
+ * @param {number} ctl_base
+ * @param {number} i
+ */
+export function pic_pending_set(i32, ctl_base, i)
+{
+    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_PIC_PENDING >> 2, 1);
+}
+
+/**
+ * Read vCPU i's published instruction counter (design §8: main sums the
+ * cells for the approximate machine-wide counter).
+ * @param {!Int32Array} i32
+ * @param {number} ctl_base
+ * @param {number} i
+ */
+export function insn_read(i32, ctl_base, i)
+{
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_INSN_PUB >> 2);
+}
+
+/**
+ * Word index of the machine host_doorbell (workers post it after level
+ * EOIs and routing-snapshot changes; the host waitAsyncs on it).
+ * @param {number} ctl_base
+ * @param {number} n
+ */
+export function host_doorbell_word(ctl_base, n)
+{
+    return ctl_base + ctl_machine_offset(n) + CTL_MACHINE_HOST_DOORBELL >> 2;
+}
+
 // ---- mailbox (Layer A RPC protocol, tests/threads/mailbox-protocol.js) ----
 
 // 64-byte per-vCPU record, i32-indexed; field indices within the record.
@@ -376,6 +498,10 @@ export const MAILBOX_OP_MMAP_READ = 3;
 export const MAILBOX_OP_MMAP_WRITE = 4;
 export const MAILBOX_OP_IN_REP = 5;
 export const MAILBOX_OP_OUT_REP = 6;
+// W3 (topology (b), design §4): the BSP worker's 8259 acknowledge RPC —
+// the device host answers the acknowledged vector, or -1 when nothing is
+// pending
+export const MAILBOX_OP_PIC_ACK = 7;
 
 /**
  * Word index of vCPU i's mailbox record within the control-region view.

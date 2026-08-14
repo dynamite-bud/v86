@@ -2144,6 +2144,35 @@ CPU.prototype.attach_smp_worker_host = function(host)
     };
 };
 
+/**
+ * XWAH-9 Phase 4 Stage W3 (docs/smp-phase4-design.md §9 W3): put this CPU
+ * object into topology-(b) device-host mode — every vCPU executes in its
+ * own worker (src/browser/vcpu_worker.js per-vCPU mode). Unlike the (c)
+ * attach above, device_raise_irq/device_lower_irq KEEP their default wasm
+ * exports: this instance's Rust PIC/IOAPIC are the authoritative chipset,
+ * and apic::route's shared leg (set_worker_host) posts matched vectors to
+ * the right worker. Only the guest-execution-adjacent calls reroute:
+ *
+ * - jit_dirty_cache (write_blob during DMA/IDE) broadcasts dirty events
+ *   into every worker's jit inbox — the live JIT caches are theirs;
+ * - main_loop becomes the host's device tick;
+ * - reboot_internal additionally resets every worker.
+ *
+ * @param {!Object} host an SMPVcpuHost (src/browser/smp_vcpu_host.js)
+ */
+CPU.prototype.attach_smp_vcpu_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        reboot();
+        host.post_reset();
+    };
+};
+
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
 {
     ptr >>>= 0;

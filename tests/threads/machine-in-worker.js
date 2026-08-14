@@ -247,6 +247,10 @@ async function phase_b()
         acpi: true,
         cpus: CPUS,
         smp_workers: true,
+        // pin topology (c): this is the Stage W2 gate (main_loop_smp
+        // inside ONE machine worker); the W3 default for cpus > 1 is
+        // topology (b), gated by tests/threads/vcpu-workers-smp.js
+        smp_worker_topology: "machine",
         smp_worker_url: WORKER_URL,
         log_level: 0,
         bzimage_initrd_from_filesystem: true,

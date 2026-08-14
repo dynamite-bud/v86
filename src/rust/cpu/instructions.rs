@@ -2213,7 +2213,7 @@ pub unsafe fn instr_F4() {
         // only an INIT/SIPI (or an NMI, unsupported) can revive it. SeaBIOS
         // parks APs like this. The machine-dead event fires from the
         // scheduler once every vCPU is parked, not here.
-        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked);
+        crate::vcpu_park_hook!();
     }
     else {
         // execution can never resume (until NMIs are supported)

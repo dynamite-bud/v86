@@ -43,7 +43,7 @@ import {
     MAILBOX_STATE, MAILBOX_SEQ, MAILBOX_OP_OUT, MAILBOX_OP_IN,
     mailbox_request, mailbox_service, mailbox_wait_for_request,
     mailbox_record_word,
-    ctl_base_for, ctl_size, ctl_pages,
+    ctl_base_for, ctl_total_size, ctl_pages,
     doorbell_post, heartbeat_read, run_state_read,
     command_write, CTL_COMMAND_TERMINATE,
     CTL_RUN_STATE_PARKED, CTL_RUN_STATE_HALTED,
@@ -179,7 +179,7 @@ async function main()
 
     // guest memory sized exactly as starter.js sizes it under smp_workers:
     // guest RAM + scratch page + control-region pages
-    const guest_pages = MEMORY_SIZE / 0x10000 + 1 + ctl_pages(TOTAL_CPUS);
+    const guest_pages = MEMORY_SIZE / 0x10000 + 1 + ctl_pages(TOTAL_CPUS, MEMORY_SIZE);
     const guest_memory = new WebAssembly.Memory(
         { initial: guest_pages, maximum: guest_pages, shared: true });
     assert(guest_memory.buffer instanceof SharedArrayBuffer, "guest memory must be shared");
@@ -246,8 +246,8 @@ async function main()
     const init = await waits["init-done"];
     assert.equal(init.smpctl_base, ctl_base,
         "rust get_smpctl_base must be memory_size + 0x10000");
-    assert.equal(init.smpctl_size, ctl_size(TOTAL_CPUS),
-        "rust get_smpctl_size must match the JS mirror");
+    assert.equal(init.smpctl_size, ctl_total_size(TOTAL_CPUS, MEMORY_SIZE),
+        "rust get_smpctl_total_size must match the JS mirror");
 
     // 2. clock origin handshake: the worker's mapped clock reads as main
     // time; it was sampled strictly before the message arrived, so the

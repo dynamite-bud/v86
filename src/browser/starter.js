@@ -26,6 +26,7 @@ import { FS } from "../../lib/filesystem.js";
 import { ctl_pages } from "./smpctl.js";
 import { build_gram_env } from "./gram_env.js";
 import { SMPWorkerHost } from "./smp_worker_host.js";
+import { SMPVcpuHost } from "./smp_vcpu_host.js";
 
 // Multi-memory capability probe (XWAH-9 Phase 3): a minimal hand-assembled
 // two-memory module — imports "e"."m" and "e"."g" (the JIT modules' shape,
@@ -64,6 +65,7 @@ export const MULTIMEM_PROBE_MODULE = new Uint8Array([
       guest_memory_backend: (string|undefined),
       guest_memory_shared: (string|boolean|undefined),
       smp_workers: (boolean|string|undefined),
+      smp_worker_topology: (string|undefined),
       screen: ({
           scale: (number|undefined),
       } | undefined),
@@ -114,10 +116,12 @@ export function V86(options)
     dbg_assert(guest_memory_shared_option === "auto" || typeof guest_memory_shared_option === "boolean",
         "options.guest_memory_shared must be \"auto\", true or false");
 
-    // NOTE: Experimental (XWAH-9 Phase 4 Stage W2): smp_workers requests
-    // worker execution (docs/smp-phase4-design.md §8/§9) — topology (c):
-    // the whole machine's vCPUs run inside ONE worker over the shared
-    // imported guest memory while this thread becomes the device host.
+    // NOTE: Experimental (XWAH-9 Phase 4 Stages W2+W3): smp_workers
+    // requests worker execution (docs/smp-phase4-design.md §8/§9) over the
+    // shared imported guest memory while this thread becomes the device
+    // host — one worker per vCPU (topology (b), real parallelism) for
+    // cpus > 1, the whole machine in one worker (topology (c)) for
+    // cpus == 1; see smp_worker_topology below to override.
     // false = default, true = hard requirement (loud constructor throw
     // naming the missing capability), "auto" = degrade down the ladder
     // (workers -> time-sliced over imported memory -> time-sliced) with a
@@ -129,6 +133,20 @@ export function V86(options)
     this.smp_workers = smp_workers;
     this.smp_worker_host = null;
     this.smp_mode = null;
+    // Stage W3: worker-execution topology (docs/smp-phase4-design.md §1,
+    // §9 W3). "auto" (default): one worker per vCPU — topology (b) — when
+    // cpus > 1, the whole machine in one worker — topology (c) — when
+    // cpus == 1 (a single vCPU gains nothing from the (b) wire; (c) is the
+    // landed, cheaper path there). "percpu"/"machine" force the respective
+    // topology, primarily for testing ((c) with cpus > 1 remains the
+    // time-sliced-in-a-worker mode W2 landed; (b) with cpus == 1 is legal
+    // and exercises the per-vCPU wire without SMP).
+    const smp_worker_topology =
+        options.smp_worker_topology === undefined ? "auto" : options.smp_worker_topology;
+    dbg_assert(smp_worker_topology === "auto" || smp_worker_topology === "percpu" ||
+        smp_worker_topology === "machine",
+        "options.smp_worker_topology must be \"auto\", \"percpu\" or \"machine\"");
+    this.smp_worker_topology = smp_worker_topology;
 
     // Ladder step 1 requirements (design §8), probed synchronously; any
     // failure throws for `true` and degrades for "auto".
@@ -258,7 +276,8 @@ export function V86(options)
         const sizing_cpus =
             Number.isInteger(cpus_option) && cpus_option >= 1 && cpus_option <= 255
                 ? cpus_option : 1;
-        guest_memory_ctl_pages = smp_workers_effective ? ctl_pages(sizing_cpus) : 0;
+        guest_memory_ctl_pages =
+            smp_workers_effective ? ctl_pages(sizing_cpus, guest_memory_size) : 0;
         const guest_pages = guest_memory_size / (64 * 1024) + 1 + guest_memory_ctl_pages;
         guest_memory = new WebAssembly.Memory(guest_memory_is_shared
             ? { "initial": guest_pages, "maximum": guest_pages, "shared": true }
@@ -957,16 +976,31 @@ V86.prototype.continue_init = async function(emulator, options)
 
         this.v86.init(settings);
 
-        // Stage W2 (docs/smp-phase4-design.md §9): hand execution to the
-        // machine worker. Spawn failures degrade one ladder step under
-        // "auto" (time-sliced over the already-created imported memory) and
-        // fail loudly under `true`. The "smp-mode" event below reports
-        // whatever this resolves to.
+        // Stages W2/W3 (docs/smp-phase4-design.md §9): hand execution to
+        // the worker(s). Topology resolution: "percpu" (or "auto" with
+        // cpus > 1) spawns one worker per vCPU — topology (b); otherwise
+        // the whole machine runs in one worker — topology (c). Spawn
+        // failures degrade one ladder step under "auto" (time-sliced over
+        // the already-created imported memory) and fail loudly under
+        // `true`. The "smp-mode" event below reports whatever this
+        // resolves to.
+        let topology_effective = null;
         if(this.smp_workers_effective)
         {
+            topology_effective =
+                this.smp_worker_topology === "percpu" ||
+                this.smp_worker_topology === "auto" && emulator.cpu.smp_cpus > 1
+                    ? "percpu" : "machine";
             try
             {
-                await this.smp_worker_start(emulator, settings);
+                if(topology_effective === "percpu")
+                {
+                    await this.smp_vcpu_start(emulator, settings);
+                }
+                else
+                {
+                    await this.smp_worker_start(emulator, settings);
+                }
             }
             catch(e)
             {
@@ -978,10 +1012,12 @@ V86.prototype.continue_init = async function(emulator, options)
                 dbg_log("smp_workers \"auto\" degraded to time-sliced: " +
                     "worker spawn failed: " + e);
                 this.smp_workers_effective = false;
+                topology_effective = null;
             }
         }
         this.smp_mode = {
             "execution": this.smp_worker_host ? "workers" : "time-sliced",
+            "topology": topology_effective,
             "cpus_effective": emulator.cpu.smp_cpus,
             "guest_memory": {
                 "backend": emulator.cpu.guest_memory ? "imported" : "linear",
@@ -1053,6 +1089,58 @@ V86.prototype.smp_worker_start = async function(emulator, settings)
     this.smp_worker_host = host;
     // the §8 command protocol follows the emulator lifecycle: run resumes
     // the machine loop, stop parks it at the next slice boundary
+    this.bus.register("emulator-started", function() { host.run(); }, this);
+    this.bus.register("emulator-stopped", function() { host.park(); }, this);
+};
+
+/**
+ * Stage W3, topology (b): spawn one worker per vCPU, hand each the
+ * module/gram bytes and the shared guest memory, and rewire this thread's
+ * CPU object into the (b) device host (CPU.attach_smp_vcpu_host; the main
+ * instance keeps the authoritative chipset and set_worker_host makes its
+ * interrupt routing post to the workers). Resolves when every worker is
+ * ready; rejects on any spawn/instantiate failure, tearing down whatever
+ * was spawned (the caller decides between fail-stop and degradation).
+ * @param {!Object} emulator
+ * @param {!Object} settings
+ * @return {!Promise}
+ */
+V86.prototype.smp_vcpu_start = async function(emulator, settings)
+{
+    const cpu = emulator.cpu;
+    if(!this.wasm_source)
+    {
+        throw new Error("smp_workers requires the built-in wasm loader " +
+            "(the workers instantiate the same module bytes)");
+    }
+    const host = new SMPVcpuHost(cpu, this.emulator_bus, cpu.guest_memory, cpu.smp_cpus);
+    host.cpu_exception_hook = n => this.cpu_exception_hook(n);
+    try
+    {
+        await host.start({
+            worker_url: this.smp_worker_url,
+            wasm_source: this.wasm_source,
+            gram_bytes: this.gram_bytes,
+            guest_memory: cpu.guest_memory,
+            acpi: !!settings.acpi,
+            disable_jit: !!settings.disable_jit,
+            cpuid_level: settings.cpuid_level,
+        });
+    }
+    catch(e)
+    {
+        host.stop_service_loops();
+        for(const channel of host.channels)
+        {
+            channel.terminate();
+        }
+        // leave the main instance out of host mode again (ladder step-down
+        // back to time-sliced execution on this thread)
+        cpu.wm.exports["set_worker_host"](0);
+        throw e;
+    }
+    cpu.attach_smp_vcpu_host(host);
+    this.smp_worker_host = host;
     this.bus.register("emulator-started", function() { host.run(); }, this);
     this.bus.register("emulator-stopped", function() { host.park(); }, this);
 };
@@ -1351,6 +1439,13 @@ V86.prototype.save_state = async function()
  */
 V86.prototype.get_instruction_counter = function()
 {
+    if(this.smp_worker_host && this.smp_worker_host.sum_instruction_counters)
+    {
+        // topology (b): the guest executes in the vCPU workers; sum the
+        // per-worker published counters (design §8 — approximate, per
+        // slice). The main instance's own counter stays 0.
+        return this.smp_worker_host.sum_instruction_counters();
+    }
     if(this.v86)
     {
         return this.v86.cpu.instruction_counter[0] >>> 0;

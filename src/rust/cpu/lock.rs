@@ -731,10 +731,10 @@ pub unsafe fn ins_rep_batched(is_asize_32: bool, size_bytes: i32) -> bool {
     if !skip_dirty_page {
         jit::jit_dirty_page(Page::page_of(phys_dst));
     }
-    // vCPU record 0: topology (c) has exactly one machine worker; (b)
-    // parameterizes this by the worker's vCPU index
+    // topology (c) uses record 0 (one machine worker); a per-vCPU worker
+    // (b) uses its own record
     let done = smpctl::mailbox_rpc(
-        0,
+        crate::cpu::worker::mailbox_record_index(),
         smpctl::MAILBOX_OP_IN_REP,
         port,
         size_bytes,
@@ -785,7 +785,7 @@ pub unsafe fn outs_rep_batched(is_asize_32: bool, seg: i32, size_bytes: i32) -> 
         return false;
     }
     let done = smpctl::mailbox_rpc(
-        0,
+        crate::cpu::worker::mailbox_record_index(),
         smpctl::MAILBOX_OP_OUT_REP,
         port,
         size_bytes,

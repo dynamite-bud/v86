@@ -11,7 +11,13 @@
 // instance memory, instantiated in the worker), diagnostics go out via
 // postMessage, the clock is worker-local.
 //
-// Two modes, selected by the payload:
+// Three modes, selected by the payload:
+//
+// - `vcpu` present (Stage W3, topology (b)): this worker owns exactly
+//   vCPU `index` of `total`. Same instance setup as machine mode plus
+//   set_worker_vcpu; the loop body is Rust's main_loop_worker (via the
+//   main_loop dispatch), which drains the jit inbox, consumes INIT/SIPI,
+//   merges remotely posted vectors into the local LAPIC, and runs slices.
 //
 // - `machine` present (Stage W2, topology (c)): this worker IS the machine.
 //   It mirrors CPU.init's instance setup (worker mode, acpi flag, cpuid
@@ -38,8 +44,8 @@ import { WASM_TABLE_SIZE, WASM_TABLE_OFFSET } from "../const.js";
 import { get_rand_int } from "../lib.js";
 import { build_gram_env } from "./gram_env.js";
 import {
-    ctl_base_for, ctl_size, ctl_probe_offset, SMPCTL_PROBE_FIELD_COUNT,
-    ctl_machine_offset,
+    ctl_base_for, ctl_total_size, ctl_probe_offset, SMPCTL_PROBE_FIELD_COUNT,
+    ctl_machine_offset, ctl_code_bitmap_offset,
     CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK, CTL_COMMAND_TERMINATE,
     CTL_COMMAND_RESET,
     CTL_RUN_STATE_RUNNABLE, CTL_RUN_STATE_PARKED, CTL_RUN_STATE_HALTED,
@@ -108,6 +114,10 @@ async function run_worker(payload)
     // machine's vCPUs; the payload carries the CPU.init settings the worker
     // instance must mirror
     const machine = payload.machine || null;
+    // per-vCPU mode (Stage W3, topology (b)): this worker runs exactly
+    // vCPU `index` of `total`; same instance settings as machine mode plus
+    // set_worker_vcpu, and the loop body is Rust's main_loop_worker
+    const vcpu = payload.vcpu || null;
 
     // clock origin handshake (design §6 microtick row): same monotonic
     // clock as the main thread, offset by the difference of the two
@@ -121,7 +131,7 @@ async function run_worker(payload)
     }
 
     const ctl_base = ctl_base_for(memory_size);
-    if(ctl_base + ctl_size(total) > guest_memory.buffer.byteLength)
+    if(ctl_base + ctl_total_size(total, memory_size) > guest_memory.buffer.byteLength)
     {
         throw new Error("guest memory is missing the control-region pages " +
             "(was it sized with smp_workers set?)");
@@ -181,9 +191,10 @@ async function run_worker(payload)
         "microtick": microtick,
         // worker-local per §6: only this instance's LAPIC timer deadline;
         // PIT/RTC/ACPI tick on the device host and arrive as ring events
-        // (the skeleton stub keeps its inert W1 value)
+        // ((c)) or pending-bitmap posts ((b)); the skeleton stub keeps its
+        // inert W1 value
         "run_hardware_timers": (acpi, t) =>
-            machine ? (acpi ? exports["apic_timer"](t) : 100) : t + 100,
+            machine || vcpu ? (acpi ? exports["apic_timer"](t) : 100) : t + 100,
         "get_rand_int": () => get_rand_int(),
         // park/notify replaces stop_idling in worker mode (§3)
         "stop_idling": () => {},
@@ -224,7 +235,7 @@ async function run_worker(payload)
         // borrows its jit state twice ---
         "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len) =>
         {
-            if(machine)
+            if(machine || vcpu)
             {
                 const code = new Uint8Array(exports.memory.buffer, ptr >>> 0, len >>> 0);
                 const result = new WebAssembly.Instance(
@@ -278,25 +289,34 @@ async function run_worker(payload)
     exports["allocate_memory"](memory_size);
     exports["set_smp_cpus"](total);
 
-    if(machine)
+    const settings = machine || vcpu;
+    if(settings)
     {
-        // Mirror CPU.init's instance setup (src/cpu.js): this instance IS
-        // the machine — the main thread's instance never executes guest
-        // code and serves only as the device host.
+        // Mirror CPU.init's instance setup (src/cpu.js): in (c) this
+        // instance IS the machine; in (b) it owns exactly one vCPU. The
+        // main thread's instance never executes guest code and serves
+        // only as the device host.
         if(typeof exports["set_worker_mode"] !== "function")
         {
-            throw new Error("machine mode requires a wasm build with set_worker_mode " +
+            throw new Error("worker mode requires a wasm build with set_worker_mode " +
                 "(rebuild the multimem artifact)");
         }
         // relocates the cpu/lock.rs bus-lock cell to machine.buslock in the
         // control region (design §9 W2; must precede any guest execution)
         exports["set_worker_mode"](1);
-        machine["disable_jit"] && exports["set_jit_config"](0, 1);
-        machine["cpuid_level"] && exports["set_cpuid_level"](machine["cpuid_level"]);
+        settings["disable_jit"] && exports["set_jit_config"](0, 1);
+        settings["cpuid_level"] && exports["set_cpuid_level"](settings["cpuid_level"]);
         // acpi_enabled global (cpu.js view at byte offset 552)
-        new Uint8Array(exports.memory.buffer, 552, 1)[0] = machine["acpi"] ? 1 : 0;
+        new Uint8Array(exports.memory.buffer, 552, 1)[0] = settings["acpi"] ? 1 : 0;
         exports["set_tsc"](0, 0);
         exports["reset_cpu"]();
+    }
+    if(vcpu)
+    {
+        // Stage W3 (design §3): per-vCPU worker role — switches the live
+        // block to vCPU `index`, publishes its run state + routing entry,
+        // and re-initializes this vCPU's control cells
+        exports["set_worker_vcpu"](index, total);
     }
 
     // jit imports: the cpu.js create_jit_imports shape plus "g" (the JIT
@@ -320,10 +340,11 @@ async function run_worker(payload)
     {
         throw new Error(`smpctl base mismatch: rust ${smpctl_base} != js ${ctl_base}`);
     }
-    const smpctl_size = exports["get_smpctl_size"](total);
-    if(smpctl_size !== ctl_size(total))
+    const smpctl_size = exports["get_smpctl_total_size"](total);
+    if(smpctl_size !== ctl_total_size(total, memory_size))
     {
-        throw new Error(`smpctl size mismatch: rust ${smpctl_size} != js ${ctl_size(total)}`);
+        throw new Error(`smpctl size mismatch: rust ${smpctl_size} != ` +
+            `js ${ctl_total_size(total, memory_size)}`);
     }
     for(let field = 0; field < SMPCTL_PROBE_FIELD_COUNT; field++)
     {
@@ -336,6 +357,16 @@ async function run_worker(payload)
                 throw new Error(`smpctl offset mismatch: field ${field} i ${i}: ` +
                     `rust ${rust_offset} != js ${js_offset}`);
             }
+        }
+    }
+    for(const i of [0, total - 1])
+    {
+        const rust_offset = exports["get_smpctl_code_bitmap_offset"](i, total);
+        const js_offset = ctl_code_bitmap_offset(total, i, memory_size);
+        if(rust_offset !== js_offset)
+        {
+            throw new Error(`smpctl code-bitmap offset mismatch: i ${i}: ` +
+                `rust ${rust_offset} != js ${js_offset}`);
         }
     }
 
@@ -354,6 +385,13 @@ async function run_worker(payload)
     if(machine)
     {
         machine_loop();
+        channel.close();
+        return;
+    }
+
+    if(vcpu)
+    {
+        vcpu_loop();
         channel.close();
         return;
     }
@@ -428,6 +466,60 @@ async function run_worker(payload)
             const t = exports["main_loop"]();
             // deliver deferred codegen_finalize_finished callbacks (FIFO)
             // now that the module is reentrant again (outside main_loop)
+            for(let i = 0; i < pending_finished.length; i += 3)
+            {
+                exports["codegen_finalize_finished"](
+                    pending_finished[i], pending_finished[i + 1], pending_finished[i + 2]);
+            }
+            pending_finished.length = 0;
+            if(t > 0)
+            {
+                doorbell_wait(i32, ctl_base, index, seen, Math.min(t, PARK_TIMEOUT_MS));
+            }
+        }
+    }
+
+    // The Stage W3 per-vCPU loop (topology (b), design §3/§9 W3): the thin
+    // JS shell around Rust's main_loop_worker (reached through main_loop's
+    // worker dispatch). Rust owns the whole iteration — jit-inbox drain,
+    // INIT/SIPI consumption, pending-IRR merge, handle_irqs, the slice —
+    // and returns the idle deadline; this loop owns the §8 command
+    // protocol and the doorbell park. The doorbell is read BEFORE
+    // main_loop runs, so anything posted mid-slice turns the wait into an
+    // immediate wake — no lost-wakeup window (the machine_loop invariant).
+    function vcpu_loop()
+    {
+        channel.post({ type: "vcpu-ready", "index": index });
+        for(;;)
+        {
+            const seen = doorbell_read(i32, ctl_base, index);
+            const command = command_read(i32, ctl_base, index);
+            if(command === CTL_COMMAND_TERMINATE)
+            {
+                run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_HALTED);
+                channel.post({ type: "terminated", "index": index });
+                return;
+            }
+            if(command === CTL_COMMAND_PARK_REQ || command === CTL_COMMAND_PARKED_ACK)
+            {
+                command_ack(i32, ctl_base, index, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK);
+                doorbell_wait(i32, ctl_base, index, seen, PARK_TIMEOUT_MS);
+                continue;
+            }
+            if(command === CTL_COMMAND_RESET)
+            {
+                // machine reboot: reset this instance and re-enter the
+                // per-vCPU role (which also clears this vCPU's control
+                // cells so pre-reset IPIs/jit events never leak)
+                exports["reset_cpu"]();
+                exports["set_worker_vcpu"](index, total);
+                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_RUN);
+                continue;
+            }
+            heartbeat_publish(i32, ctl_base, index);
+            const t = exports["main_loop"]();
+            // deliver deferred codegen_finalize_finished callbacks (FIFO)
+            // now that the module is reentrant again
             for(let i = 0; i < pending_finished.length; i += 3)
             {
                 exports["codegen_finalize_finished"](
