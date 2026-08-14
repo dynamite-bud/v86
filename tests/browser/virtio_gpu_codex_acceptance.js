@@ -15,6 +15,8 @@ const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
+const LLVMPipe_BENCHMARK_PATH =
+    path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
 assert.ok(
     ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark",
         "benchmark-accelerated"].includes(SCENARIO),
@@ -187,20 +189,28 @@ async function run_scenario(browser_ws, base_url, renderer)
             if(BENCHMARK_MACHINE) url.searchParams.set("benchmark_machine", BENCHMARK_MACHINE);
         }
         await cdp.call("Page.navigate", { url: url.href });
+        const renderer_stages = [];
         await wait_for(async() => {
             const state = await evaluate(cdp,
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
+                `renderer_stage: window.name || "", ` +
                 `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
                 `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
                 `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
                 `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
                 `({ id, resources: Array.from(context.resources) })), ` +
                 `last_invalid_3d_error: device.backend?.last_invalid_3d_error || null, ` +
+                    `active_calls: device.backend?.active_calls ?? null, ` +
                 `invalid_3d_errors: device.backend?.invalid_3d_errors || [], ` +
                 `last_transfer_from_host_3d: device.last_transfer_from_host_3d || null, ` +
                 `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
+            if(state.renderer_stage &&
+                renderer_stages.at(-1) !== state.renderer_stage)
+            {
+                renderer_stages.push(state.renderer_stage);
+            }
             last_readiness_state = state;
             if(state.fatal)
             {
@@ -214,6 +224,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 const serial_tail = state.serial.slice(-60000);
                 const error = new Error(
                     `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
+                    `Renderer stage: ${state.renderer_stage}\n` +
+                    `Renderer stages: ${renderer_stages.join(" -> ")}\n` +
                     `GPU state: ${JSON.stringify(state.gpu)}\n3D rejections:\n` +
                     (state.gpu?.invalid_3d_errors || []).join("\n"));
                 error.terminal = true;
@@ -236,6 +248,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
                 canvas_width: canvas.width,
                 canvas_height: canvas.height,
+                accelerated_scanout_pixel: window.acceleratedScanoutPixel || null,
+                accelerated_scanout_probe_error: window.acceleratedScanoutProbeError || null,
             };
         })()`);
         if(SCENARIO === "mesa")
@@ -543,6 +557,14 @@ async function run_scenario(browser_ws, base_url, renderer)
                     benchmark.terminal_reference_sha256);
                 assert.equal(run.gpu.invalid_commands, 0);
                 assert.equal(run.gpu.backend_errors, 0);
+                assert.deepEqual(run.gpu.invalid_responses, []);
+                assert.ok(run.gpu.fence_responses.every(response =>
+                    response.response === 0x1100));
+            }
+            if(accelerated)
+            {
+                benchmark.performance_comparison =
+                    compare_accelerated_benchmark(benchmark);
             }
             assert.equal(failures.length, 0, failures.join(" | "));
             await evaluate(cdp, "window.emulator.stop()");
@@ -575,6 +597,7 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.canvas_visible, true);
         assert.equal(state.canvas_width, state.scanout.width);
         assert.equal(state.canvas_height, state.scanout.height);
+        assert.equal(state.accelerated_scanout_probe_error, null);
         if(accelerated)
         {
             const gpu = await evaluate(cdp, `(() => {
@@ -582,13 +605,19 @@ async function run_scenario(browser_ws, base_url, renderer)
                 return {
                     stats: device.get_performance_stats(),
                     last_invalid_3d_error: device.backend.last_invalid_3d_error,
+                    invalid_3d_errors: device.backend.invalid_3d_errors,
                 };
             })()`);
-            assert.equal(gpu.stats.invalid_commands, 0);
+            assert.equal(gpu.stats.invalid_commands, 0, JSON.stringify(gpu));
             assert.equal(gpu.stats.backend_errors, 0);
             assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
                 "Accelerated Ghostty did not submit a standard VirGL command stream");
             assert.equal(gpu.last_invalid_3d_error, null);
+            assert.ok(state.accelerated_scanout_pixel,
+                "Accelerated readiness did not sample the rendered scanout");
+            assert.ok(state.accelerated_scanout_pixel.slice(0, 3)
+                .reduce((sum, channel) => sum + channel, 0) > 24,
+            `Accelerated Ghostty scanout is black: ${state.accelerated_scanout_pixel}`);
         }
 
         if(RELAY_URL)
@@ -686,6 +715,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             login_unconfigured: true,
             keyboard_input: true,
             responsive_layout: true,
+            accelerated_scanout_pixel: state.accelerated_scanout_pixel,
             fresh_reset,
         };
     }
@@ -694,6 +724,72 @@ async function run_scenario(browser_ws, base_url, renderer)
         cdp.close();
         await fetch(`http://${browser_url.host}/json/close/${target.id}`).catch(() => {});
     }
+}
+
+function compare_accelerated_benchmark(accelerated)
+{
+    const baseline = JSON.parse(
+        fs.readFileSync(LLVMPipe_BENCHMARK_PATH, "utf8")).scenarios[0];
+    assert.equal(baseline.schema_version, accelerated.schema_version);
+    assert.equal(baseline.scenario.renderer, accelerated.scenario.renderer);
+    for(const key of [
+        "label", "user_agent", "platform", "hardware_concurrency",
+        "device_memory_gib",
+    ])
+    {
+        assert.deepEqual(accelerated.machine[key], baseline.machine[key],
+            `Benchmark machine mismatch: ${key}`);
+    }
+    assert.deepEqual(accelerated.machine.webgpu_adapter,
+        baseline.machine.webgpu_adapter, "Benchmark WebGPU adapter mismatch");
+    for(const key of [
+        "workload", "synchronization", "warmup_runs", "measured_runs",
+        "presentation_quiet_ms",
+    ])
+    {
+        assert.deepEqual(accelerated.method[key], baseline.method[key],
+            `Benchmark method mismatch: ${key}`);
+    }
+    assert.equal(accelerated.terminal_reference_sha256,
+        baseline.terminal_reference_sha256);
+
+    const baseline_cpu = baseline.summary.guest_cpu_ms.p50;
+    const accelerated_cpu = accelerated.summary.guest_cpu_ms.p50;
+    const baseline_latency = baseline.summary.keystroke_to_present_ms.p95;
+    const accelerated_latency = accelerated.summary.keystroke_to_present_ms.p95;
+    const cpu_ratio = accelerated_cpu / baseline_cpu;
+    const latency_ratio = accelerated_latency / baseline_latency;
+    assert.ok(cpu_ratio <= 0.8 || latency_ratio <= 0.8,
+        `Acceleration did not improve a primary metric by 20%: ` +
+        `cpu=${cpu_ratio} latency=${latency_ratio}`);
+    assert.ok(cpu_ratio <= 1.05 && latency_ratio <= 1.05,
+        `Acceleration regressed a primary metric by more than 5%: ` +
+        `cpu=${cpu_ratio} latency=${latency_ratio}`);
+
+    const baseline_long_tasks = baseline.raw_runs.reduce(
+        (total, run) => total + run.browser_health.long_tasks.count, 0);
+    const accelerated_long_tasks = accelerated.raw_runs.reduce(
+        (total, run) => total + run.browser_health.long_tasks.count, 0);
+    assert.ok(accelerated_long_tasks <= baseline_long_tasks,
+        "Acceleration increased browser long tasks");
+    const change = (value, control) =>
+        Number(((value - control) * 100 / control).toFixed(1));
+    return {
+        baseline: path.relative(ROOT, LLVMPipe_BENCHMARK_PATH),
+        gate: "pass",
+        guest_cpu_p50_ms: {
+            llvmpipe: baseline_cpu,
+            webgpuvirt: accelerated_cpu,
+            change_percent: change(accelerated_cpu, baseline_cpu),
+        },
+        keystroke_to_present_p95_ms: {
+            llvmpipe: baseline_latency,
+            webgpuvirt: accelerated_latency,
+            change_percent: change(accelerated_latency, baseline_latency),
+        },
+        terminal_reference_identical: true,
+        browser_long_tasks: accelerated_long_tasks,
+    };
 }
 
 async function guest_command(cdp, command, success_marker, failure_marker, timeout)

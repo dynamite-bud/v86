@@ -9,7 +9,7 @@ use wasm_bindgen::{JsCast, closure::Closure};
 use super::{
     FORMAT_B8G8R8A8_SRGB, FORMAT_B8G8R8A8_UNORM, FORMAT_B8G8R8X8_SRGB, FORMAT_B8G8R8X8_UNORM,
     FORMAT_R8_UINT, FORMAT_R8_UNORM, FORMAT_R8G8B8A8_SRGB, FORMAT_R8G8B8A8_UNORM, Renderer,
-    record_fault,
+    TARGET_BUFFER, record_fault,
 };
 
 const SUBMIT_MAGIC: u32 = 0x5336_3856; // "V86S"
@@ -34,11 +34,17 @@ const GPU_WORK_TIMEOUT_MS: i32 = 5000;
 const MAX_VERTEX_INVOCATIONS_V2: u32 = 64 * 1024;
 const MAX_INSTANCES_V2: u32 = 1;
 const MAX_VERTEX_INVOCATIONS_V3: u32 = 4 * 1024 * 1024;
-const MAX_INSTANCES_V3: u32 = 1024;
+const MAX_INSTANCES_V3: u32 = 4096;
 const MAX_VERTEX_ATTRIBUTES_V3: usize = 8;
 const MAX_BINDINGS_V3: usize = 16;
 const MAX_INLINE_CONSTANT_WORDS: usize = 4 * 1024;
 const MAX_VERTEX_BUFFERS_V3: usize = 8;
+
+fn set_diagnostic_stage(stage: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_name(stage);
+    }
+}
 
 const OP_CREATE_SHADER: u16 = 1;
 const OP_DESTROY_SHADER: u16 = 2;
@@ -119,36 +125,53 @@ fn mesa_vertex_format(format: u32) -> Result<wgpu::VertexFormat, String> {
 fn mesa_vertex_attributes(
     elements: &[MesaVertexElement],
     strides: &[u64],
+    offset_adjustments: &[u64],
+    pack_single_byte_attributes: bool,
 ) -> Result<Vec<VertexAttribute3D>, String> {
     let mut attributes = Vec::with_capacity(elements.len());
     let mut location = 0;
     while location < elements.len() {
         let element = elements[location];
         let slot = element.buffer_slot as usize;
+        let offset_adjustment = *offset_adjustments
+            .get(slot)
+            .ok_or_else(|| invalid("Mesa vertex attribute references unknown buffer"))?;
         let step_mode = if element.instance_divisor == 0 {
             wgpu::VertexStepMode::Vertex
         } else {
             wgpu::VertexStepMode::Instance
         };
-        let (format, byte_length, consumed) = if element.format == VIRGL_FORMAT_R8_UINT {
-            let next = elements
-                .get(location + 1)
-                .filter(|next| {
-                    next.format == VIRGL_FORMAT_R8_UINT
-                        && next.buffer_slot == element.buffer_slot
-                        && next.instance_divisor == element.instance_divisor
-                        && next.offset == element.offset + 1
-                })
-                .ok_or_else(|| invalid("unpaired single-byte Mesa vertex attribute"))?;
-            let _ = next;
-            (wgpu::VertexFormat::Uint8x2, 2, 2)
-        } else {
-            let format = mesa_vertex_format(element.format)?;
-            (format, format.size(), 1)
-        };
+        let (format, byte_length, consumed) =
+            if element.format == VIRGL_FORMAT_R8_UINT && pack_single_byte_attributes {
+                elements
+                    .get(location + 1)
+                    .filter(|next| {
+                        next.format == VIRGL_FORMAT_R8_UINT
+                            && next.buffer_slot == element.buffer_slot
+                            && next.instance_divisor == element.instance_divisor
+                            && next.offset == element.offset + 1
+                    })
+                    .ok_or_else(|| invalid("unpaired single-byte Mesa vertex attribute"))?;
+                (wgpu::VertexFormat::Uint8x2, 2, 2)
+            } else if element.format == VIRGL_FORMAT_R8_UINT {
+                (wgpu::VertexFormat::Uint8x2, 2, 1)
+            } else {
+                let format = mesa_vertex_format(element.format)?;
+                (format, format.size(), 1)
+            };
+        let offset = element
+            .offset
+            .checked_add(offset_adjustment)
+            .map(|offset| {
+                if element.format == VIRGL_FORMAT_R8_UINT && !pack_single_byte_attributes {
+                    offset & !1
+                } else {
+                    offset
+                }
+            })
+            .ok_or_else(|| invalid("Mesa vertex attribute offset overflow"))?;
         if slot >= strides.len()
-            || element
-                .offset
+            || offset
                 .checked_add(byte_length)
                 .is_none_or(|end| end > strides[slot])
         {
@@ -156,7 +179,7 @@ fn mesa_vertex_attributes(
         }
         attributes.push(VertexAttribute3D {
             location: location as u32,
-            offset: element.offset,
+            offset,
             format,
             buffer_slot: element.buffer_slot,
             step_mode,
@@ -391,9 +414,11 @@ struct TextVertexOutput {
     @location(2) bearings: vec2<i32>,
     @location(3) grid_position: vec2<u32>,
     @location(4) color: vec4<u32>,
-    @location(5) atlas: u32,
-    @location(6) glyph_bools: u32,
+    @location(5) atlas_field: vec2<u32>,
+    @location(6) glyph_bools_field: vec2<u32>,
 ) -> TextVertexOutput {
+    let atlas = atlas_field.x;
+    let glyph_bools = glyph_bools_field.y;
     let grid_size = unpack2u16(globals.grid_size_packed_2u16);
     let cursor_position = unpack2u16(globals.cursor_pos_packed_2u16);
     let cursor_wide = (globals.bools & CURSOR_WIDE) != 0u;
@@ -858,13 +883,35 @@ impl ShaderSource3D {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct VertexAttribute3D {
     location: u32,
     offset: u64,
     format: wgpu::VertexFormat,
     buffer_slot: u32,
     step_mode: wgpu::VertexStepMode,
+}
+
+fn vertex_fetch_end(
+    first: u32,
+    count: u32,
+    stride: u64,
+    attribute_end: u64,
+) -> Result<u64, String> {
+    if attribute_end == 0 {
+        return Ok(0);
+    }
+    let last = first
+        .checked_add(
+            count
+                .checked_sub(1)
+                .ok_or_else(|| invalid("empty vertex fetch"))?,
+        )
+        .ok_or_else(|| invalid("vertex fetch range overflow"))?;
+    u64::from(last)
+        .checked_mul(stride)
+        .and_then(|offset| offset.checked_add(attribute_end))
+        .ok_or_else(|| invalid("vertex fetch range overflow"))
 }
 
 #[derive(Clone)]
@@ -878,6 +925,9 @@ enum Binding3D {
     InlineBuffer {
         binding: u32,
         words: Arc<[u32]>,
+    },
+    ZeroStorageBuffer {
+        binding: u32,
     },
     Texture {
         binding: u32,
@@ -904,7 +954,7 @@ struct IndexBuffer3D {
     format: wgpu::IndexFormat,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct MesaVertexElement {
     offset: u64,
     instance_divisor: u32,
@@ -974,6 +1024,28 @@ struct MesaDraw {
     clear: Option<[f64; 4]>,
 }
 
+struct MesaBlit {
+    flags: u32,
+    destination: u32,
+    destination_level: u32,
+    destination_format: u32,
+    destination_x: i32,
+    destination_y: i32,
+    destination_z: i32,
+    destination_width: i32,
+    destination_height: i32,
+    destination_depth: i32,
+    source: u32,
+    source_level: u32,
+    source_format: u32,
+    source_x: i32,
+    source_y: i32,
+    source_z: i32,
+    source_width: i32,
+    source_height: i32,
+    source_depth: i32,
+}
+
 pub(crate) struct Context3D {
     pub(crate) attachments: HashSet<u32>,
     protocol_major: Option<u16>,
@@ -995,6 +1067,9 @@ struct Pipeline3D {
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group_layout: Option<wgpu::BindGroupLayout>,
     vertex_strides: Vec<u64>,
+    vertex_step_modes: Vec<wgpu::VertexStepMode>,
+    vertex_attributes: Vec<VertexAttribute3D>,
+    vertex_attribute_ends: Vec<u64>,
 }
 
 impl Context3D {
@@ -1188,8 +1263,8 @@ fn mesa_program_index(program: MesaProgram) -> u32 {
     }
 }
 
-fn mesa_program_shader_ids(program: MesaProgram) -> (u32, u32) {
-    let offset = mesa_program_index(program) * 2;
+fn mesa_program_shader_ids(program: MesaProgram, split_vertex_buffers: bool) -> (u32, u32) {
+    let offset = mesa_program_index(program) * 2 + if split_vertex_buffers { 64 } else { 0 };
     (
         MESA_VERTEX_SHADER_ID - offset,
         MESA_FRAGMENT_SHADER_ID - offset,
@@ -1203,7 +1278,10 @@ fn with_ghostty_common(source: &str) -> String {
     shader
 }
 
-fn mesa_program_shader_sources(program: MesaProgram) -> (String, String) {
+fn mesa_program_shader_sources(
+    program: MesaProgram,
+    split_vertex_buffers: bool,
+) -> (String, String) {
     match program {
         MesaProgram::Probe => (
             MESA_VERTEX_SHADER_SOURCE.to_owned(),
@@ -1217,10 +1295,24 @@ fn mesa_program_shader_sources(program: MesaProgram) -> (String, String) {
             GHOSTTY_FULLSCREEN_VERTEX_SHADER_SOURCE.to_owned(),
             with_ghostty_common(GHOSTTY_CELL_BACKGROUND_FRAGMENT_SHADER_SOURCE),
         ),
-        MesaProgram::CellText => (
-            with_ghostty_common(GHOSTTY_CELL_TEXT_VERTEX_SHADER_SOURCE),
-            with_ghostty_common(GHOSTTY_CELL_TEXT_FRAGMENT_SHADER_SOURCE),
-        ),
+        MesaProgram::CellText => {
+            let mut vertex_source = with_ghostty_common(GHOSTTY_CELL_TEXT_VERTEX_SHADER_SOURCE);
+            if !split_vertex_buffers {
+                vertex_source = vertex_source
+                    .replace(
+                        "    @location(5) atlas_field: vec2<u32>,\n    @location(6) glyph_bools_field: vec2<u32>,\n",
+                        "    @location(5) packed_fields: vec2<u32>,\n",
+                    )
+                    .replace(
+                        "    let atlas = atlas_field.x;\n    let glyph_bools = glyph_bools_field.y;\n",
+                        "    let atlas = packed_fields.x;\n    let glyph_bools = packed_fields.y;\n",
+                    );
+            }
+            (
+                vertex_source,
+                with_ghostty_common(GHOSTTY_CELL_TEXT_FRAGMENT_SHADER_SOURCE),
+            )
+        },
         MesaProgram::Image => (
             with_ghostty_common(GHOSTTY_IMAGE_VERTEX_SHADER_SOURCE),
             with_ghostty_common(GHOSTTY_IMAGE_FRAGMENT_SHADER_SOURCE),
@@ -1271,6 +1363,30 @@ fn mesa_inline_buffer_binding(
     })
 }
 
+fn mesa_uniform_binding(draw: &MesaDraw, stage: usize, binding: u32) -> Result<Binding3D, String> {
+    if draw.uniform_buffers[stage].contains_key(&1) {
+        mesa_buffer_binding(&draw.uniform_buffers, stage, 1, binding)
+    } else if draw.constant_buffers[stage].contains_key(&0) {
+        mesa_inline_buffer_binding(&draw.constant_buffers, stage, 0, binding)
+    } else {
+        Err(invalid(format!(
+            "Mesa uniform is not bound stage={stage} resource_slots={:?} inline_slots={:?}",
+            draw.uniform_buffers[stage].keys().collect::<Vec<_>>(),
+            draw.constant_buffers[stage].keys().collect::<Vec<_>>(),
+        )))
+    }
+}
+
+fn mesa_storage_binding(draw: &MesaDraw, stage: usize, binding: u32) -> Result<Binding3D, String> {
+    if draw.shader_buffers[stage].contains_key(&1) {
+        mesa_buffer_binding(&draw.shader_buffers, stage, 1, binding)
+    } else if draw.shader_buffers[stage].contains_key(&0) {
+        mesa_buffer_binding(&draw.shader_buffers, stage, 0, binding)
+    } else {
+        Ok(Binding3D::ZeroStorageBuffer { binding })
+    }
+}
+
 fn mesa_texture_binding(draw: &MesaDraw, slot: u32, binding: u32) -> Result<Binding3D, String> {
     Ok(Binding3D::Texture {
         binding,
@@ -1286,21 +1402,19 @@ fn mesa_program_bindings(program: MesaProgram, draw: &MesaDraw) -> Result<Vec<Bi
             mesa_texture_binding(draw, 0, 0)?,
             Binding3D::Sampler { binding: 1 },
         ]),
-        MesaProgram::BackgroundColor => {
-            Ok(vec![mesa_buffer_binding(&draw.uniform_buffers, 1, 1, 0)?])
-        },
+        MesaProgram::BackgroundColor => Ok(vec![mesa_uniform_binding(draw, 1, 0)?]),
         MesaProgram::CellBackground => Ok(vec![
-            mesa_buffer_binding(&draw.uniform_buffers, 1, 1, 0)?,
-            mesa_buffer_binding(&draw.shader_buffers, 1, 1, 1)?,
+            mesa_uniform_binding(draw, 1, 0)?,
+            mesa_storage_binding(draw, 1, 1)?,
         ]),
         MesaProgram::CellText => Ok(vec![
-            mesa_buffer_binding(&draw.uniform_buffers, 0, 1, 0)?,
-            mesa_buffer_binding(&draw.shader_buffers, 0, 1, 1)?,
+            mesa_uniform_binding(draw, 0, 0)?,
+            mesa_storage_binding(draw, 0, 1)?,
             mesa_texture_binding(draw, 0, 2)?,
             mesa_texture_binding(draw, 1, 3)?,
         ]),
         MesaProgram::Image => Ok(vec![
-            mesa_buffer_binding(&draw.uniform_buffers, 0, 1, 0)?,
+            mesa_uniform_binding(draw, 0, 0)?,
             mesa_texture_binding(draw, 0, 1)?,
             Binding3D::Sampler { binding: 2 },
         ]),
@@ -1430,6 +1544,7 @@ pub(crate) async fn submit(
     bytes: &[u8],
     allowed_resources: &[u32],
 ) -> Result<(), String> {
+    set_diagnostic_stage("submit:start");
     renderer.check_fault()?;
     let mut allowed = HashSet::with_capacity(allowed_resources.len());
     for &resource_id in allowed_resources {
@@ -1448,8 +1563,10 @@ pub(crate) async fn submit(
             Err(error) => Err(invalid(error)),
         }
     } else {
+        set_diagnostic_stage("submit:mesa");
         submit_mesa_triangle(renderer, &mut context, bytes, &allowed).await
     };
+    set_diagnostic_stage("submit:done");
     renderer.contexts.insert(context_id, context);
     result
 }
@@ -1495,6 +1612,7 @@ async fn submit_mesa_triangle_inner(
         .collect::<Vec<_>>();
     let mut offset = 0;
     let mut draws = Vec::new();
+    let mut blits = Vec::new();
     let mut vertex_invocations = 0_u32;
     let mut command_count = 0;
     while offset < words.len() {
@@ -1836,6 +1954,32 @@ async fn submit_mesa_triangle_inner(
                     }
                 }
             },
+            (16, 0) if payload.len() == 21 => {
+                if blits.len() >= 1 {
+                    return Err(invalid("multiple Mesa blits in one submit are unsupported"));
+                }
+                blits.push(MesaBlit {
+                    flags: payload[0],
+                    destination: payload[3],
+                    destination_level: payload[4],
+                    destination_format: payload[5],
+                    destination_x: payload[6] as i32,
+                    destination_y: payload[7] as i32,
+                    destination_z: payload[8] as i32,
+                    destination_width: payload[9] as i32,
+                    destination_height: payload[10] as i32,
+                    destination_depth: payload[11] as i32,
+                    source: payload[12],
+                    source_level: payload[13],
+                    source_format: payload[14],
+                    source_x: payload[15] as i32,
+                    source_y: payload[16] as i32,
+                    source_z: payload[17] as i32,
+                    source_width: payload[18] as i32,
+                    source_height: payload[19] as i32,
+                    source_depth: payload[20] as i32,
+                });
+            },
             (1, 1 | 2 | 3 | 7) | (2 | 3, 1 | 2 | 3 | 6 | 7 | 8) => {},
             (13 | 14 | 18 | 22 | 24 | 28 | 29 | 30, 0) => {},
             _ => {
@@ -1847,12 +1991,12 @@ async fn submit_mesa_triangle_inner(
         }
         offset = end;
     }
-    if draws.len() > 1 {
-        return Err(invalid("multiple Mesa draws in one submit are unsupported"));
-    }
 
     for draw in draws {
         render_mesa_draw(renderer, context, draw, allowed_resources).await?;
+    }
+    for blit in blits {
+        render_mesa_blit(renderer, blit, allowed_resources).await?;
     }
     Ok(())
 }
@@ -1885,15 +2029,17 @@ async fn render_mesa_draw(
         .target
         .ok_or_else(|| invalid("Mesa virgl draw has no framebuffer"))?;
     let target = target_surface.resource_id;
-    let expected_vertex_buffers = match program {
-        MesaProgram::Probe | MesaProgram::RectangleColor => 2,
-        MesaProgram::BackgroundColor | MesaProgram::CellBackground => 0,
-        MesaProgram::CellText | MesaProgram::Image | MesaProgram::SolidColor => 1,
+    let valid_vertex_buffer_count = match program {
+        MesaProgram::Probe | MesaProgram::RectangleColor => draw.vertex_buffers.len() == 2,
+        MesaProgram::BackgroundColor | MesaProgram::CellBackground => {
+            draw.vertex_buffers.is_empty()
+        },
+        MesaProgram::CellText => matches!(draw.vertex_buffers.len(), 1 | 7),
+        MesaProgram::Image | MesaProgram::SolidColor => draw.vertex_buffers.len() == 1,
     };
-    if draw.vertex_buffers.len() != expected_vertex_buffers {
+    if !valid_vertex_buffer_count {
         return Err(invalid(format!(
-            "Mesa virgl draw has an incompatible vertex layout program={program:?} \
-             expected={expected_vertex_buffers} actual={}",
+            "Mesa virgl draw has an incompatible vertex layout program={program:?} actual={}",
             draw.vertex_buffers.len(),
         )));
     }
@@ -1982,20 +2128,22 @@ async fn render_mesa_draw(
     if !is_color_target_format(target_format) {
         return Err(invalid("unsupported Mesa virgl render target format"));
     }
-    let vertex_sizes = draw
-        .vertex_buffers
-        .iter()
-        .map(|(resource_id, _, offset)| {
-            renderer
-                .resources
-                .get(resource_id)
-                .ok_or_else(|| invalid("unknown Mesa virgl vertex buffer"))?
-                .byte_length
-                .checked_sub(*offset as usize)
-                .map(|size| size as u64)
-                .ok_or_else(|| invalid("Mesa virgl vertex buffer offset is out of range"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut vertex_offsets = Vec::with_capacity(draw.vertex_buffers.len());
+    let mut vertex_sizes = Vec::with_capacity(draw.vertex_buffers.len());
+    let mut vertex_offset_adjustments = Vec::with_capacity(draw.vertex_buffers.len());
+    for (resource_id, _, offset) in &draw.vertex_buffers {
+        let aligned_offset = u64::from(*offset) & !3;
+        let resource = renderer
+            .resources
+            .get(resource_id)
+            .ok_or_else(|| invalid("unknown Mesa virgl vertex buffer"))?;
+        let size = (resource.byte_length as u64)
+            .checked_sub(aligned_offset)
+            .ok_or_else(|| invalid("Mesa virgl vertex buffer offset is out of range"))?;
+        vertex_offsets.push(aligned_offset);
+        vertex_sizes.push(size);
+        vertex_offset_adjustments.push(u64::from(*offset) - aligned_offset);
+    }
     let format_offset = match target_format {
         FORMAT_R8G8B8A8_UNORM => 0,
         FORMAT_R8G8B8A8_SRGB => 3,
@@ -2004,7 +2152,11 @@ async fn render_mesa_draw(
         FORMAT_R8_UNORM | FORMAT_R8_UINT => 6,
         _ => return Err(invalid("unsupported Mesa virgl render target format")),
     };
-    let pipeline_id = MESA_PIPELINE_ID - mesa_program_index(program) * 8 - format_offset;
+    let split_vertex_buffers = draw.vertex_buffers.len() > 1;
+    let pipeline_id = MESA_PIPELINE_ID
+        - mesa_program_index(program) * 8
+        - format_offset
+        - if split_vertex_buffers { 64 } else { 0 };
     let topology = match draw.topology {
         4 => wgpu::PrimitiveTopology::TriangleList,
         5 if !draw.indexed => wgpu::PrimitiveTopology::TriangleStrip,
@@ -2015,15 +2167,22 @@ async fn render_mesa_draw(
         .iter()
         .map(|(_, stride, _)| u64::from(*stride))
         .collect::<Vec<_>>();
-    let attributes = mesa_vertex_attributes(&draw.vertex_elements, &vertex_strides)?;
+    let attributes = mesa_vertex_attributes(
+        &draw.vertex_elements,
+        &vertex_strides,
+        &vertex_offset_adjustments,
+        !split_vertex_buffers,
+    )?;
     if let Some(pipeline) = context.pipelines.get(&pipeline_id) {
-        if pipeline.vertex_strides != vertex_strides {
+        if pipeline.vertex_strides != vertex_strides || pipeline.vertex_attributes != attributes {
             return Err(invalid("Mesa virgl vertex layout changed"));
         }
     } else {
         let mut mutations = Vec::new();
-        let (vertex_shader, fragment_shader) = mesa_program_shader_ids(program);
-        let (vertex_source, fragment_source) = mesa_program_shader_sources(program);
+        let (vertex_shader, fragment_shader) =
+            mesa_program_shader_ids(program, split_vertex_buffers);
+        let (vertex_source, fragment_source) =
+            mesa_program_shader_sources(program, split_vertex_buffers);
         if !context.shaders.contains_key(&vertex_shader) {
             mutations.push(Record::CreateShader {
                 id: vertex_shader,
@@ -2055,7 +2214,9 @@ async fn render_mesa_draw(
             vertex_strides: vertex_strides.clone(),
             attributes,
         });
+        set_diagnostic_stage("submit:mutations");
         apply_mutations(renderer, context, SUBMIT_V3, mutations).await?;
+        set_diagnostic_stage("submit:mutations-done");
     }
 
     let viewport = draw.viewport.unwrap_or(Viewport {
@@ -2092,13 +2253,16 @@ async fn render_mesa_draw(
             height: scissor.height,
         });
     }
-    for (slot, ((resource_id, _, offset), size)) in
-        draw.vertex_buffers.iter().zip(&vertex_sizes).enumerate()
+    for (slot, ((resource_id, _, _), (offset, size))) in draw
+        .vertex_buffers
+        .iter()
+        .zip(vertex_offsets.iter().zip(&vertex_sizes))
+        .enumerate()
     {
         records.push(Record::SetVertexBuffer(VertexBuffer3D {
             slot: slot as u32,
             resource_id: *resource_id,
-            offset: u64::from(*offset),
+            offset: *offset,
             size: *size,
         }));
     }
@@ -2106,9 +2270,11 @@ async fn render_mesa_draw(
     if let Some(index_buffer) = index_buffer {
         records.push(Record::SetIndexBuffer(index_buffer));
         records.push(Record::DrawIndexed {
+            // Mesa's virgl driver has already folded draw.start into the
+            // bound index-buffer offset.
             indices: draw.count,
             instances: draw.instances,
-            first_index: draw.first,
+            first_index: 0,
             base_vertex: draw.index_bias,
             first_instance: draw.first_instance,
         });
@@ -2121,7 +2287,181 @@ async fn render_mesa_draw(
         });
     }
     records.push(Record::EndRenderPass);
+    set_diagnostic_stage("submit:render");
     render(renderer, context, records, &resources).await
+}
+
+async fn render_mesa_blit(
+    renderer: &mut Renderer,
+    blit: MesaBlit,
+    allowed_resources: &HashSet<u32>,
+) -> Result<(), String> {
+    if blit.flags != 0xF
+        || blit.destination_level != 0
+        || blit.source_level != 0
+        || blit.destination_format != FORMAT_R8G8B8A8_UNORM
+        || blit.source_format != FORMAT_R8G8B8A8_UNORM
+        || blit.destination_z != 0
+        || blit.source_z != 0
+        || blit.destination_depth != 1
+        || blit.source_depth != 1
+        || blit.destination_width <= 0
+        || blit.destination_height <= 0
+        || blit.source_width == 0
+        || blit.source_height == 0
+        || blit.destination == blit.source
+    {
+        return Err(invalid("unsupported Mesa blit"));
+    }
+    if !allowed_resources.contains(&blit.destination) || !allowed_resources.contains(&blit.source) {
+        return Err(invalid("Mesa blit resource is not attached"));
+    }
+
+    let (source_width, source_height, source_bind_group) = {
+        let source = renderer
+            .resources
+            .get(&blit.source)
+            .ok_or_else(|| invalid("unknown Mesa blit source"))?;
+        if source.target == TARGET_BUFFER
+            || !matches!(source.format, FORMAT_R8G8B8A8_UNORM | FORMAT_R8G8B8A8_SRGB)
+        {
+            return Err(invalid(format!(
+                "unsupported Mesa blit source target={} format={}",
+                source.target, source.format
+            )));
+        }
+        let source_view =
+            source
+                .texture
+                .as_ref()
+                .unwrap()
+                .create_view(&wgpu::TextureViewDescriptor {
+                    format: (source.format == FORMAT_R8G8B8A8_SRGB)
+                        .then_some(wgpu::TextureFormat::Rgba8Unorm),
+                    ..Default::default()
+                });
+        let source_bind_group = renderer
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("v86 virtio-gpu blit source bind group"),
+                layout: &renderer.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&source_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&renderer.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: renderer.present_params.as_entire_binding(),
+                    },
+                ],
+            });
+        (source.width, source.height, source_bind_group)
+    };
+    let destination_view = {
+        let destination = renderer
+            .resources
+            .get(&blit.destination)
+            .ok_or_else(|| invalid("unknown Mesa blit destination"))?;
+        if destination.target == TARGET_BUFFER
+            || !matches!(
+                destination.format,
+                FORMAT_R8G8B8A8_UNORM | FORMAT_R8G8B8A8_SRGB
+            )
+            || !destination.renderable
+        {
+            return Err(invalid(format!(
+                "unsupported Mesa blit destination target={} format={} renderable={}",
+                destination.target, destination.format, destination.renderable
+            )));
+        }
+        if !signed_region_fits(
+            blit.destination_x,
+            blit.destination_width,
+            destination.width,
+        ) || !signed_region_fits(
+            blit.destination_y,
+            blit.destination_height,
+            destination.height,
+        ) {
+            return Err(invalid("Mesa blit destination is out of bounds"));
+        }
+        destination
+            .texture
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor {
+                format: (destination.format == FORMAT_R8G8B8A8_SRGB)
+                    .then_some(wgpu::TextureFormat::Rgba8Unorm),
+                ..Default::default()
+            })
+    };
+    if !signed_region_fits(blit.source_x, blit.source_width, source_width)
+        || !signed_region_fits(blit.source_y, blit.source_height, source_height)
+    {
+        return Err(invalid("Mesa blit source is out of bounds"));
+    }
+
+    let params = [
+        blit.source_x as u32,
+        blit.source_y as u32,
+        blit.source_width as u32,
+        blit.source_height as u32,
+        source_width,
+        source_height,
+        0,
+        0,
+    ];
+    renderer
+        .queue
+        .write_buffer(&renderer.present_params, 0, bytemuck::cast_slice(&params));
+    let mut encoder = renderer
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("v86 virtio-gpu blit encoder"),
+        });
+    {
+        let color_attachment = wgpu::RenderPassColorAttachment {
+            view: &destination_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("v86 virtio-gpu blit pass"),
+            color_attachments: &[Some(color_attachment)],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&renderer.blit_pipeline);
+        pass.set_bind_group(0, &source_bind_group, &[]);
+        pass.set_viewport(
+            blit.destination_x as f32,
+            blit.destination_y as f32,
+            blit.destination_width as f32,
+            blit.destination_height as f32,
+            0.0,
+            1.0,
+        );
+        pass.draw(0..3, 0..1);
+    }
+    renderer.queue.submit([encoder.finish()]);
+    renderer.wait_idle().await
+}
+
+fn signed_region_fits(origin: i32, size: i32, limit: u32) -> bool {
+    let origin = i64::from(origin);
+    let end = origin + i64::from(size);
+    origin.min(end) >= 0 && origin.max(end) <= i64::from(limit)
 }
 async fn submit_inner(
     renderer: &mut Renderer,
@@ -2186,6 +2526,7 @@ async fn apply_mutations(
     major: u16,
     records: Vec<Record>,
 ) -> Result<(), String> {
+    set_diagnostic_stage("mutations:start");
     let has_create = records.iter().any(|record| {
         matches!(
             record,
@@ -2205,6 +2546,7 @@ async fn apply_mutations(
         return apply_destroys(context, records);
     }
 
+    set_diagnostic_stage("mutations:validated");
     let max_shader_bytes = match major {
         SUBMIT_V1 => MAX_SHADER_BYTES_PER_CONTEXT_V1,
         SUBMIT_V2 => MAX_SHADER_BYTES_PER_CONTEXT_V2,
@@ -2216,9 +2558,11 @@ async fn apply_mutations(
     let mut pipeline_ids = context.pipelines.keys().copied().collect::<HashSet<_>>();
     let mut staged_shader_metadata = HashMap::new();
     let mut staged_shader_sources = HashMap::new();
+    set_diagnostic_stage("mutations:metadata");
     for record in &records {
         match record {
             Record::CreateShader { id, stage, source } => {
+                set_diagnostic_stage("mutations:create-shader");
                 if shader_ids.len() >= MAX_SHADERS || !shader_ids.insert(*id) {
                     return Err(invalid("duplicate shader or shader limit exceeded"));
                 }
@@ -2241,7 +2585,14 @@ async fn apply_mutations(
                         Some(source.clone())
                     },
                     (SUBMIT_V3, Some(ShaderSource3D::Spirv(source))) => {
-                        Some(spirv_to_wgsl(source, stage_kind)?)
+                        set_diagnostic_stage(&format!(
+                            "mutations:spirv:{}:{}",
+                            stage,
+                            source.len()
+                        ));
+                        let translated = spirv_to_wgsl(source, stage_kind)?;
+                        set_diagnostic_stage("mutations:spirv-done");
+                        Some(translated)
                     },
                     _ => return Err(invalid("shader source does not match submit version")),
                 };
@@ -2260,17 +2611,21 @@ async fn apply_mutations(
                 vertex_strides,
                 attributes,
             } => {
+                set_diagnostic_stage("mutations:create-pipeline");
                 if pipeline_ids.len() >= MAX_PIPELINES || !pipeline_ids.insert(*id) {
                     return Err(invalid("duplicate pipeline or pipeline limit exceeded"));
                 }
+                set_diagnostic_stage("mutations:pipeline-id");
                 if !shader_ids.contains(vertex_shader) || !shader_ids.contains(fragment_shader) {
                     return Err(invalid("pipeline references an unknown shader"));
                 }
+                set_diagnostic_stage("mutations:pipeline-shaders");
                 if !is_color_target_format(*format)
                     || !matches!(*blend, BLEND_REPLACE | BLEND_PREMULTIPLIED_ALPHA)
                 {
                     return Err(invalid("unsupported pipeline state"));
                 }
+                set_diagnostic_stage("mutations:pipeline-state");
                 if major < SUBMIT_V3
                     && (*blend != BLEND_REPLACE
                         || *topology != wgpu::PrimitiveTopology::TriangleList
@@ -2279,6 +2634,7 @@ async fn apply_mutations(
                 {
                     return Err(invalid("versioned pipeline state is not zero"));
                 }
+                set_diagnostic_stage("mutations:pipeline-layout");
                 if attributes.len() > MAX_VERTEX_ATTRIBUTES_V3
                     || vertex_strides.len() > MAX_VERTEX_BUFFERS_V3
                     || attributes.is_empty() != vertex_strides.is_empty()
@@ -2288,23 +2644,35 @@ async fn apply_mutations(
                 {
                     return Err(invalid("invalid vertex layout"));
                 }
+                set_diagnostic_stage(&format!(
+                    "mutations:pipeline-attributes:{}",
+                    attributes.len()
+                ));
                 let mut locations = HashSet::new();
                 for attribute in attributes {
+                    set_diagnostic_stage("mutations:pipeline-attribute");
                     let stride = vertex_strides
                         .get(attribute.buffer_slot as usize)
                         .ok_or_else(|| invalid("vertex buffer slot is out of range"))?;
+                    set_diagnostic_stage(&format!(
+                        "mutations:pipeline-attribute-stride:{}:{:?}:{}",
+                        attribute.offset, attribute.format, stride
+                    ));
                     let end = attribute
                         .offset
-                        .checked_add(vertex_format_size(attribute.format))
+                        .checked_add(attribute.format.size())
                         .ok_or_else(|| invalid("vertex attribute overflow"))?;
+                    set_diagnostic_stage("mutations:pipeline-attribute-end");
                     if end > *stride || !locations.insert(attribute.location) {
                         return Err(invalid("invalid vertex attribute"));
                     }
                 }
+                set_diagnostic_stage("mutations:pipeline-attributes-done");
             },
             _ => return Err(invalid("invalid mutation record")),
         }
     }
+    set_diagnostic_stage("mutations:metadata-done");
     for record in &records {
         if let Record::CreatePipeline {
             vertex_shader,
@@ -2337,7 +2705,9 @@ async fn apply_mutations(
             }
         }
     }
+    set_diagnostic_stage("mutations:pipelines-validated");
 
+    set_diagnostic_stage("submit:error-scope");
     let validation_scope = (major >= SUBMIT_V2).then(|| {
         renderer
             .device
@@ -2346,6 +2716,7 @@ async fn apply_mutations(
     let mut staged_shaders = HashMap::new();
     for record in &records {
         if let Record::CreateShader { id, stage, .. } = record {
+            set_diagnostic_stage("submit:shader-module");
             let module = staged_shader_sources.get(id).map(|source| {
                 renderer
                     .device
@@ -2354,6 +2725,7 @@ async fn apply_mutations(
                         source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
                     })
             });
+            set_diagnostic_stage("submit:shader-module-done");
             let byte_length = staged_shader_metadata.get(id).unwrap().1;
             staged_shaders.insert(
                 *id,
@@ -2398,6 +2770,7 @@ async fn apply_mutations(
                     None,
                 ),
                 (Some(vertex), Some(fragment)) if major == SUBMIT_V3 => {
+                    set_diagnostic_stage("submit:pipeline");
                     let (pipeline, layout) = create_guest_pipeline(
                         &renderer.device,
                         vertex,
@@ -2408,11 +2781,24 @@ async fn apply_mutations(
                         *blend,
                         *topology,
                     )?;
+                    set_diagnostic_stage("submit:pipeline-done");
                     (Some(pipeline), Some(layout))
                 },
                 (None, None) if major == SUBMIT_V1 => (None, None),
                 _ => return Err(invalid("pipeline shader object version mismatch")),
             };
+            let mut vertex_step_modes = vec![wgpu::VertexStepMode::Vertex; vertex_strides.len()];
+            let mut vertex_attribute_ends = vec![0; vertex_strides.len()];
+            for attribute in attributes {
+                let slot = attribute.buffer_slot as usize;
+                vertex_step_modes[slot] = attribute.step_mode;
+                vertex_attribute_ends[slot] = vertex_attribute_ends[slot].max(
+                    attribute
+                        .offset
+                        .checked_add(attribute.format.size())
+                        .ok_or_else(|| invalid("vertex attribute range overflow"))?,
+                );
+            }
             staged_pipelines.insert(
                 *id,
                 Pipeline3D {
@@ -2421,11 +2807,15 @@ async fn apply_mutations(
                     pipeline,
                     bind_group_layout,
                     vertex_strides: vertex_strides.clone(),
+                    vertex_step_modes,
+                    vertex_attributes: attributes.clone(),
+                    vertex_attribute_ends,
                 },
             );
         }
     }
 
+    set_diagnostic_stage("submit:compilation");
     if let Some(validation_scope) = validation_scope {
         if let Some(error) = await_compilation(renderer, validation_scope).await? {
             return Err(invalid(format!(
@@ -2434,6 +2824,7 @@ async fn apply_mutations(
         }
         renderer.check_fault()?;
     }
+    set_diagnostic_stage("submit:compilation-done");
     context.protocol_major = Some(major);
     context.shader_bytes = shader_bytes;
     context.shaders.extend(staged_shaders);
@@ -2758,6 +3149,7 @@ async fn render(
                             (binding, Some(resource_id))
                         },
                         Binding3D::Sampler { binding } => (binding, None),
+                        Binding3D::ZeroStorageBuffer { binding } => (binding, None),
                     };
                     if binding_id >= MAX_BINDINGS_V3 as u32 || !binding_ids.insert(binding_id) {
                         return Err(invalid("duplicate or out-of-range binding"));
@@ -2783,18 +3175,20 @@ async fn render(
                 if vertices == 0 || instances == 0 {
                     return Err(invalid("empty draw"));
                 }
-                let vertex_end = first_vertex
-                    .checked_add(vertices)
-                    .ok_or_else(|| invalid("draw vertex range overflow"))?;
-                if first_instance.checked_add(instances).is_none() {
-                    return Err(invalid("draw instance range overflow"));
-                }
                 for (slot, stride) in pipeline.vertex_strides.iter().enumerate() {
+                    let attribute_end = pipeline.vertex_attribute_ends[slot];
+                    if attribute_end == 0 {
+                        continue;
+                    }
                     let vertex_buffer = vertex_buffers[slot]
                         .ok_or_else(|| invalid("draw without required vertex buffer"))?;
-                    let required = u64::from(vertex_end)
-                        .checked_mul(*stride)
-                        .ok_or_else(|| invalid("vertex fetch range overflow"))?;
+                    let (first, count) =
+                        if pipeline.vertex_step_modes[slot] == wgpu::VertexStepMode::Instance {
+                            (first_instance, instances)
+                        } else {
+                            (first_vertex, vertices)
+                        };
+                    let required = vertex_fetch_end(first, count, *stride, attribute_end)?;
                     if required > vertex_buffer.size {
                         return Err(invalid("vertex fetch exceeds buffer"));
                     }
@@ -2863,13 +3257,21 @@ async fn render(
                 if required_indices > index_buffer.size {
                     return Err(invalid("index fetch exceeds buffer"));
                 }
-                if first_instance.checked_add(instances).is_none() {
-                    return Err(invalid("draw instance range overflow"));
-                }
                 for (slot, stride) in pipeline.vertex_strides.iter().enumerate() {
+                    let attribute_end = pipeline.vertex_attribute_ends[slot];
+                    if attribute_end == 0 {
+                        continue;
+                    }
                     let vertex_buffer = vertex_buffers[slot]
                         .ok_or_else(|| invalid("indexed draw without required vertex buffer"))?;
-                    if *stride > vertex_buffer.size {
+                    let (first, count) =
+                        if pipeline.vertex_step_modes[slot] == wgpu::VertexStepMode::Instance {
+                            (first_instance, instances)
+                        } else {
+                            (0, 1)
+                        };
+                    let required = vertex_fetch_end(first, count, *stride, attribute_end)?;
+                    if required > vertex_buffer.size {
                         return Err(invalid("vertex fetch exceeds buffer"));
                     }
                 }
@@ -3034,8 +3436,11 @@ async fn render(
             }
         }
     }
+    set_diagnostic_stage("submit:queue");
     renderer.queue.submit([encoder.finish()]);
+    set_diagnostic_stage("submit:queue-done");
     if matches!(context.protocol_major, Some(SUBMIT_V2 | SUBMIT_V3)) {
+        set_diagnostic_stage("submit:bounded-wait");
         await_with_timeout(
             renderer,
             renderer.wait_idle(),
@@ -3044,11 +3449,15 @@ async fn render(
         )
         .await??;
     } else {
+        set_diagnostic_stage("submit:unbounded-wait");
         renderer.wait_idle().await?;
     }
+    set_diagnostic_stage("submit:wait-done");
+    set_diagnostic_stage("submit:validation");
     if let Some(error) = await_compilation(renderer, validation_scope).await? {
         return Err(invalid(format!("render validation failed: {error}")));
     }
+    set_diagnostic_stage("submit:validation-done");
     renderer.check_fault()?;
     Ok(())
 }
@@ -3124,6 +3533,14 @@ fn create_bind_group(
                     }),
                 )
             },
+            Binding3D::ZeroStorageBuffer { binding } => (
+                binding,
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &renderer.zero_storage_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(4),
+                }),
+            ),
             Binding3D::Texture { binding, .. } => (
                 binding,
                 wgpu::BindingResource::TextureView(&texture_views[&binding]),
@@ -3224,7 +3641,9 @@ fn decode(bytes: &[u8]) -> Result<Submit, String> {
                         | Binding3D::Texture { resource_id, .. } => {
                             used_resources.insert(*resource_id);
                         },
-                        Binding3D::Sampler { .. } | Binding3D::InlineBuffer { .. } => {},
+                        Binding3D::Sampler { .. }
+                        | Binding3D::InlineBuffer { .. }
+                        | Binding3D::ZeroStorageBuffer { .. } => {},
                     }
                 }
             },
@@ -3618,17 +4037,6 @@ fn vertex_format(value: u32) -> Result<wgpu::VertexFormat, String> {
     }
 }
 
-fn vertex_format_size(format: wgpu::VertexFormat) -> u64 {
-    match format {
-        wgpu::VertexFormat::Float32 => 4,
-        wgpu::VertexFormat::Float32x2 => 8,
-        wgpu::VertexFormat::Float32x3 => 12,
-        wgpu::VertexFormat::Float32x4 => 16,
-        wgpu::VertexFormat::Unorm8x4 => 4,
-        _ => unreachable!(),
-    }
-}
-
 fn invalid(message: impl ToString) -> String {
     format!("invalid: {}", message.to_string())
 }
@@ -3806,6 +4214,14 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn vertex_fetch_bounds_cover_last_valid_vertex_and_instance() {
+        assert_eq!(vertex_fetch_end(0, 1, 32, 32).unwrap(), 32);
+        assert_eq!(vertex_fetch_end(4, 3, 8, 12).unwrap(), 60);
+        assert_eq!(vertex_fetch_end(7, 1024, 0, 16).unwrap(), 16);
+        assert!(vertex_fetch_end(u32::MAX, 2, 8, 4).is_err());
+    }
+
+    #[wasm_bindgen_test]
     fn version_three_accepts_aligned_spirv_payloads() {
         const SPIRV_MAGIC: &[u8] = &[0x03, 0x02, 0x23, 0x07];
         let submit = decode(&shader_submit_version(
@@ -3955,6 +4371,9 @@ mod tests {
                 pipeline: None,
                 bind_group_layout: None,
                 vertex_strides: Vec::new(),
+                vertex_step_modes: Vec::new(),
+                vertex_attributes: Vec::new(),
+                vertex_attribute_ends: Vec::new(),
             },
         );
         assert!(apply_destroys(&mut context, vec![Record::DestroyShader(1)]).is_err());
@@ -4001,6 +4420,12 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn rejects_malformed_spirv_before_pipeline_creation() {
+        assert!(spirv_to_wgsl(&[0x03, 0x02, 0x23, 0x07], naga::ShaderStage::Vertex).is_err());
+        assert!(spirv_to_wgsl(&[0; 20], naga::ShaderStage::Vertex).is_err());
     }
 
     #[wasm_bindgen_test]

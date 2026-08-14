@@ -14,6 +14,15 @@ start()
         return 1
     fi
     rm -f /run/v86-network-ready
+    if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
+        gallium=/opt/webgpuvirt/lib/libgallium-26.1.6.so
+    else
+        gallium=/opt/mesa-system/lib/libgallium-26.1.6.so
+    fi
+    if ! ln -sfn "$gallium" /usr/lib/libgallium-26.1.6.so; then
+        eend 1 "could not select the appliance Mesa renderer"
+        return 1
+    fi
     install -d -m 0700 -o codex -g codex /run/user/1000
     if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
         eend 0 "relay unconfigured"

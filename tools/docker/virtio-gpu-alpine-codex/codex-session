@@ -5,4 +5,5 @@ if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
 fi
 
 cd "$HOME/workspace" || exit 1
+printf '%s\n' "$$" > /tmp/v86-codex.pid
 exec /usr/local/bin/codex --sandbox workspace-write --ask-for-approval never

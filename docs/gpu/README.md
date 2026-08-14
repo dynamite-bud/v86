@@ -20,15 +20,19 @@ Implemented and tested today:
   fault at a 5000 ms bound.
 - Browser acceptance proves the pinned red triangle, arbitrary green WGSL
   triangle, and an indexed textured version-3 resource triangle against a Mesa
-  llvmpipe software reference. It also proves deterministic malformed-input rejection,
-  ordered fences, repeated timeout/device-loss fallback and recovery, and zero
-  leaked standard 3D objects.
+  llvmpipe software reference. It also proves deterministic malformed-input
+  rejection, ordered fences, repeated timeout/device-loss fallback and
+  recovery, and zero leaked standard 3D objects.
+- The i386 appliance includes a checksum-locked Mesa `webgpuvirt` winsys and
+  virgl/Gallium build. Its explicit `accelerated=1` mode runs the measured
+  Ghostty OpenGL call set through capset 7 and the Rust/Wasm renderer while
+  retaining the standard 2D scanout for presentation.
 
 Not implemented:
 
-- Depth/stencil, readback, resource blobs/UUIDs, host mappings,
-  the Mesa/Gallium `webgpuvirt` driver, accelerated Ghostty, virgl
-  compatibility, Vulkan, or 3D on the direct JavaScript backend.
+- Depth/stencil, general shader translation, general virgl compatibility,
+  readback outside the diagnostic Mesa gate, resource blobs/UUIDs, host
+  mappings, Vulkan, or 3D on the direct JavaScript backend.
 - The default device still reports `num_capsets = 0` and does not advertise 3D
   feature bits. Capset 7 is available only with `experimental_3d: true` and a
   successful Rust/Wasm backend preflight.
@@ -41,14 +45,14 @@ The exact implemented byte contracts are frozen in
 ## Data Flow
 
 ```text
-Linux guest DRM/KMS
-  -> VirtIO GPU control/cursor queues
-  -> src/virtio_gpu.js
-  -> VirtioGpuBackend promise boundary
-  -> MemoryGpuBackend (tests)
-     or webgpu-js (browser JavaScript)
-     or wgpu (Rust/Wasm)
-  -> dedicated WebGPU canvas
+Default guest:
+  Linux DRM/KMS -> standard VirtIO GPU 2D -> selected browser backend
+
+Accelerated appliance:
+  Ghostty OpenGL -> Mesa virgl/Gallium + webgpuvirt winsys
+  -> Linux virtio_gpu ioctls -> capset-7 standard 3D commands
+  -> src/virtio_gpu.js -> Rust/Wasm wgpu
+  -> standard 2D scanout -> dedicated WebGPU canvas
 ```
 
 JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queue ordering, resource IDs, snapshots, and error responses. A browser backend owns renderer objects and presentation. Guest bytes must be copied before an `await`; browser GPU handles never enter VM snapshots.
@@ -61,7 +65,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Abstract/test backend | `src/browser/virtio_gpu_backend.js` | Promise contract and deterministic `MemoryGpuBackend` |
 | Shared browser adapter | `src/browser/virtio_gpu_wgpu_backend.js` | Canvas/VGA lifecycle, dynamic renderer boundary, device-loss handling |
 | Direct renderer | `src/browser/virtio_gpu_webgpu_backend.js` | JavaScript `navigator.gpu` 2D textures, uploads, conversion, presentation |
-| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer plus pinned version-1 and bounded arbitrary-WGSL version-2 paths |
+| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer, capset versions 1-3, and the bounded measured-Mesa command translator |
 | Browser API wiring | `src/browser/starter.js` | Backend selection, options, state integration |
 | Protocol tests | `tests/unit/virtio_gpu_protocol.js` | Wire layouts, commands, malformed input, limits, state, ordering |
 | Renderer tests | `tests/unit/virtio_gpu_webgpu_backend.js` | Direct renderer and shared browser lifecycle |
@@ -72,6 +76,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Desktop example | `examples/virtio_gpu_desktop.html` | Manual desktop, renderer/session selectors, persistent ready snapshots |
 | KMS guest | `tools/docker/virtio-gpu-alpine/` | Minimal reproducible Linux DRM/KMS image and probe |
 | Desktop guest | `tools/docker/virtio-gpu-alpine-desktop/` | Reproducible XFCE Xorg/Wayland image and readiness contract |
+| Ghostty appliance | `tools/docker/virtio-gpu-alpine-codex/` | Reproducible llvmpipe default plus opt-in checksum-locked Mesa `webgpuvirt` acceleration |
 
 ## Prerequisites
 
@@ -134,6 +139,8 @@ Review the generated contract against the committed contract. Never commit the g
 | Capset transport, private submit, or pinned Linux/libdrm path | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test virtio-gpu-3d-transport-test` |
 | Reference triangle guest or browser acceptance | `make virtio-gpu-3d-triangle-test` |
 | Arbitrary WGSL validation, compilation, timeout, or recovery | `make virtio-gpu-3d-shader-test` |
+| Version-3 resources, SPIR-V, or bindings | `make virtio-gpu-webgpuvirt-triangle-test` |
+| Mesa `webgpuvirt` or accelerated Ghostty | `make virtio-gpu-codex-accelerated-test`; run `make virtio-gpu-codex-benchmark-accelerated` for performance comparisons |
 | Browser backend, canvas lifecycle, resize, cursor, or loss | `make virtio-gpu-browser-test` |
 | Scanout color fidelity or fixture inputs | `make virtio-gpu-color-test`; also run `make virtio-gpu-test` for the memory backend |
 | Ready-state persistence | `make virtio-gpu-ready-snapshot-test` |
@@ -171,6 +178,7 @@ Review the generated contract against the committed contract. Never commit the g
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../../tools/docker/virtio-gpu-alpine-desktop/Readme.md): desktop image, launch URLs, snapshots, sessions, and image verification.
 - [XWAH-1](https://github.com/dynamite-bud/v86/issues/1): completed bounded capset-7 basic-render milestone.
 - [XWAH-15](https://github.com/dynamite-bud/v86/issues/15): bounded arbitrary-WGSL compilation and patched wgpu error-scope milestone.
+- [XWAH-5](https://github.com/dynamite-bud/v86/issues/5): targeted Mesa `webgpuvirt` and accelerated Ghostty implementation and performance gates.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
 

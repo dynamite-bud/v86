@@ -15,18 +15,18 @@ Alpine OpenRC
   -> v86-appliance-session
   -> Xorg modesetting on /dev/dri/card0 at 1024x768x24
   -> Openbox
-  -> Mesa llvmpipe OpenGL
+  -> Mesa llvmpipe (default) or targeted webgpuvirt Gallium (opt-in)
   -> maximized undecorated Ghostty
   -> codex --sandbox workspace-write --ask-for-approval never
 ```
 
-Guest rendering remains software-rendered. Linux sends the completed scanout through standard VirtIO GPU 2D resource, transfer, and flush commands; the selected `webgpu-js` or Rust/Wasm `wgpu` backend uploads and presents that scanout through host WebGPU. This fixture does not provide guest virgl, Vulkan, or accelerated OpenGL.
+The default guest remains software-rendered and uses standard VirtIO GPU 2D scanout with either browser presentation backend. The opt-in `accelerated=1` mode is available only with the Rust/Wasm `wgpu` backend: Linux negotiates capset 7, the targeted `webgpuvirt` Gallium winsys emits the measured Ghostty command subset, and the standard 2D path still presents the completed scanout. The direct JavaScript backend remains 2D-only. This is not general OpenGL, Vulkan, virgl, or virgl2 support.
 
 ## Architecture Decision
 
 v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, OMP, Bun, or Linux artifacts requested by the original XWAH-3 contract. The implemented appliance therefore pins reviewed downstream i386 ports:
 
-- Ghostty [`v1.3.1-i386`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386), built for Alpine `x86-linux-musl`;
+- Ghostty [`v1.3.1-i386.1`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386.1), built for Alpine `x86-linux-musl`;
 - Codex [`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1), built for `i686-unknown-linux-musl`.
 
 `artifacts.lock` owns their release URLs and SHA-256 values. The image build downloads only those URLs, verifies both archives before extraction, runs both version commands, and removes download and build residue.
@@ -35,20 +35,23 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 
 | File | Contract |
 | --- | --- |
-| `Dockerfile` | Pinned Alpine base, exact package closure, verified application extraction, UID 1000 account, OpenRC services, locked root account, and initramfs generation. |
+| `Dockerfile` | Pinned Alpine and Mesa sources, verified Mesa/application artifacts, exact package closure, UID 1000 account, OpenRC services, locked root account, and initramfs generation. |
 | `build.sh` | `linux/386` Docker build/export, deterministic rootfs normalization, filesystem JSON and zstd chunk generation, and image-contract generation. |
 | `world.lock` | Exact direct APK requests. Openbox/Xorg packages in this file are part of this fixture's identity. |
 | `packages.lock` | Sorted direct and transitive installed APK closure. The Docker build rejects drift with `apk info -v | sort | cmp`. |
 | `artifacts.lock` | Immutable Ghostty and Codex release tags, URLs, and SHA-256 values. |
+| `mesa-artifacts.lock` | Pinned Mesa commit plus reproducible i386 Gallium and DRI binary SHA-256 values. |
 | `v86-networking` | Deterministic hostname, UID 1000 runtime directory, optional VirtIO NIC DHCP, and `/run/v86-network-ready`. |
 | `profile` | Starts the appliance only for the automatic tty1 login. |
-| `appliance-session` | Architecture, privilege, network, DRM, process, renderer, and serial readiness/failure contract. |
+| `appliance-session` | Architecture, privilege, network, DRM, process, negotiated renderer, 2D fallback, and serial readiness/failure contract. |
 | `virtio-gpu-capset-probe.c` | Direct pinned-libdrm `GET_CAPS` and `CONTEXT_INIT` proof for private capset ID 7. |
+| `virtio-gpu-triangle.c` | Frozen capset-v1/v2 triangles plus the version-3 Mesa llvmpipe reference and explicit resource/buffer/shader/binding/indexed-draw workload. |
+| `virtio-gpu-triangle-spv.h` | Pinned Naga-generated SPIR-V modules for the version-3 textured triangle. |
 | `ghostty-terminal-benchmark.c` | Offline fixed ANSI/scroll workload, guest CPU accounting, keyboard synchronization, and serial run markers for the XWAH-5 baseline. |
-| `probe-world.lock` | Exact direct build-only packages for the capset probe. |
-| `probe-packages.lock` | Complete sorted capset-probe builder package closure; the build rejects drift. |
-| `xinitrc` | Openbox, llvmpipe, 1024x768 mode, Ghostty, and Codex process startup. |
-| `20-virtio-gpu.conf` | Xorg modesetting configuration for PCI `1af4:1050`, with guest acceleration disabled. |
+| `probe-world.lock` | Exact direct build-only packages for the probes and triangle workloads. |
+| `probe-packages.lock` | Complete sorted probe/triangle builder package closure; the build rejects drift. |
+| `xinitrc` | Openbox, selected renderer check, 1024x768 mode, Ghostty, and Codex process startup. |
+| `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
 | `ghostty-config` | Undecorated maximized window and the Codex launcher command. |
 | `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup. |
 
@@ -140,7 +143,7 @@ V86_APPLIANCE_HOSTNAME=v86-appliance
 V86_APPLIANCE_DRM=/dev/dri/card0
 V86_APPLIANCE_NETWORK=PASS|UNCONFIGURED
 V86_APPLIANCE_XORG=PASS
-V86_APPLIANCE_RENDERER=llvmpipe (...)
+V86_APPLIANCE_RENDERER=llvmpipe (...)|webgpuvirt (...)
 V86_APPLIANCE_OPENBOX=PASS
 V86_APPLIANCE_GHOSTTY_PROCESS=PASS
 V86_APPLIANCE_GHOSTTY_WINDOW=PASS
@@ -200,9 +203,70 @@ and presented 6,291,456 bytes, reported zero invalid/backend commands, and
 retained zero 3D objects. The five runs reported no browser long tasks or WebGPU
 validation errors.
 
-This is the XWAH-5 comparison baseline, not a performance claim. The future
-accelerated run must use the same workload, machine/browser/build, raw-run
-schema, and terminal hash.
+This is the XWAH-5 comparison baseline, not a performance claim. The
+accelerated benchmark target enforces the same workload, machine/browser/build,
+raw-run schema, terminal hash, and zero-error contract.
+
+## XWAH-5 Version-3 Resource Triangle
+
+The opt-in `resources=1` boot mode stops before Xorg and runs two equivalent
+triangle workloads. First, Mesa llvmpipe renders and reads back a deterministic
+textured, premultiplied-alpha triangle as the software reference. Then the
+libdrm workload negotiates capset version 3 and sends actual standard VirtIO GPU
+resources plus the private WebGPU submit stream: one render target, two vertex
+buffers, one index buffer, one sampled texture, one uniform buffer, two SPIR-V
+modules, three bindings, and one indexed draw. This proves the version-3
+transport and renderer independently of the Gallium integration exercised by
+the opt-in accelerated appliance.
+
+Run the real-browser contract on the reserved port:
+
+```sh
+make virtio-gpu-webgpuvirt-triangle-test
+```
+
+Success requires the llvmpipe and version-3 guest markers, red-center and
+blue-corner browser pixels, standard resource/transfer/submit/scanout commands,
+zero invalid/backend/WebGPU errors, ordered fences, deterministic device-loss
+recovery, and zero leaked 3D objects. The exact byte contract is
+[`docs/webgpuvirt-wire-v3.md`](../../../docs/webgpuvirt-wire-v3.md).
+
+## XWAH-5 Accelerated Ghostty
+
+The explicit `accelerated=1` boot mode selects the checksum-locked
+`webgpuvirt` Mesa artifacts under `/usr/local`, requires capset version 3, and
+fails rather than silently falling back to llvmpipe. The Rust/Wasm backend
+accepts only the measured Ghostty virgl command and shader profiles. Unknown
+state is a deterministic invalid submit; it does not broaden the advertised
+contract.
+
+Run the browser acceptance contract:
+
+```sh
+make virtio-gpu-codex-accelerated-test
+```
+
+Run the fixed terminal workload for comparison with the committed baseline:
+
+```sh
+V86_CODEX_BROWSER_OUTPUT=tests/benchmark/baselines/ghostty-webgpuvirt-wgpu-apple-m4.json \
+V86_CODEX_BENCHMARK_MACHINE=apple-m4-10c \
+make virtio-gpu-codex-benchmark-accelerated
+```
+
+The committed Apple M4/Chrome 151 accelerated result records 42,769.9 ms
+graphical readiness, 330/360 ms guest CPU p50/p95, and 238.1/285.3 ms
+keystroke-to-first-present p50/p95. Relative to the committed llvmpipe control,
+guest CPU p50 is 82.6% lower and keystroke-to-present p95 is 84.8% lower, with
+no regression in either primary metric. Scroll throughput p50 rises from
+362.65 to 1,633.15 lines/s. All five runs retain the exact
+`bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5`
+terminal hash and report zero invalid commands, backend errors, WebGPU
+validation errors, or long tasks.
+
+Both targets own port 8082. Acceptance requires a `webgpuvirt` renderer marker,
+Ghostty and Codex readiness, capset-7 `SUBMIT_3D` traffic, and zero invalid
+commands, backend errors, or browser WebGPU validation errors.
 
 ## Verification
 
@@ -222,6 +286,12 @@ V86_CODEX_BROWSER_RENDERERS=webgpu-js \
 ./tests/browser/virtio_gpu_codex_acceptance.js
 ```
 
+
+For the opt-in targeted Mesa path:
+
+```sh
+make virtio-gpu-codex-accelerated-test
+```
 After changing the guest, browser launcher, standard 2D device, or either renderer, also run:
 
 ```sh
@@ -230,7 +300,11 @@ make virtio-gpu-test
 TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 ```
 
-The acceptance harness checks guest architecture and UID, pinned versions, hostname, relay behavior, CA-validated HTTPS when configured, llvmpipe, Xorg/Openbox/Ghostty/Codex processes, visible scanout, keyboard delivery, responsive layout, absence of desktop packages, writable workspace, and pristine fresh-session reset.
+The acceptance harness checks guest architecture and UID, pinned versions,
+hostname, relay behavior, CA-validated HTTPS when configured, the expected
+llvmpipe or `webgpuvirt` renderer, Xorg/Openbox/Ghostty/Codex processes, visible
+scanout, keyboard delivery, responsive layout, absence of desktop packages,
+writable workspace, and pristine fresh-session reset.
 
 ## Observed Codex Limitations
 

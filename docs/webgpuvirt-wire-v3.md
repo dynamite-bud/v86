@@ -1,6 +1,6 @@
 # `V86W` capset 7, version 3
 
-Version 3 extends [`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md) with WebGPU-restricted SPIR-V, multiple vertex buffers, indexed draw, sampled textures, uniform buffers, premultiplied-alpha blending, instancing, and explicit resource bindings. It does not reinterpret versions 1 or 2.
+Version 3 extends [`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md) with WebGPU-restricted SPIR-V, multiple vertex buffers, indexed draw, sampled textures, uniform and storage buffers, premultiplied-alpha blending, instancing, and explicit resource bindings. It does not reinterpret versions 1 or 2.
 
 ## Negotiation
 
@@ -11,16 +11,17 @@ The payload is 912 bytes. Version 3 changes or defines these fields:
 | Offset | Type | Version-3 value |
 | ---: | --- | ---: |
 | 4 | `le16` | submit major 3 |
-| 12 | `le32` | feature bits `0x5f`: basic render, vertex buffers, indexed draw, sampled textures, uniform buffers, blending |
+| 12 | `le32` | feature bits `0x85f`: basic render, vertex buffers, indexed draw, sampled textures, uniform buffers, blending, storage buffers |
 | 16 | `le32` | shader IR bits `0x2`: WebGPU-restricted SPIR-V only |
 | 20 | `le32` | three format records |
+| 76 | `le32` | maximum transfer bytes: 16777216 |
 | 80 | `le32` | maximum bytes per shader: 131072 |
 | 84 | `le32` | maximum live shader bytes per context: 262144 |
 | 96 | `le32` | one bind group per pipeline |
 | 100 | `le32` | 16 bindings in group zero |
 | 104 | `le32` | eight vertex buffers per pipeline |
 | 108 | `le32` | eight vertex attributes per pipeline |
-| 128 | `le64` | maximum buffer size: 4194304 bytes |
+| 128 | `le64` | maximum buffer size: 16777216 bytes |
 | 144 | format record | format 67 (`R8G8B8A8_UNORM`), usage `0x7b`, sample count bit `0x1` |
 | 156 | format record | format 64 (`R8_UNORM`), usage `0x5b`, sample count bit `0x1` |
 | 168 | format record | format 177 (`R8_UINT`), usage `0x5b`, sample count bit `0x1` |
@@ -29,10 +30,14 @@ The payload is 912 bytes. Version 3 changes or defines these fields:
 | 188 | `le32` | pipeline-compilation timeout: 5000 ms |
 | 192 | `le32` | submitted GPU-work timeout: 5000 ms |
 | 196 | `le32` | maximum vertex invocations per submit: 4194304 |
-| 200 | `le32` | maximum instances per draw: 1024 |
+| 200 | `le32` | maximum instances per draw: 4096 |
 | 204 | `le32` | version-3 vertex-layout count ceiling: 8 |
-| 208 | `le32` | maximum single host allocation: 4194304 bytes |
+| 208 | `le32` | maximum single host allocation: 16777216 bytes |
 | 212 | `le32` | accepted buffer bind bits `0x4054`: constant, vertex, index, shader buffer |
+
+The 4096-instance ceiling covers the measured Ghostty terminal batches, whose
+observed maximum is 2479, while the aggregate invocation ceiling remains
+unchanged.
 
 All unspecified bytes remain zero or retain the common capset value defined by version 1. Format usage bits keep the meaning in the canonical architecture document. Buffer bind bits use the stable virgl numeric namespace; they are not format usage bits.
 
@@ -42,14 +47,13 @@ A context locks to the submit major of its first successful object creation. Mix
 
 Version 3 accepts these standard `RESOURCE_CREATE_3D` shapes:
 
-- buffers: target 0, format 64 (`R8_UNORM` as the byte-addressable wire format), `width == byte_length`, unit height/depth/array/sample/level, and a nonempty subset of bind bits `0x4054`;
+- buffers: target 0, format 64 (`R8_UNORM` as the byte-addressable wire format), `width == byte_length`, unit height/depth/array/sample/level, a nonempty subset of bind bits `0x4054`, and `byte_length <= min(maximum buffer size, maximum single host allocation, maximum transfer bytes)`;
 - textures: target 2 or 5, a listed texture format, unit depth/array/sample/level, and a nonempty subset of render-target, sampler-view, and scanout bind bits.
 Format 177 (`R8_UINT`) is the measured Ghostty glyph-atlas compatibility
 record. The renderer stores it as WebGPU `r8unorm`, and the bounded translated
 shader consumes normalized alpha. This does not advertise general integer
 texture or integer-sampling semantics.
-
-The renderer allocates buffer resources with WebGPU `COPY_SRC`, `COPY_DST`, `VERTEX`, `UNIFORM`, and `STORAGE` usage. The private record still determines how a buffer may be consumed. Standard `TRANSFER_TO_HOST_3D` uploads the attached GEM backing. Buffer uploads must be four-byte aligned and contiguous. Texture rows are repacked to WebGPU's row alignment when necessary. Linux 6.18 requires zero `stride` and `layer_stride` for these non-blob GEM resources; width and format determine the effective stride.
+`TRANSFER_TO_HOST_3D` uploads the attached GEM backing and `TRANSFER_FROM_HOST_3D` downloads into it. Both directions reject any request whose effective byte count exceeds the advertised sixteen-MiB transfer maximum. Buffer transfers may use the resource's page-rounded staging footprint, but their guest payload remains bounded by the resource allocation. Buffer uploads must be four-byte aligned and contiguous. Texture rows are repacked to WebGPU's row alignment when necessary. Linux 6.18 requires zero `stride` and `layer_stride` for these non-blob GEM resources; width and format determine the effective stride.
 
 ## Submit envelope and object records
 
@@ -66,7 +70,7 @@ byte source[byte_count];
 byte zero_padding[align8(byte_count) - byte_count];
 ```
 
-The SPIR-V frontend must produce exactly one `main` entry point of the declared stage. Naga validation rejects unsupported capabilities, invalid types, and any descriptor outside group zero or binding 0 through 15.
+The SPIR-V frontend must parse and validate the module synchronously before pipeline creation, and must produce exactly one `main` entry point of the declared stage. Truncated or malformed modules, unsupported capabilities, invalid types, and descriptors outside group zero or binding 0 through 15 are rejected before any WebGPU object is created.
 
 `CREATE_PIPELINE` is variable-sized:
 
@@ -150,7 +154,7 @@ le32 reserved = 0;
 
 Bindings are unique and in group zero. Buffer offset/size and texture attachment/type are checked before the renderer creates a transient bind group. The sampler is renderer-owned and immutable. A draw requiring a bind group, vertex buffer, or index buffer is invalid when that state is absent. Indexed fetch ranges, instance ranges, alignment, and aggregate work are validated before encoding.
 
-Every render submit is completely validated before creating a command encoder or submitting queue work. Version 3 allows at most 4194304 aggregate vertex invocations, 1024 instances per draw, 256 draws, and the common command/resource limits. Work completion is fenced and bounded by 5000 ms.
+Every render submit is completely validated before creating a command encoder or submitting queue work. Version 3 allows at most 4194304 aggregate vertex invocations, 4096 instances per draw, 256 draws, and the common command/resource limits. Work completion is fenced and bounded by 5000 ms.
 
 ## Proving workload
 

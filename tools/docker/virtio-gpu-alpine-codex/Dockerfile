@@ -74,14 +74,17 @@ RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
 COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-triangle
 COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
-COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /usr/local/lib/
-COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /usr/local/lib/dri
+RUN install -D -m 0755 /usr/lib/libgallium-26.1.6.so \
+    /opt/mesa-system/lib/libgallium-26.1.6.so
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /opt/webgpuvirt/lib/
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /opt/webgpuvirt/lib/dri
 RUN set -eux; \
     . /tmp/mesa-artifacts.lock; \
     printf '%s  %s\n' "$MESA_GALLIUM_SHA256" \
-        /usr/local/lib/libgallium-26.1.6.so | sha256sum -c -; \
+        /opt/webgpuvirt/lib/libgallium-26.1.6.so | sha256sum -c -; \
     printf '%s  %s\n' "$MESA_DRI_SHA256" \
-        /usr/local/lib/dri/virtio_gpu_dri.so | sha256sum -c -
+        /opt/webgpuvirt/lib/dri/virtio_gpu_dri.so | sha256sum -c -; \
+    ln -sfn /opt/webgpuvirt/lib/dri/libdril_dri.so /usr/lib/dri/virtio_gpu_dri.so
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \

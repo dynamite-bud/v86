@@ -1,0 +1,2206 @@
+{
+  "result": "pass",
+  "port": 8082,
+  "scenarios": [
+    {
+      "schema_version": 1,
+      "status": "pass",
+      "scenario": {
+        "appliance": "openbox-ghostty-codex",
+        "renderer": "wgpu",
+        "guest_renderer": "webgpuvirt",
+        "accelerated_3d": true
+      },
+      "machine": {
+        "label": "apple-m4-10c",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+        "platform": "MacIntel",
+        "hardware_concurrency": 10,
+        "device_memory_gib": 16,
+        "device_pixel_ratio": 1,
+        "webgpu_adapter": {
+          "vendor": "apple",
+          "architecture": "metal-3"
+        },
+        "captured_at": "2026-08-14T22:24:49.885Z",
+        "url": "http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&acceptance=1786746241051&benchmark=1&accelerated=1&benchmark_machine=apple-m4-10c"
+      },
+      "method": {
+        "workload": "Ghostty PTY consumes a fixed ANSI stream, 512 scrolling lines, and a 24-line reference frame",
+        "synchronization": "two warmups plus five keyboard-triggered runs; each run acknowledges after WebGPU presentations quiesce",
+        "readiness": "V86_APPLIANCE_READY=PASS plus V86_GHOSTTY_BENCHMARK_READY=PASS",
+        "warmup_runs": 2,
+        "measured_runs": 5,
+        "presentation_quiet_ms": 250,
+        "readiness_ms": 42769.89999985695
+      },
+      "summary": {
+        "guest_cpu_ms": {
+          "count": 5,
+          "total": 1600,
+          "mean": 320,
+          "p50": 330,
+          "p95": 360,
+          "max": 360
+        },
+        "keystroke_to_present_ms": {
+          "count": 5,
+          "total": 1069.9999997615814,
+          "mean": 213.99999995231627,
+          "p50": 238.09999990463257,
+          "p95": 285.2999999523163,
+          "max": 285.2999999523163
+        },
+        "output_to_last_present_ms": {
+          "count": 5,
+          "total": 1872.1999998092651,
+          "mean": 374.439999961853,
+          "p50": 328.2000000476837,
+          "p95": 605.7999999523163,
+          "max": 605.7999999523163
+        },
+        "text_throughput_mib_s": {
+          "count": 5,
+          "total": 0.7988087939428957,
+          "mean": 0.15976175878857915,
+          "p50": 0.1696941693958469,
+          "p95": 0.18847250898073975,
+          "max": 0.18847250898073975
+        },
+        "scroll_throughput_lines_s": {
+          "count": 5,
+          "total": 7687.800942409316,
+          "mean": 1537.5601884818632,
+          "p50": 1633.1505177395652,
+          "p95": 1813.8747884940778,
+          "max": 1813.8747884940778
+        }
+      },
+      "terminal_reference_sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5",
+      "raw_runs": [
+        {
+          "run": 1,
+          "guest_cpu_ms": 360,
+          "keystroke_to_present_ms": 285.2999999523163,
+          "output_to_last_present_ms": 346.19999980926514,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.16087124908865497,
+          "scroll_throughput_lines_s": 1548.2380135624003,
+          "host_elapsed_ms": 706.0999999046326,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 40,
+            "invalid_commands": 0,
+            "guest_read_bytes": 9636392,
+            "upload_bytes": 9636392,
+            "flushes": 3,
+            "flushed_bytes": 9437184,
+            "presentations": 3,
+            "presented_bytes": 9437184,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 37,
+            "fence_wait_ms": 22.299999713897705,
+            "guest_copy_ms": 0,
+            "upload_wait_ms": 0,
+            "present_wait_ms": 0.3000001907348633,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "fence_responses": [
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 165,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 166,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 167,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 168,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 169,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 170,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 171,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 172,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 173,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 174,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 175,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 176,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 177,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 178,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 179,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 180,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 181,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 182,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 183,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 184,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 185,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 186,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 187,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 188,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 189,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 190,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 191,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 192,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 193,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 194,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 195,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 196,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 197,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 198,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 199,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 200,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 201,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              }
+            ],
+            "invalid_responses": [],
+            "command_counts": {
+              "0x205": 21,
+              "0x207": 12,
+              "0x206": 4,
+              "0x104": 3
+            },
+            "live_resources": 23,
+            "resource_memory_bytes": 26136700,
+            "backing_entries": 240,
+            "live_3d_contexts": 2,
+            "live_3d_resources": 21,
+            "context_attachments": 23
+          },
+          "browser_health": {
+            "raf": {
+              "count": 42,
+              "rate_hz": 59.48165982958874,
+              "interval_ms": {
+                "count": 42,
+                "total_ms": 700,
+                "mean_ms": 16.666666666666668,
+                "p95_ms": 17.200000000004366,
+                "max_ms": 17.400000000001455
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 13,
+                "total_ms": 25.5,
+                "mean_ms": 1.9615384615384615,
+                "p95_ms": 5,
+                "max_ms": 5
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 2,
+          "guest_cpu_ms": 330,
+          "keystroke_to_present_ms": 229.09999990463257,
+          "output_to_last_present_ms": 296.5,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.18783685127760066,
+          "scroll_throughput_lines_s": 1807.7571669477234,
+          "host_elapsed_ms": 687.7999999523163,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 47,
+            "invalid_commands": 0,
+            "guest_read_bytes": 9694408,
+            "upload_bytes": 9694408,
+            "flushes": 3,
+            "flushed_bytes": 9437184,
+            "presentations": 3,
+            "presented_bytes": 9437184,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 38,
+            "fence_wait_ms": 12.899999856948853,
+            "guest_copy_ms": 0,
+            "upload_wait_ms": 0,
+            "present_wait_ms": 0.10000014305114746,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "fence_responses": [
+              {
+                "command": 516,
+                "response": 4352,
+                "fence_id_low": 202,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 203,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 204,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 205,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 206,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 207,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 208,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 209,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 210,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 211,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 212,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 213,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 214,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 215,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 216,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 217,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 218,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 219,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 220,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 221,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 222,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 223,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 224,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 225,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 226,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 227,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 228,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 229,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 230,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 231,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 232,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 233,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 234,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 235,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 236,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 237,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 238,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 239,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              }
+            ],
+            "invalid_responses": [],
+            "command_counts": {
+              "0x203": 2,
+              "0x102": 2,
+              "0x204": 1,
+              "0x106": 1,
+              "0x202": 1,
+              "0x205": 21,
+              "0x207": 12,
+              "0x206": 4,
+              "0x104": 3
+            },
+            "live_resources": 22,
+            "resource_memory_bytes": 26354456,
+            "backing_entries": 239,
+            "live_3d_contexts": 2,
+            "live_3d_resources": 20,
+            "context_attachments": 22
+          },
+          "browser_health": {
+            "raf": {
+              "count": 40,
+              "rate_hz": 58.156440829853324,
+              "interval_ms": {
+                "count": 40,
+                "total_ms": 666.5999999999985,
+                "mean_ms": 16.664999999999964,
+                "p95_ms": 18.30000000000291,
+                "max_ms": 18.400000000001455
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 13,
+                "total_ms": 30.399999618530273,
+                "mean_ms": 2.3384615091177134,
+                "p95_ms": 6.099999904632568,
+                "max_ms": 6.099999904632568
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 3,
+          "guest_cpu_ms": 360,
+          "keystroke_to_present_ms": 239.70000004768372,
+          "output_to_last_present_ms": 328.2000000476837,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.1696941693958469,
+          "scroll_throughput_lines_s": 1633.1505177395652,
+          "host_elapsed_ms": 685.3000001907349,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 40,
+            "invalid_commands": 0,
+            "guest_read_bytes": 9692936,
+            "upload_bytes": 9692936,
+            "flushes": 3,
+            "flushed_bytes": 9437184,
+            "presentations": 3,
+            "presented_bytes": 9437184,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 37,
+            "fence_wait_ms": 13.199999809265137,
+            "guest_copy_ms": 0,
+            "upload_wait_ms": 0,
+            "present_wait_ms": 0.19999980926513672,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "fence_responses": [
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 240,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 241,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 242,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 243,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 244,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 245,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 246,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 247,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 248,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 249,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 250,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 251,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 252,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 253,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 254,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 255,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 256,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 257,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 258,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 259,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 260,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 261,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 262,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 263,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 264,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 265,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 266,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 267,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 268,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 269,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 270,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 271,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 272,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 273,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 274,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 275,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 276,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              }
+            ],
+            "invalid_responses": [],
+            "command_counts": {
+              "0x205": 21,
+              "0x207": 12,
+              "0x206": 4,
+              "0x104": 3
+            },
+            "live_resources": 22,
+            "resource_memory_bytes": 26354456,
+            "backing_entries": 239,
+            "live_3d_contexts": 2,
+            "live_3d_resources": 20,
+            "context_attachments": 22
+          },
+          "browser_health": {
+            "raf": {
+              "count": 40,
+              "rate_hz": 58.36859767819506,
+              "interval_ms": {
+                "count": 40,
+                "total_ms": 666.7000000000044,
+                "mean_ms": 16.66750000000011,
+                "p95_ms": 18,
+                "max_ms": 18.400000000001455
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 13,
+                "total_ms": 26.799999952316284,
+                "mean_ms": 2.0615384578704834,
+                "p95_ms": 6.799999952316284,
+                "max_ms": 6.799999952316284
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 4,
+          "guest_cpu_ms": 290,
+          "keystroke_to_present_ms": 77.79999995231628,
+          "output_to_last_present_ms": 605.7999999523163,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.0919340152000534,
+          "scroll_throughput_lines_s": 884.7804556655491,
+          "host_elapsed_ms": 913.4000000953674,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 53,
+            "invalid_commands": 0,
+            "guest_read_bytes": 12848576,
+            "upload_bytes": 12848576,
+            "flushes": 4,
+            "flushed_bytes": 12582912,
+            "presentations": 4,
+            "presented_bytes": 12582912,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 49,
+            "fence_wait_ms": 19.799999475479126,
+            "guest_copy_ms": 0,
+            "upload_wait_ms": 0,
+            "present_wait_ms": 0.09999990463256836,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "fence_responses": [
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 277,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 278,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 279,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 280,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 281,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 282,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 283,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 284,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 285,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 286,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 287,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 288,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 289,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 290,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 291,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 292,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 293,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 294,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 295,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 296,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 297,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 298,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 299,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 300,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 301,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 302,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 303,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 304,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 305,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 306,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 307,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 308,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 309,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 310,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 311,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 312,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 313,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 314,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 315,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 316,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 317,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 318,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 319,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 320,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 321,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 322,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 323,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 324,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 325,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              }
+            ],
+            "invalid_responses": [],
+            "command_counts": {
+              "0x205": 28,
+              "0x207": 16,
+              "0x206": 5,
+              "0x104": 4
+            },
+            "live_resources": 22,
+            "resource_memory_bytes": 26354456,
+            "backing_entries": 239,
+            "live_3d_contexts": 2,
+            "live_3d_resources": 20,
+            "context_attachments": 22
+          },
+          "browser_health": {
+            "raf": {
+              "count": 54,
+              "rate_hz": 59.11977227322301,
+              "interval_ms": {
+                "count": 54,
+                "total_ms": 898.9000000000015,
+                "mean_ms": 16.646296296296324,
+                "p95_ms": 18.5,
+                "max_ms": 18.60000000000582
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 18,
+                "total_ms": 43.69999980926514,
+                "mean_ms": 2.4277777671813965,
+                "p95_ms": 9.700000047683716,
+                "max_ms": 9.700000047683716
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        },
+        {
+          "run": 5,
+          "guest_cpu_ms": 260,
+          "keystroke_to_present_ms": 238.09999990463257,
+          "output_to_last_present_ms": 295.5,
+          "output_bytes": 58399,
+          "output_lines": 536,
+          "text_throughput_mib_s": 0.18847250898073975,
+          "scroll_throughput_lines_s": 1813.8747884940778,
+          "host_elapsed_ms": 622.9000000953674,
+          "terminal_reference": {
+            "width": 1024,
+            "height": 768,
+            "sha256": "bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5"
+          },
+          "gpu": {
+            "commands": 27,
+            "invalid_commands": 0,
+            "guest_read_bytes": 6424336,
+            "upload_bytes": 6424336,
+            "flushes": 2,
+            "flushed_bytes": 6291456,
+            "presentations": 2,
+            "presented_bytes": 6291456,
+            "cursor_updates": 0,
+            "cursor_moves": 0,
+            "fenced_commands": 25,
+            "fence_wait_ms": 18.50000023841858,
+            "guest_copy_ms": 0,
+            "upload_wait_ms": 0,
+            "present_wait_ms": 0.09999990463256836,
+            "backend_errors": 0,
+            "config_changes": 0,
+            "max_active_queues": 1,
+            "fence_responses": [
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 326,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 327,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 328,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 329,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 330,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 331,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 332,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 333,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 334,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 335,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 336,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 337,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 338,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 339,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 340,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 341,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 342,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 343,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 344,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 345,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 346,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 347,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 348,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 349,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 350,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 351,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 352,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 353,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 354,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 355,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 356,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 357,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 358,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 359,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 360,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 361,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 362,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 363,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 364,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 365,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 366,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 367,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 368,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 369,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 518,
+                "response": 4352,
+                "fence_id_low": 370,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 371,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 372,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 517,
+                "response": 4352,
+                "fence_id_low": 373,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              },
+              {
+                "command": 519,
+                "response": 4352,
+                "fence_id_low": 374,
+                "fence_id_high": 0,
+                "flags": 1,
+                "ring_idx": 0
+              }
+            ],
+            "invalid_responses": [],
+            "command_counts": {
+              "0x205": 14,
+              "0x207": 8,
+              "0x206": 3,
+              "0x104": 2
+            },
+            "live_resources": 22,
+            "resource_memory_bytes": 26354456,
+            "backing_entries": 239,
+            "live_3d_contexts": 2,
+            "live_3d_resources": 20,
+            "context_attachments": 22
+          },
+          "browser_health": {
+            "raf": {
+              "count": 36,
+              "rate_hz": 57.794188464421765,
+              "interval_ms": {
+                "count": 36,
+                "total_ms": 600,
+                "mean_ms": 16.666666666666668,
+                "p95_ms": 17.900000000001455,
+                "max_ms": 18.19999999999709
+              },
+              "intervals_over_50ms": 0
+            },
+            "event_loop": {
+              "timer_interval_ms": 50,
+              "delay_ms": {
+                "count": 12,
+                "total_ms": 22.100000143051147,
+                "mean_ms": 1.8416666785875957,
+                "p95_ms": 5.1000001430511475,
+                "max_ms": 5.1000001430511475
+              },
+              "delays_over_50ms": 0
+            },
+            "long_tasks": {
+              "count": 0,
+              "total_ms": 0,
+              "mean_ms": null,
+              "p95_ms": null,
+              "max_ms": null
+            }
+          }
+        }
+      ],
+      "failures": {
+        "backend_fatal": null,
+        "renderer_fault": null,
+        "console_or_window_messages": [],
+        "validation_message_count": 0
+      },
+      "performance_comparison": {
+        "baseline": "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json",
+        "gate": "pass",
+        "guest_cpu_p50_ms": {
+          "llvmpipe": 1900,
+          "webgpuvirt": 330,
+          "change_percent": -82.6
+        },
+        "keystroke_to_present_p95_ms": {
+          "llvmpipe": 1877.4000000953674,
+          "webgpuvirt": 285.2999999523163,
+          "change_percent": -84.8
+        },
+        "terminal_reference_identical": true,
+        "browser_long_tasks": 0
+      }
+    }
+  ]
+}

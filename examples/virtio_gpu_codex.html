@@ -243,6 +243,70 @@ let serial_text = "";
 let serial_render_pending = false;
 let guest_ready = false;
 let readiness_timer;
+let accelerated_scanout_ready = !accelerated;
+let scanout_probe_pending = false;
+let next_scanout_probe_at = 0;
+
+async function probe_accelerated_scanout()
+{
+    const now = performance.now();
+    if(accelerated_scanout_ready || scanout_probe_pending || now < next_scanout_probe_at)
+    {
+        return;
+    }
+    next_scanout_probe_at = now + 1000;
+    const device = emulator.v86?.cpu?.devices?.virtio_gpu;
+    const scanout = device?.scanouts?.[0];
+    const resource = scanout && device.resources.get(scanout.resource_id);
+    if(!resource?.is_3d)
+    {
+        return;
+    }
+    scanout_probe_pending = true;
+    try
+    {
+        const bytes_per_pixel = resource.bytes_per_pixel;
+        const pixels = await device.backend.transferFromHost3D({
+            resource_id: scanout.resource_id,
+            x: scanout.x,
+            y: scanout.y,
+            width: scanout.width,
+            height: scanout.height,
+            stride: scanout.width * bytes_per_pixel,
+            offset: 0,
+            z: 0,
+            depth: 1,
+            level: 0,
+        });
+        let pixel_offset = -1;
+        for(let offset = 0; offset < pixels.length; offset += bytes_per_pixel)
+        {
+            if(pixels[offset] + pixels[offset + 1] + pixels[offset + 2] > 24)
+            {
+                pixel_offset = offset;
+                break;
+            }
+        }
+        const sample_offset = Math.max(0, pixel_offset);
+        window.acceleratedScanoutPixel =
+            Array.from(pixels.slice(sample_offset, sample_offset + bytes_per_pixel));
+        window.acceleratedScanoutProbeError = null;
+        accelerated_scanout_ready = pixel_offset >= 0;
+    }
+    catch(error)
+    {
+        window.acceleratedScanoutProbeError = String(error);
+    }
+    finally
+    {
+        scanout_probe_pending = false;
+    }
+    if(accelerated_scanout_ready)
+    {
+        update_readiness();
+    }
+}
+
 
 function update_readiness()
 {
@@ -262,14 +326,24 @@ function update_readiness()
     {
         return;
     }
+    if(accelerated && !accelerated_scanout_ready)
+    {
+        status.textContent = "Guest ready; waiting for rendered WebGPU pixels…";
+        void probe_accelerated_scanout();
+        return;
+    }
     const canvas = document.querySelector(".v86-virtio-gpu-canvas");
     if(canvas && !canvas.hidden && getComputedStyle(canvas).display !== "none")
     {
-        status.textContent = triangle ?
-            `Reference triangle is ready (${renderer_label}).` :
+        status.textContent = accelerated ?
             benchmark_enabled ?
-                `Running the deterministic Ghostty benchmark (${renderer_label})…` :
-                `Codex is ready in maximized Ghostty (${renderer_label}).`;
+                `Running the accelerated Ghostty benchmark (${renderer_label})…` :
+                `Codex is ready in accelerated Ghostty (${renderer_label}).` :
+            triangle ?
+                `Reference triangle is ready (${renderer_label}).` :
+                benchmark_enabled ?
+                    `Running the deterministic Ghostty benchmark (${renderer_label})…` :
+                    `Codex is ready in maximized Ghostty (${renderer_label}).`;
         document.body.dataset.result = "pass";
         clearInterval(readiness_timer);
     }

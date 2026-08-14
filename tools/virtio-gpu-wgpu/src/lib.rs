@@ -59,10 +59,12 @@ struct Renderer {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    blit_pipeline: wgpu::RenderPipeline,
     guest_pipeline_layout: wgpu::PipelineLayout,
     guest_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    zero_storage_buffer: wgpu::Buffer,
     present_params: wgpu::Buffer,
     resources: HashMap<u32, Resource>,
     contexts: HashMap<u32, submit_3d::Context3D>,
@@ -489,6 +491,35 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("v86 virtio-gpu blit shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
+        });
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("v86 virtio-gpu blit pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fragment_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let (guest_pipeline_layout, guest_pipeline) = submit_3d::create_pinned_pipeline(&device)?;
         queue.submit([submit_3d::encode_pinned_pipeline_probe(
             &device,
@@ -523,6 +554,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let zero_storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("v86 virtio-gpu zero storage buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         Ok(Self {
             canvas,
@@ -532,6 +569,7 @@ impl Renderer {
             queue,
             surface_config,
             pipeline,
+            blit_pipeline,
             guest_pipeline,
             guest_pipeline_layout,
             bind_group_layout,
@@ -543,6 +581,7 @@ impl Renderer {
             max_host_memory_bytes,
             host_memory_bytes: 0,
             upload_scratch: Vec::new(),
+            zero_storage_buffer,
             fault,
         })
     }
@@ -677,6 +716,12 @@ impl Renderer {
             },
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
+        let compatible_view_formats = [wgpu::TextureFormat::Rgba8Unorm];
+        let view_formats = if texture_format == wgpu::TextureFormat::Rgba8UnormSrgb {
+            compatible_view_formats.as_slice()
+        } else {
+            &[]
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("v86 virtio-gpu texture resource"),
             size: wgpu::Extent3d {
@@ -696,7 +741,7 @@ impl Renderer {
                 } else {
                     wgpu::TextureUsages::empty()
                 },
-            view_formats: &[],
+            view_formats,
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
