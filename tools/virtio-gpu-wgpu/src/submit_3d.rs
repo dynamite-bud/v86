@@ -7,8 +7,8 @@ use futures_util::future::{Either, select};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use super::{
-    FORMAT_B8G8R8A8_SRGB, FORMAT_B8G8R8A8_UNORM, FORMAT_B8G8R8X8_SRGB, FORMAT_R8_UNORM,
-    FORMAT_R8G8B8A8_SRGB, FORMAT_R8G8B8A8_UNORM, Renderer, record_fault,
+    FORMAT_B8G8R8A8_SRGB, FORMAT_B8G8R8A8_UNORM, FORMAT_B8G8R8X8_SRGB, FORMAT_B8G8R8X8_UNORM,
+    FORMAT_R8_UNORM, FORMAT_R8G8B8A8_SRGB, FORMAT_R8G8B8A8_UNORM, Renderer, record_fault,
 };
 
 const SUBMIT_MAGIC: u32 = 0x5336_3856; // "V86S"
@@ -173,6 +173,16 @@ fn color_target_format(format: u32) -> Result<wgpu::TextureFormat, String> {
         },
         _ => Err(invalid("unsupported color target format")),
     }
+}
+
+fn mesa_clear_color(format: u32, mut color: [f64; 4]) -> [f64; 4] {
+    if matches!(
+        format,
+        FORMAT_B8G8R8A8_UNORM | FORMAT_B8G8R8X8_UNORM | FORMAT_B8G8R8A8_SRGB | FORMAT_B8G8R8X8_SRGB
+    ) {
+        color.swap(0, 2);
+    }
+    color
 }
 const VERTEX_SHADER_SOURCE: &str = concat!(
     "@vertex fn main(@builtin(vertex_index) i: u32) -> ",
@@ -914,11 +924,17 @@ struct MesaBufferBinding {
     size: u64,
 }
 
+#[derive(Clone, Copy)]
+struct MesaSurface {
+    resource_id: u32,
+    format: u32,
+}
+
 #[derive(Clone, Default)]
 struct MesaState {
     shaders: HashMap<u32, MesaShader>,
     bound_shaders: [Option<u32>; 2],
-    surfaces: HashMap<u32, u32>,
+    surfaces: HashMap<u32, MesaSurface>,
     sampler_views: HashMap<u32, u32>,
     bound_sampler_views: [HashMap<u32, u32>; 2],
     constant_buffers: [HashMap<u32, Arc<[u32]>>; 2],
@@ -926,7 +942,7 @@ struct MesaState {
     shader_buffers: [HashMap<u32, MesaBufferBinding>; 2],
     vertex_elements: HashMap<u32, Vec<MesaVertexElement>>,
     bound_vertex_elements: Option<u32>,
-    framebuffer: Option<u32>,
+    framebuffer: Option<MesaSurface>,
     vertex_buffers: Vec<(u32, u32, u32)>,
     index_buffer: Option<(u32, u32, u32)>,
     viewport: Option<Viewport>,
@@ -943,7 +959,7 @@ struct MesaDraw {
     topology: u32,
     vertex_shader: u32,
     fragment_shader: u32,
-    target: Option<u32>,
+    target: Option<MesaSurface>,
     vertex_buffers: Vec<(u32, u32, u32)>,
     vertex_elements: Vec<MesaVertexElement>,
     sampled_textures: [HashMap<u32, u32>; 2],
@@ -1555,7 +1571,13 @@ async fn submit_mesa_triangle_inner(
                 {
                     return Err(invalid("Mesa virgl surface limit exceeded"));
                 }
-                context.mesa.surfaces.insert(payload[0], payload[1]);
+                context.mesa.surfaces.insert(
+                    payload[0],
+                    MesaSurface {
+                        resource_id: payload[1],
+                        format: payload[2],
+                    },
+                );
             },
             (1, 6) if payload.len() == 6 => {
                 if !context.mesa.sampler_views.contains_key(&payload[0])
@@ -1857,9 +1879,10 @@ async fn render_mesa_draw(
             .get(&draw.fragment_shader)
             .ok_or_else(|| invalid("unknown Mesa fragment shader"))?,
     )?;
-    let target = draw
+    let target_surface = draw
         .target
         .ok_or_else(|| invalid("Mesa virgl draw has no framebuffer"))?;
+    let target = target_surface.resource_id;
     let expected_vertex_buffers = match program {
         MesaProgram::Probe | MesaProgram::RectangleColor => 2,
         MesaProgram::BackgroundColor | MesaProgram::CellBackground => 0,
@@ -2042,7 +2065,7 @@ async fn render_mesa_draw(
         max_depth: 1.0,
     });
     let load = draw.clear.is_none();
-    let clear = draw.clear.unwrap_or([0.0; 4]);
+    let clear = mesa_clear_color(target_surface.format, draw.clear.unwrap_or([0.0; 4]));
     let mut records = vec![
         Record::BeginRenderPass {
             resource_id: target,
@@ -3741,6 +3764,21 @@ mod tests {
         );
         assert!(!is_color_target_format(0));
         assert!(color_target_format(0).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn mesa_bgra_clear_colors_are_swizzled() {
+        let rgba = [0.02, 0.04, 0.30, 1.0];
+        let bgra = [0.30, 0.04, 0.02, 1.0];
+        assert_eq!(mesa_clear_color(FORMAT_R8G8B8A8_UNORM, rgba), rgba);
+        for format in [
+            FORMAT_B8G8R8A8_UNORM,
+            FORMAT_B8G8R8X8_UNORM,
+            FORMAT_B8G8R8A8_SRGB,
+            FORMAT_B8G8R8X8_SRGB,
+        ] {
+            assert_eq!(mesa_clear_color(format, rgba), bgra);
+        }
     }
 
     #[wasm_bindgen_test]
