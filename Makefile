@@ -97,7 +97,10 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
 	      print_stats.js filestorage.js modem.js virtio_gpu_backend.js virtio_gpu_wgpu_backend.js \
-	      virtio_gpu_webgpu_backend.js
+	      virtio_gpu_webgpu_backend.js smpctl.js gram_env.js
+# NOTE: src/browser/vcpu_worker.js (XWAH-9 Phase 4) is deliberately NOT in
+# BROWSER_FILES: it is a standalone worker entry point (loaded as its own
+# module worker / worker_thread), not part of the bundled library.
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
@@ -467,6 +470,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/multimem-instance.js
 	./tests/threads/plain-race-vs-atomic.js
 	./tests/threads/shared-view-coherence.js
+	./tests/threads/worker-skeleton.js
 
 # multimem variant (XWAH-9 Phase 3 Stage 5, named by design doc §4 Stage 6):
 # the imported-guest-memory backend end-to-end — real guests through the
@@ -482,6 +486,7 @@ multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.
 	./tests/api/multimem.js
 	./tests/threads/guest-lock-exactness.js
 	./tests/threads/multimem-instance.js
+	./tests/threads/worker-skeleton.js
 
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js

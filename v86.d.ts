@@ -463,6 +463,18 @@ export interface V86Options {
     guest_memory_shared?: "auto" | boolean;
 
     /**
+     * NOTE: Experimental (XWAH-9 Phase 4), accepted but not yet active.
+     * Requests worker-per-vCPU execution (docs/smp-phase4-design.md). In the
+     * current stage (W1) the option is validated and, with
+     * `guest_memory_backend: "imported"`, sizes the guest memory with the
+     * shared control region; guest execution is unchanged until the worker
+     * topology stage (W2) lands. `true` will be a hard requirement, `"auto"`
+     * a capability-based degrade ladder.
+     * @default false
+     */
+    smp_workers?: boolean | "auto";
+
+    /**
      * The memory size in bytes, should be a power of 2.
      * @example 16 * 1024 * 1024
      * @default 64 * 1024 * 1024

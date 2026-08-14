@@ -6,14 +6,20 @@
 // ({state, op, addr, size, value_lo, value_hi}), worker does
 // store+notify+wait; device side is the main thread via Atomics.waitAsync".
 //
-// The worker plays a vCPU issuing synchronous "port I/O": it fills the
-// record, publishes it with a seq-cst Atomics.store on STATE (which is what
-// makes the plain field writes visible — see shared-view-coherence.js),
-// notifies, and BLOCKS in Atomics.wait until the main thread flips STATE to
-// RESPONSE. The main thread plays the device host: it may not block, so it
-// parks in Atomics.waitAsync and services requests as they arrive. The
-// device model is an I/O-port register file: OUT stores value_lo at addr,
-// IN returns it.
+// Since Stage W1 the protocol implementation lives in src/browser/smpctl.js
+// (mailbox_request / mailbox_service / mailbox_wait_for_request — the same
+// functions the worker runtime and the device host use), so this test is
+// normative BY USAGE: it drives the production functions over a bare
+// 64-byte record and asserts the protocol's guarantees.
+//
+// The worker plays a vCPU issuing synchronous "port I/O": mailbox_request
+// fills the record with plain field writes, publishes them with a seq-cst
+// Atomics.store on STATE (which is what makes the plain writes visible —
+// see shared-view-coherence.js), notifies, and BLOCKS in Atomics.wait until
+// the main thread flips STATE to RESPONSE. The main thread plays the device
+// host: it may not block, so it parks in Atomics.waitAsync and services
+// requests as they arrive. The device model is an I/O-port register file:
+// OUT stores value_lo at addr, IN returns it.
 //
 // Asserts, over 10_000 requests (5_000 OUT+IN pairs):
 //   - every request is serviced (no lost wakeups in either direction),
@@ -27,6 +33,11 @@
 import assert from "node:assert/strict";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { latency_stats_us, format_stats_us } from "./helpers.js";
+import {
+    CTL_MAILBOX_BYTES,
+    MAILBOX_SEQ, MAILBOX_OP_OUT, MAILBOX_OP_IN,
+    mailbox_request, mailbox_service, mailbox_wait_for_request,
+} from "../../src/browser/smpctl.js";
 
 process.on("unhandledRejection", exn => { throw exn; });
 
@@ -34,23 +45,8 @@ const PAIRS = 5_000;
 const TOTAL = PAIRS * 2;
 const WAIT_TIMEOUT_MS = 10_000;
 
-// 64-byte per-vCPU record, i32-indexed over the control SAB (design §3).
-// This test is vCPU 0, so its record is at byte offset 0.
-const RECORD_BYTES = 64;
-const STATE = 0;      // IDLE / REQUEST / RESPONSE — the only atomically-waited cell
-const OP = 1;         // OP_OUT / OP_IN
-const ADDR = 2;       // port number
-const SIZE = 3;       // access size in bytes (carried, asserted, unused by the model)
-const VALUE_LO = 4;   // OUT: value to write; IN: value returned by the device
-const VALUE_HI = 5;   // upper half for 64-bit ops (unused here, must stay 0)
-const SEQ = 6;        // test-only: issue sequence number for the order assertion
-
-const IDLE = 0;
-const REQUEST = 1;
-const RESPONSE = 2;
-
-const OP_OUT = 1;
-const OP_IN = 2;
+// this test is vCPU 0 over a bare control SAB, so its record is at word 0
+const RECORD = 0;
 
 const PORT = 0xe9;
 
@@ -59,36 +55,18 @@ function worker_main()
     const ctl = new Int32Array(workerData.control_sab);
     const latencies_ns = new Float64Array(TOTAL);
 
-    function request(op, addr, size, value)
-    {
-        // plain field writes, then seq-cst STATE store publishes them
-        ctl[OP] = op;
-        ctl[ADDR] = addr;
-        ctl[SIZE] = size;
-        ctl[VALUE_LO] = value;
-        ctl[VALUE_HI] = 0;
-        Atomics.store(ctl, STATE, REQUEST);
-        Atomics.notify(ctl, STATE);
-        while(Atomics.load(ctl, STATE) !== RESPONSE)
-        {
-            const outcome = Atomics.wait(ctl, STATE, REQUEST, WAIT_TIMEOUT_MS);
-            assert.notEqual(outcome, "timed-out", "vCPU side: device never responded");
-        }
-        const result = ctl[VALUE_LO];
-        Atomics.store(ctl, STATE, IDLE);
-        return result;
-    }
-
     let request_index = 0;
     for(let i = 0; i < PAIRS; i++)
     {
-        for(const op of [OP_OUT, OP_IN])
+        for(const op of [MAILBOX_OP_OUT, MAILBOX_OP_IN])
         {
-            ctl[SEQ] = request_index;
+            ctl[RECORD + MAILBOX_SEQ] = request_index;
             const begin = process.hrtime.bigint();
-            const result = request(op, PORT, 4, op === OP_OUT ? i : 0);
+            // blocking round-trip; throws when the device never responds
+            const result = mailbox_request(
+                ctl, RECORD, op, PORT, 4, op === MAILBOX_OP_OUT ? i : 0, WAIT_TIMEOUT_MS);
             latencies_ns[request_index] = Number(process.hrtime.bigint() - begin);
-            if(op === OP_IN)
+            if(op === MAILBOX_OP_IN)
             {
                 assert.equal(result, i, `IN must echo the preceding OUT (pair ${i})`);
             }
@@ -100,7 +78,7 @@ function worker_main()
 
 async function device_host()
 {
-    const control_sab = new SharedArrayBuffer(RECORD_BYTES);
+    const control_sab = new SharedArrayBuffer(CTL_MAILBOX_BYTES);
     const ctl = new Int32Array(control_sab);
 
     const worker = new Worker(new URL(import.meta.url), { workerData: { control_sab } });
@@ -121,38 +99,33 @@ async function device_host()
     while(serviced < TOTAL)
     {
         assert(Date.now() < deadline, "device host: mailbox stalled");
-        const state = Atomics.load(ctl, STATE);
-        if(state === REQUEST)
+        const handled = mailbox_service(ctl, RECORD, (op, addr, size, value_lo, value_hi, seq) =>
         {
-            // seq-cst STATE load acquired the worker's plain field writes
-            assert.equal(ctl[SEQ], expected_seq, "requests must arrive in issue order");
-            assert.equal(ctl[ADDR], PORT, "port number intact");
-            assert.equal(ctl[SIZE], 4, "size field intact");
-            assert.equal(ctl[VALUE_HI], 0, "value_hi untouched");
-            if(ctl[OP] === OP_OUT)
+            // the seq-cst STATE load inside mailbox_service acquired the
+            // worker's plain field writes
+            assert.equal(seq, expected_seq, "requests must arrive in issue order");
+            assert.equal(addr, PORT, "port number intact");
+            assert.equal(size, 4, "size field intact");
+            assert.equal(value_hi, 0, "value_hi untouched");
+            if(op === MAILBOX_OP_OUT)
             {
-                port_registers.set(ctl[ADDR], ctl[VALUE_LO]);
+                port_registers.set(addr, value_lo);
+                return undefined;
             }
-            else
-            {
-                assert.equal(ctl[OP], OP_IN, "known op");
-                ctl[VALUE_LO] = port_registers.get(ctl[ADDR]) ?? -1;
-            }
+            assert.equal(op, MAILBOX_OP_IN, "known op");
+            return port_registers.get(addr) ?? -1;
+        });
+        if(handled)
+        {
             expected_seq++;
             serviced++;
-            Atomics.store(ctl, STATE, RESPONSE);
-            Atomics.notify(ctl, STATE);
         }
         else
         {
             // main thread must not block: park in waitAsync until notified.
-            // A stale `state` just returns "not-equal" and we re-inspect.
-            const waited = Atomics.waitAsync(ctl, STATE, state, WAIT_TIMEOUT_MS);
-            if(waited.async)
-            {
-                const outcome = await waited.value;
-                assert.notEqual(outcome, "timed-out", "device host: no request arrived");
-            }
+            // A stale snapshot just resolves "not-equal" and we re-inspect.
+            const arrived = await mailbox_wait_for_request(ctl, RECORD, WAIT_TIMEOUT_MS);
+            assert(arrived, "device host: no request arrived");
         }
     }
 

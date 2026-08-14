@@ -23,6 +23,8 @@ import { Modem } from "./modem.js";
 import { MemoryFileStorage, ServerFileStorageWrapper } from "./filestorage.js";
 import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
+import { ctl_pages } from "./smpctl.js";
+import { build_gram_env } from "./gram_env.js";
 
 // Multi-memory capability probe (XWAH-9 Phase 3): a minimal hand-assembled
 // two-memory module — imports "e"."m" and "e"."g" (the JIT modules' shape,
@@ -60,6 +62,7 @@ export const MULTIMEM_PROBE_MODULE = new Uint8Array([
       wasm_fn: (Function|undefined),
       guest_memory_backend: (string|undefined),
       guest_memory_shared: (string|boolean|undefined),
+      smp_workers: (boolean|string|undefined),
       screen: ({
           scale: (number|undefined),
       } | undefined),
@@ -109,6 +112,18 @@ export function V86(options)
         options.guest_memory_shared === undefined ? "auto" : options.guest_memory_shared;
     dbg_assert(guest_memory_shared_option === "auto" || typeof guest_memory_shared_option === "boolean",
         "options.guest_memory_shared must be \"auto\", true or false");
+
+    // NOTE: Experimental (XWAH-9 Phase 4 Stage W1): smp_workers requests
+    // worker-per-vCPU execution (docs/smp-phase4-design.md). W1 only accepts
+    // and validates the option and sizes the imported guest memory with the
+    // shared control region (design §2); no worker is spawned and no
+    // execution path changes until Stage W2 lands the topology/ladder
+    // (design §8). false = default, true = hard requirement, "auto" =
+    // degrade ladder (both W2 semantics).
+    const smp_workers = options.smp_workers === undefined ? false : options.smp_workers;
+    dbg_assert(smp_workers === false || smp_workers === true || smp_workers === "auto",
+        "options.smp_workers must be false, true or \"auto\"");
+    this.smp_workers = smp_workers;
 
     let guest_memory = null;
     let guest_memory_is_shared = false;
@@ -162,7 +177,18 @@ export function V86(options)
         // present (shared memories require one; gram.wasm's and the JIT
         // modules' import declarations rely on it) and equals initial: guest
         // RAM never grows.
-        const guest_pages = guest_memory_size / (64 * 1024) + 1;
+        //
+        // Under smp_workers the shared control region follows at CTL_BASE =
+        // memory_size + 0x10000 (src/rust/cpu/smpctl.rs / ./smpctl.js —
+        // Stage W1): ceil(ctl_size(N)/64K) more pages. N mirrors
+        // continue_init's cpus validation; sizing for the raw option value
+        // is safe when continue_init later clamps it to 1 (the region only
+        // has to be at least as large as the effective count needs).
+        const sizing_cpus =
+            Number.isInteger(options.cpus) && options.cpus >= 1 && options.cpus <= 255
+                ? options.cpus : 1;
+        const guest_pages = guest_memory_size / (64 * 1024) + 1 +
+            (smp_workers ? ctl_pages(sizing_cpus) : 0);
         guest_memory = new WebAssembly.Memory(guest_memory_is_shared
             ? { "initial": guest_pages, "maximum": guest_pages, "shared": true }
             : { "initial": guest_pages, "maximum": guest_pages });
@@ -336,20 +362,11 @@ export function V86(options)
                 " next to the multimem artifact (make gram-wasm), but " + gram_bin +
                 " is missing or not a valid WebAssembly module");
         }
-        // shared-ness of gram.wasm's memory import must match guest_memory
-        // exactly (LinkError otherwise), hence the two artifact variants
-        const gram = await WebAssembly.instantiate(gram_bytes, { "env": { "guest_memory": guest_memory } });
-
-        const env = Object.assign(Object.create(null), wasm_shared_funcs, gram.instance.exports);
-        // guest RAM -> instance memory copy (svga LFB path): neither
-        // single-memory module can address both memories, so JS provides it
-        // (src/rust/cpu/memory.rs gram_ext)
-        env["gram_copy_out"] = (src_addr, dst, count) =>
-        {
-            new Uint8Array(wasm_memory.buffer, dst, count)
-                .set(new Uint8Array(guest_memory.buffer, src_addr, count));
-        };
-        return { "env": env };
+        // gram instantiation + env merge (incl. the JS-implemented
+        // gram_copy_out, the svga LFB path): the shape is shared with the
+        // worker runtime — see src/browser/gram_env.js
+        return build_gram_env(wasm_shared_funcs, gram_bytes, guest_memory,
+            () => wasm_memory.buffer);
     };
 
     build_env()
