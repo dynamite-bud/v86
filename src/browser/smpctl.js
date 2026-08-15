@@ -20,7 +20,9 @@
 
 export const CTL_CACHE_LINE = 64;
 export const CTL_BASE_GAP = 0x10000;
-export const CTL_VCPU_STRIDE = 0x340;
+// 0x2C0 of fixed fields + the jit inbox slots (CTL_JIT_INBOX_CAP below;
+// capacity rationale in src/rust/cpu/smpctl.rs, the authoritative layout)
+export const CTL_VCPU_STRIDE = 0x12C0;
 
 // per-vCPU field byte offsets (relative to the vCPU's block)
 export const CTL_DOORBELL = 0x000;
@@ -50,7 +52,7 @@ export const CTL_JIT_INBOX_HEAD = 0x04;
 export const CTL_JIT_INBOX_OVERFLOW = 0x08;
 export const CTL_JIT_INBOX_TAIL = 0x40;
 export const CTL_JIT_INBOX_SLOTS = 0x80;
-export const CTL_JIT_INBOX_CAP = 32;
+export const CTL_JIT_INBOX_CAP = 1024;
 export const CTL_JIT_EVENT_PROTECT_BIT = 1 << 24;
 
 // routing entry field byte offsets (relative to the entry)

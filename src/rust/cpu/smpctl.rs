@@ -16,7 +16,7 @@
 // Layout, N-scaled, every field in a 64-byte-aligned block so distinct
 // writers never share a cache line (design §2):
 //
-//   per vCPU i at CTL_BASE + i*0x340 (VCPU_STRIDE), offsets within the block:
+//   per vCPU i at CTL_BASE + i*VCPU_STRIDE (0x12C0), offsets within the block:
 //     0x000  doorbell       u32    version counter; post = add + notify
 //     0x040  run_state_pub  u32    RunState published by the worker
 //     0x044  heartbeat      u32    W1 addition: wake counter, same writer as
@@ -53,7 +53,7 @@
 //                           single consumer (the block's own worker).
 //                           0x240 lock u32, 0x244 head u32, 0x248 overflow
 //                           u32 (producer-side line); 0x280 tail u32
-//                           (consumer-owned line); 0x2C0 32xu32 slots.
+//                           (consumer-owned line); 0x2C0 JIT_INBOX_CAP xu32 slots.
 //                           Event = phys page number | JIT_EVENT_PROTECT_BIT
 //                           (protect = "another instance compiled this
 //                           page"); no bit = dirty ("invalidate this page").
@@ -63,7 +63,7 @@
 //                           the persistent protection source, so nothing is
 //                           lost).
 //
-//   routing_table at CTL_BASE + n*0x340:
+//   routing_table at CTL_BASE + n*VCPU_STRIDE:
 //     0x00   version        u32    bumped on every publish
 //     0x40 + i*0x40          entry i: apic_id, ldr, dfr, tpr, enabled,
 //                           runnable (u32 each; per-entry cache line — each
@@ -128,7 +128,18 @@ pub const CACHE_LINE: u32 = 64;
 /// the two JIT slow-path scratch pages (memory.rs gram_jit_scratch_base).
 pub const CTL_BASE_GAP: u32 = 0x10000;
 
-pub const VCPU_STRIDE: u32 = 0x340;
+// 0x2C0 of fixed fields + the jit inbox slots (JIT_INBOX_CAP below). The
+// inbox capacity is sized so compile bursts cannot overflow it in steady
+// operation: overflow recovery is jit_clear_all + full_clear_tlb on the
+// consumer, and at the original 32 slots one worker's post-clear-all
+// recompile burst (protect events, one per page per compile) reliably
+// overflowed its PEERS' inboxes, whose clear-all recovery re-triggered
+// the first worker's — a self-sustaining mutual cache-destruction storm
+// (measured 10k-54k inbox events/s per worker with the overflow flag
+// visible in up to a third of 1 ms samples; guest throughput collapsed.
+// Found via the Ghostty/Codex appliance failing V86_APPLIANCE_READY
+// under percpu workers, cpus=4, during its GL/shader-compile phase).
+pub const VCPU_STRIDE: u32 = 0x12C0;
 
 // per-vCPU field offsets (relative to the vCPU's block)
 pub const DOORBELL: u32 = 0x000;
@@ -155,7 +166,7 @@ pub const JIT_INBOX_HEAD: u32 = 0x04;
 pub const JIT_INBOX_OVERFLOW: u32 = 0x08;
 pub const JIT_INBOX_TAIL: u32 = 0x40;
 pub const JIT_INBOX_SLOTS: u32 = 0x80;
-pub const JIT_INBOX_CAP: u32 = 32;
+pub const JIT_INBOX_CAP: u32 = 1024;
 /// Set in a jit_inbox event: "another instance is compiling this page"
 /// (the consumer re-protects its TLB entries); clear: "this page was
 /// written" (the consumer invalidates its code for it). The low bits carry
@@ -942,6 +953,25 @@ pub unsafe fn code_bitmap_clear(n: u32, i: u32, memory_size: u32, page: u32) {
     }
     let addr = base() + code_bitmap_offset(n, i, memory_size) + 4 * (page >> 5);
     cell::and32(addr, !(1u32 << (page & 31)) as i32);
+}
+
+/// Whether vCPU i has (or is compiling) code in `page` — probed with a
+/// seq-cst RMW (or 0), NOT a plain atomic load. The RMW's release leg is
+/// load-bearing for the dirty-post filter (worker.rs
+/// post_dirty_page_with): the writer's PLAIN guest-RAM store must be
+/// globally visible before this probe executes, so that when the probe
+/// misses a concurrent compile's bit-set (bit-set ordered after the
+/// probe), the compiler's subsequent byte reads — ordered after its own
+/// seq-cst bit-set — are guaranteed to observe the write it will never be
+/// notified about. An acquire-only load would leave the write sitting in
+/// the writer's store buffer through the probe, reopening the lost-
+/// invalidation window the unconditional broadcast used to cover.
+pub unsafe fn code_bitmap_check_rmw(n: u32, i: u32, memory_size: u32, page: u32) -> bool {
+    if page >= memory_size >> 12 {
+        return false;
+    }
+    let addr = base() + code_bitmap_offset(n, i, memory_size) + 4 * (page >> 5);
+    cell::or32(addr, 0) as u32 & (1u32 << (page & 31)) != 0
 }
 
 /// Whether any vCPU other than `own` has (or is compiling) code in `page`.

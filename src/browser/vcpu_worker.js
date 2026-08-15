@@ -150,8 +150,13 @@ async function run_worker(payload)
 
     // clock origin handshake (design §6 microtick row): same monotonic
     // clock as the main thread, offset by the difference of the two
-    // performance.timeOrigin values sent at spawn — zero rate drift
-    const origin_delta = payload.main_time_origin - performance.timeOrigin;
+    // performance.timeOrigin values sent at spawn — zero rate drift.
+    // Mapping: t_main = performance.now() + (worker timeOrigin − main
+    // timeOrigin). The delta is 0 under Node worker_threads (timeOrigin is
+    // per-process), which is why the landed, sign-flipped form (main −
+    // worker, making each browser worker's clock lag main by twice its
+    // spawn delay) passed every Node gate unnoticed.
+    const origin_delta = performance.timeOrigin - payload.main_time_origin;
     const microtick = () => performance.now() + origin_delta;
 
     if(!(guest_memory.buffer instanceof SharedArrayBuffer))
@@ -345,13 +350,51 @@ async function run_worker(payload)
         exports["set_worker_mode"](1);
         settings["disable_jit"] && exports["set_jit_config"](0, 1);
         settings["cpuid_level"] && exports["set_cpuid_level"](settings["cpuid_level"]);
+        // Stage W5 (design §5): smp_memory_model "fenced" — every JIT
+        // guest-RAM fast-path access carries a seq-cst fence (set before
+        // the first compilation; effective for real parallelism, i.e.
+        // per-vCPU workers)
+        settings["memory_model"] === "fenced" && exports["set_memory_model_fenced"](1);
         // acpi_enabled global (cpu.js view at byte offset 552)
         new Uint8Array(exports.memory.buffer, 552, 1)[0] = settings["acpi"] ? 1 : 0;
         exports["set_tsc"](0, 0);
         exports["reset_cpu"]();
     }
+
+    // Set this instance's TSC to `microtick × TSC_RATE` — a value every
+    // sibling worker derives identically from the shared clock origin, so
+    // all vCPUs' TSCs agree to ≈ 1 tick (TSC_RATE = 1 MHz, cpu.rs:292)
+    // regardless of when each worker reaches its reset. Applied at role
+    // entry and again on every machine reboot (reset_cpu re-pins TSC = 0
+    // at per-worker reset moments, re-introducing the stagger).
+    function set_shared_tsc()
+    {
+        // TSC_RATE (cpu.rs) is ticks per microtick MILLISECOND: read_tsc
+        // = microtick × 1e6, i.e. the guest sees a ~1 GHz TSC. Setting
+        // exactly microtick × TSC_RATE makes this instance's tsc_offset
+        // 0 (± rounding) — identical for every worker no matter when
+        // each reaches this line, which is the whole alignment.
+        const ticks = Math.round(microtick() * 1e6);
+        exports["set_tsc"](ticks >>> 0, Math.floor(ticks / 0x100000000) >>> 0);
+    }
     if(vcpu)
     {
+        // Cross-worker TSC alignment (design §6 microtick row; XWAH-9
+        // worker-mode appliance stall root cause): reset_cpu pinned this
+        // instance's TSC zero to ITS OWN reset moment, and per-vCPU
+        // workers reach that line tens of milliseconds apart (spawn +
+        // compile stagger) — a constant cross-CPU TSC skew of 10^4..10^5
+        // guest TSC ticks that `tsc=reliable` guests trust unchecked
+        // (Linux skips its TSC sync test). Per-CPU clock_gettime and
+        // sched_clock then disagree by the stagger, and glib/GTK timer
+        // loops (openbox, Xorg, ghostty) degrade into busy-polling as
+        // their deadlines oscillate between "long past" and "far future"
+        // with every task migration. Rebase the epoch onto the shared
+        // microtick clock (the main_time_origin handshake, ≤ ~1 µs
+        // cross-worker error ≈ 1 TSC tick at TSC_RATE = 1 MHz): every
+        // sibling computes the same value, so guest TSCs agree like one
+        // package's cores.
+        set_shared_tsc();
         // Stage W3 (design §3): per-vCPU worker role — switches the live
         // block to vCPU `index`, publishes its run state + routing entry,
         // and re-initializes this vCPU's control cells
@@ -541,7 +584,25 @@ async function run_worker(payload)
         }
         exports["vcpu_finish_restore"](machine ? m["current"] : index);
         const tsc = new Uint32Array(exports.memory.buffer, CURRENT_TSC_ADDR, 2);
-        exports["set_tsc"](tsc[0], tsc[1]);
+        if(vcpu && typeof m["tsc_epoch"] === "number")
+        {
+            // Cross-worker TSC alignment on restore: setting the bare saved
+            // value at each worker's own application moment would skew the
+            // vCPUs' TSCs by the distribution stagger (the boot-path bug in
+            // miniature). Set `saved + (now − epoch) × TSC_RATE` instead —
+            // the resulting per-instance tsc_offset is `epoch × RATE −
+            // saved` for EVERY worker, independent of when each one gets
+            // here, so the restored TSCs agree while still continuing from
+            // the image's value.
+            const saved = tsc[0] + tsc[1] * 0x100000000;
+            const ticks = saved +
+                Math.round(Math.max(0, microtick() - m["tsc_epoch"]) * 1e6);
+            exports["set_tsc"](ticks >>> 0, Math.floor(ticks / 0x100000000) >>> 0);
+        }
+        else
+        {
+            exports["set_tsc"](tsc[0], tsc[1]);
+        }
         exports["update_state_flags"]();
         // the restored machine may be live again: allow a later full halt
         // to fire the machine-dead event again on this instance
@@ -704,6 +765,9 @@ async function run_worker(payload)
                 // clear wipes the ipi_special latch) hasn't run yet, and
                 // the AP would silently lose its startup IPI.
                 exports["reset_cpu"]();
+                // realign the TSC epoch across workers (reset_cpu just
+                // re-pinned TSC = 0 at this worker's own reset moment)
+                set_shared_tsc();
                 exports["set_worker_vcpu"](index, total);
                 command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_PARKED_ACK);
                 continue;

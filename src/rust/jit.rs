@@ -2620,3 +2620,26 @@ macro_rules! jit_compile_protect_hook {
         false
     }};
 }
+
+/// Whether this instance has installed code, pending entry points, or an
+/// in-flight compile touching `page` — the condition under which its
+/// shared code-bitmap bit (smpctl.rs) must stay set. Used by the worker's
+/// inbox drain (cpu/worker.rs) to SELF-HEAL stale bits: bits are set at
+/// compile start (jit_compile_protect_hook above), but not every removal
+/// path fires jit_invalidate_page_hook — a sibling page removed through
+/// free()'s retain() sweep, or the page set of a compile discarded as
+/// CompilingWritten, keeps its bit with no code behind it. A stale bit
+/// makes every OTHER worker's write to the page take the dirty-notify
+/// slow path (one slow write + posts per TLB refill, forever); clearing
+/// it on the first incoming dirty event bounds the waste at one round.
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_page_has_code_or_compiling(page: Page) -> bool {
+    let ctx = get_jit_state();
+    if ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page) {
+        return true;
+    }
+    match &ctx.compiling {
+        Some((_, CompilingPageState::Compiling { pages })) => pages.contains_key(&page),
+        _ => false,
+    }
+}

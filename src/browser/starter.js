@@ -66,6 +66,7 @@ export const MULTIMEM_PROBE_MODULE = new Uint8Array([
       guest_memory_shared: (string|boolean|undefined),
       smp_workers: (boolean|string|undefined),
       smp_worker_topology: (string|undefined),
+      smp_memory_model: (string|undefined),
       screen: ({
           scale: (number|undefined),
       } | undefined),
@@ -147,6 +148,19 @@ export function V86(options)
         smp_worker_topology === "machine",
         "options.smp_worker_topology must be \"auto\", \"percpu\" or \"machine\"");
     this.smp_worker_topology = smp_worker_topology;
+    // Stage W5: memory-ordering posture for worker execution (design §5).
+    // "relaxed" (default): plain guest accesses stay plain wasm accesses —
+    // guest TSO is inherited from the host on x86 hosts, and empirically
+    // violated at ppm rates on weakly ordered (ARM) hosts under real
+    // parallelism (tests/threads/tso-litmus.js is the detector and the
+    // record). "fenced": every JIT guest-RAM fast-path access carries a
+    // seq-cst wasm fence restoring TSO at a large per-access cost; slow
+    // paths and the interpreter stay unfenced (docs/multicore.md table).
+    const smp_memory_model =
+        options.smp_memory_model === undefined ? "relaxed" : options.smp_memory_model;
+    dbg_assert(smp_memory_model === "relaxed" || smp_memory_model === "fenced",
+        "options.smp_memory_model must be \"relaxed\" or \"fenced\"");
+    this.smp_memory_model = smp_memory_model;
 
     // Ladder step 1 requirements (design §8), probed synchronously; any
     // failure throws for `true` and degrades for "auto".
@@ -1016,6 +1030,7 @@ V86.prototype.continue_init = async function(emulator, options)
         this.smp_mode = {
             "execution": this.smp_worker_host ? "workers" : "time-sliced",
             "topology": topology_effective,
+            "memory_model": this.smp_worker_host ? this.smp_memory_model : null,
             "cpus_effective": emulator.cpu.smp_cpus,
             "guest_memory": {
                 "backend": emulator.cpu.guest_memory ? "imported" : "linear",
@@ -1078,6 +1093,7 @@ V86.prototype.smp_worker_start = async function(emulator, settings)
             acpi: !!settings.acpi,
             disable_jit: !!settings.disable_jit,
             cpuid_level: settings.cpuid_level,
+            memory_model: this.smp_memory_model,
         });
     }
     catch(e)
@@ -1087,6 +1103,7 @@ V86.prototype.smp_worker_start = async function(emulator, settings)
         throw e;
     }
     cpu.attach_smp_worker_host(host);
+    host.on_fatal = () => this.stop();
     this.smp_worker_host = host;
     // the §8 command protocol follows the emulator lifecycle: run resumes
     // the machine loop, stop parks it at the next slice boundary
@@ -1126,6 +1143,7 @@ V86.prototype.smp_vcpu_start = async function(emulator, settings)
             acpi: !!settings.acpi,
             disable_jit: !!settings.disable_jit,
             cpuid_level: settings.cpuid_level,
+            memory_model: this.smp_memory_model,
         });
     }
     catch(e)
@@ -1141,6 +1159,7 @@ V86.prototype.smp_vcpu_start = async function(emulator, settings)
         throw e;
     }
     cpu.attach_smp_vcpu_host(host);
+    host.on_fatal = () => this.stop();
     this.smp_worker_host = host;
     this.bus.register("emulator-started", function() { host.run(); }, this);
     this.bus.register("emulator-stopped", function() { host.park(); }, this);

@@ -247,6 +247,8 @@ unsafe fn merge_pending_interrupts(index: u32) {
 /// overflow recovers with jit_clear_all + full_clear_tlb — nothing is
 /// lost because the code bitmaps re-supply protection at TLB refill.
 unsafe fn drain_jit_inbox(index: u32) {
+    let n = total();
+    let ms = memory_size();
     let overflowed = smpctl::jit_inbox_drain(index, |event| {
         let page = Page::page_of(((event as u32) & 0xFFFFF) << 12);
         if event as u32 & smpctl::JIT_EVENT_PROTECT_BIT != 0 {
@@ -259,6 +261,22 @@ unsafe fn drain_jit_inbox(index: u32) {
                 // mirrored remote protection, which this event just
                 // invalidated everywhere
                 cpu::tlb_set_has_code(page, false);
+            }
+            if !jit::jit_page_has_code_or_compiling(page) {
+                // Self-heal a stale shared-bitmap bit: bits are set at
+                // compile start, but not every removal path fires
+                // jit_invalidate_page_hook — a sibling page swept by
+                // free()'s retain() or the page set of a compile
+                // discarded as CompilingWritten keeps its bit with no
+                // code behind it. A stale bit makes every peer write to
+                // the page take the dirty-notify slow path (one slow
+                // write + a broadcast per TLB refill, forever) and, with
+                // the targeted dirty posts (post_dirty_page_with), keeps
+                // steering those posts here. This dirty event proves a
+                // peer just wrote the page while this instance holds
+                // nothing in it: retire the bit, bounding the stale
+                // round at one event.
+                smpctl::code_bitmap_clear(n, index, ms, page.to_u32());
             }
         }
     });
@@ -496,11 +514,23 @@ pub unsafe fn wake_bsp_filter() -> bool {
 
 // ---- cross-worker JIT shootdown producers (design §9 W3 note) ----
 
-/// A write invalidated (or would have invalidated) code for `page`:
-/// broadcast a dirty event to every other worker. `no_local_code` (the
-/// caller's post-invalidation jit_page_has_code) clears the local TLB
-/// has-code bit so a burst of writes to the same page posts only once —
-/// the bit is re-armed by the next protect event or TLB refill.
+/// A write invalidated (or would have invalidated) code for `page`: post
+/// a dirty event to every other worker WHOSE SHARED CODE BITMAP marks the
+/// page — a worker without the bit has no installed code and no in-flight
+/// compile there (bits are set before the compiler reads the page's
+/// bytes), so it has nothing to invalidate. The probe is a seq-cst RMW
+/// (code_bitmap_check_rmw): its release leg publishes the guest write
+/// that triggered this post, so a compiler whose bit-set lands after the
+/// probe reads the fresh bytes — the case the former unconditional
+/// broadcast covered by always delivering the event. Measured effect: in
+/// the Ghostty appliance's shader-compile phase the broadcast form
+/// posted 10k-50k events/s per worker, and the flood's inbox overflows
+/// put every worker into perpetual clear-all recovery (each overflow
+/// nukes the consumer's whole JIT cache, whose recompile burst floods
+/// the peers in turn). `no_local_code` (the caller's post-invalidation
+/// jit_page_has_code) clears the local TLB has-code bit so a burst of
+/// writes to the same page posts only once — the bit is re-armed by the
+/// next protect event or TLB refill.
 pub fn post_dirty_page_with(no_local_code: bool, page: Page) {
     unsafe {
         let own = match role() {
@@ -508,9 +538,11 @@ pub fn post_dirty_page_with(no_local_code: bool, page: Page) {
             Role::VcpuWorker(i) => i as i32,
             Role::Host => -1,
         };
+        let n = total();
+        let ms = memory_size();
         let page_number = page.to_u32();
-        for i in 0..total() {
-            if i as i32 != own {
+        for i in 0..n {
+            if i as i32 != own && smpctl::code_bitmap_check_rmw(n, i, ms, page_number) {
                 smpctl::jit_inbox_push(i, page_number as i32);
                 smpctl::doorbell_post(i);
             }

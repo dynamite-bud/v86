@@ -35,7 +35,7 @@ import { LOG_CPU } from "../const.js";
 import { dbg_log } from "../log.js";
 import { spawn_worker } from "./smp_worker_host.js";
 import {
-    ctl_base_for,
+    ctl_base_for, ctl_code_bitmap_offset,
     CTL_VCPU_STRIDE, CTL_EOI_RING, CTL_EOI_RING_CAP,
     CTL_PENDING_IRR, CTL_PENDING_TMR,
     CTL_RUN_STATE_PARKED, CTL_RUN_STATE_WAIT_FOR_SIPI,
@@ -85,10 +85,16 @@ export function SMPVcpuHost(cpu, emulator_bus, guest_memory, total)
     this.ctl_base = ctl_base_for(cpu.memory_size[0]);
     this.host_doorbell = host_doorbell_word(this.ctl_base, total);
     this.channels = [];
+    // pre-boot spawn errors reject start() and take the §8 ladder; only
+    // errors after every worker is ready are fail-stop
+    this.ready = false;
     this.stopped = false;
     this.terminating = false;
     this.terminated_count = 0;
     this.fatal_error = null;
+    // §8 fail-stop: the starter points this at V86.stop so a fatal worker
+    // error also halts the main thread's device tick loop
+    this.on_fatal = null;
     this.service_done = [];
     this.host_doorbell_done = null;
     this.commanded_running = false;
@@ -115,6 +121,7 @@ export function SMPVcpuHost(cpu, emulator_bus, guest_memory, total)
  *     acpi: boolean,
  *     disable_jit: boolean,
  *     cpuid_level: (number|undefined),
+ *     memory_model: (string|undefined),
  * }} config
  * @return {!Promise}
  */
@@ -159,7 +166,10 @@ SMPVcpuHost.prototype.start = function(config)
                 }
                 clearTimeout(timeout);
                 reject(e);
-                this.fail(e);
+                if(this.ready)
+                {
+                    this.fail(e);
+                }
             });
         }));
         channel.post({
@@ -174,6 +184,7 @@ SMPVcpuHost.prototype.start = function(config)
                 "acpi": !!config.acpi,
                 "disable_jit": !!config.disable_jit,
                 "cpuid_level": config.cpuid_level || 0,
+                "memory_model": config.memory_model || "relaxed",
             },
         });
     }
@@ -183,7 +194,10 @@ SMPVcpuHost.prototype.start = function(config)
         this.start_service_loop(i);
     }
     this.start_host_doorbell_loop();
-    return Promise.all(readies);
+    return Promise.all(readies).then(() =>
+    {
+        this.ready = true;
+    });
 };
 
 /**
@@ -260,6 +274,9 @@ SMPVcpuHost.prototype.fail = function(error)
     }
     this.emulator_bus.send("emulator-error", error);
     this.stop_service_loops();
+    // stop the machine (§8): without this the device tick keeps running
+    // against a dead guest
+    this.on_fatal && this.on_fatal();
 };
 
 // ---- mailbox service (device-host side of the §6 RPC protocol) ----
@@ -508,23 +525,46 @@ SMPVcpuHost.prototype.dispatch = function(op, addr, size, value_lo, value_hi, se
 
 /**
  * The worker-mode leg of cpu.jit_dirty_cache: main-thread JS wrote guest
- * RAM (DMA/IDE/write_blob), so EVERY worker's JIT cache must invalidate
- * those pages. Overflow needs no backlog: the flag makes the worker
- * recover with jit_clear_all + full_clear_tlb.
+ * RAM (DMA/IDE/write_blob), so every worker WITH CODE in those pages must
+ * invalidate it. The shared code bitmap gates the post (the Rust
+ * post_dirty_page_with twin): a worker without the page's bit has no
+ * installed code and no in-flight compile there — bits are set before
+ * the compiler reads the page's bytes — so it has nothing to invalidate.
+ * The probe is Atomics.or(..., 0), a seq-cst RMW whose release leg
+ * publishes the DMA bytes written above; a compiler whose bit-set lands
+ * after the probe therefore reads the fresh bytes. Overflow needs no
+ * backlog: the flag makes the worker recover with jit_clear_all +
+ * full_clear_tlb.
  * @param {number} start_addr
  * @param {number} end_addr exclusive
  */
 SMPVcpuHost.prototype.post_jit_dirty = function(start_addr, end_addr)
 {
+    const memory_size = this.cpu.memory_size[0];
     const first = start_addr >>> 12;
-    const last = end_addr - 1 >>> 12;
+    // the bitmaps cover guest RAM only (the Rust code_bitmap_* guard):
+    // pages beyond memory_size never have bits, never arm the peers'
+    // dirty-notify slow path, and must not index past the region
+    const last = Math.min(end_addr - 1 >>> 12, (memory_size >>> 12) - 1);
     for(let i = 0; i < this.total; i++)
     {
+        const bitmap = this.ctl_base + ctl_code_bitmap_offset(this.total, i, memory_size);
+        let posted = false;
         for(let page = first; page <= last; page++)
         {
-            jit_inbox_push(this.i32, this.ctl_base, i, page);
+            // >>> — the bitmap region can cross the 2^31 byte boundary
+            // at maximum guest-RAM size, where signed >> corrupts the index
+            const word = bitmap + 4 * (page >> 5) >>> 2;
+            if(Atomics.or(this.i32, word, 0) & 1 << (page & 31))
+            {
+                jit_inbox_push(this.i32, this.ctl_base, i, page);
+                posted = true;
+            }
         }
-        doorbell_post(this.i32, this.ctl_base, i);
+        if(posted)
+        {
+            doorbell_post(this.i32, this.ctl_base, i);
+        }
     }
 };
 
@@ -784,6 +824,11 @@ SMPVcpuHost.prototype.distribute_restore = async function()
             buffer, cpu.get_vcpu_state_addr(), cpu.get_vcpu_state_size()).slice(),
         "apics": new Uint8Array(
             buffer, cpu.get_apic_addr(), this.total * APIC_STRUCT_SIZE).slice(),
+        // shared epoch for cross-worker TSC alignment: each worker sets
+        // `saved_tsc + (its now − this epoch) × TSC_RATE`, which makes the
+        // per-instance tsc_offset identical for all workers no matter when
+        // each applies its restore (vcpu_worker.js apply_restore)
+        "tsc_epoch": performance.now(),
     };
     await Promise.all(
         Array.from({ length: this.total }, (_, i) => new Promise((resolve, reject) =>

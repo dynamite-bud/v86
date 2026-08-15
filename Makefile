@@ -476,6 +476,9 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/vcpu-workers-smp.js
 	./tests/threads/worker-save-restore.js
 	./tests/threads/worker-reboot.js
+	./tests/threads/tso-litmus.js
+	./tests/threads/invlpg-storm.js
+	./tests/threads/worker-failure.js
 
 # multimem variant (XWAH-9 Phase 3 Stage 5, named by design doc §4 Stage 6):
 # the imported-guest-memory backend end-to-end — real guests through the
@@ -497,6 +500,9 @@ multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.
 	./tests/threads/vcpu-workers-smp.js
 	./tests/threads/worker-save-restore.js
 	./tests/threads/worker-reboot.js
+	./tests/threads/tso-litmus.js
+	./tests/threads/invlpg-storm.js
+	./tests/threads/worker-failure.js
 
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js

@@ -125,9 +125,15 @@ export function SMPWorkerHost(cpu, emulator_bus, guest_memory, total)
     this.irq_backlog = [];
     this.jit_backlog = [];
     this.channel = null;
+    // pre-boot spawn errors reject start() and take the §8 ladder; only
+    // errors after machine-ready are fail-stop
+    this.ready = false;
     this.stopped = false;
     this.terminating = false;
     this.fatal_error = null;
+    // §8 fail-stop: the starter points this at V86.stop so a fatal worker
+    // error also halts the main thread's device tick loop
+    this.on_fatal = null;
     this.service_done = null;
     this.cpu_exception_hook = function(n) {};
     // resolvers of in-flight COMMAND_SAVE / COMMAND_RESTORE round trips
@@ -152,6 +158,7 @@ export function SMPWorkerHost(cpu, emulator_bus, guest_memory, total)
  *     acpi: boolean,
  *     disable_jit: boolean,
  *     cpuid_level: (number|undefined),
+ *     memory_model: (string|undefined),
  * }} config
  * @return {!Promise}
  */
@@ -187,7 +194,10 @@ SMPWorkerHost.prototype.start = function(config)
             }
             clearTimeout(timeout);
             reject(e);
-            this.fail(e);
+            if(this.ready)
+            {
+                this.fail(e);
+            }
         });
     });
 
@@ -203,11 +213,15 @@ SMPWorkerHost.prototype.start = function(config)
             "acpi": !!config.acpi,
             "disable_jit": !!config.disable_jit,
             "cpuid_level": config.cpuid_level || 0,
+            "memory_model": config.memory_model || "relaxed",
         },
     });
 
     this.start_service_loop();
-    return ready;
+    return ready.then(() =>
+    {
+        this.ready = true;
+    });
 };
 
 /**
@@ -280,6 +294,9 @@ SMPWorkerHost.prototype.fail = function(error)
     console.error("smp worker failed:", error);
     this.emulator_bus.send("emulator-error", error);
     this.stop_service_loop();
+    // stop the machine (§8): without this the device tick keeps running
+    // against a dead guest
+    this.on_fatal && this.on_fatal();
 };
 
 // ---- mailbox service (device-host side of the §6 RPC protocol) ----
