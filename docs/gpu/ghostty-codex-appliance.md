@@ -128,9 +128,10 @@ The acceptance harness verifies:
 - absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`, Tumbler, Garcon, and Exo;
 - unconfigured Codex login with no baked home credential;
 - browser keyboard delivery and responsive narrow layout;
-- a writable workspace and pristine fresh-session reset on the direct JavaScript backend.
-- the live Codex process arguments that disable unavailable Code Mode paths,
-  enable direct shell/unified execution, and retain in-process fallback;
+- a writable workspace and pristine fresh-session reset on the direct JavaScript backend;
+- live Codex process arguments that disable Code Mode and its host, enable
+  direct shell/unified execution, and retain in-process fallback;
+- verified absence of the external Code Mode host and its V8 runtime;
 - a uniform accelerated terminal background and a non-rectangular,
   alpha-masked hardware cursor.
 
@@ -297,10 +298,10 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
-|Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
-|Compressed flat files|279,268,469|295,224,610|-15,956,141 bytes|5.40%|
-|Filesystem JSON|581,407|695,517|-114,110 bytes|16.41%|
-|Flat-file count|7,951|9,175|-1,224|13.34%|
+|Rootfs tar|696,463,360|794,818,560|-98,355,200 bytes|12.37%|
+|Compressed flat files|279,209,390|295,224,610|-16,015,220 bytes|5.42%|
+|Filesystem JSON|581,473|695,517|-114,044 bytes|16.40%|
+|Flat-file count|7,952|9,175|-1,223|13.33%|
 |Package closure|311|420|-109|25.95%|
 
 These values come from the generated image contracts and package locks.
@@ -314,10 +315,10 @@ The final reproducible XWAH-5 rebuild produced these SHA-256 values:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`a2e2b4edb37d4051ad5d295c3042caad5133fe9ee2a6139d17064915a3b107c5`|
-|Filesystem JSON|`9d7f1292fd82af9d522441d6a48c2b770a12022d5631ff0b4355de8276fb9ab0`|
-|Flat-file manifest|`c24f126186de0d9c1a024077628ec981af294b4842a04fd0d8f2d6d662bfae2f`|
-|Image contract|`e5846f10615b7eb41e382973f348614fca5356c6e68fcc1fd37a47e4c3c03c00`|
+|Rootfs tar|`bc9bf9afc523babd59daff86f2e415872a18091fd1c6eaf19768f932c5c3e1a6`|
+|Filesystem JSON|`49cfef6bf70fe239be14b96a2812055f6916e8da4c1674047c926eba5e2e351a`|
+|Flat-file manifest|`aedb0a587c7aecf299246c3f9b3c91b9b87e0d6efb87533de84c903f592c80c7`|
+|Image contract|`65e778b7cfb10aa3dcfd3cf32e31bc596cfde27e06195f3d2cd7b6192e3f6ea0`|
 
 ## Original OMP Gate
 

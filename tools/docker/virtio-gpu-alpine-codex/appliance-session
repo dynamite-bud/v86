@@ -50,6 +50,7 @@ printf 'V86_APPLIANCE_KERNEL=%s\n' "$(uname -r)" >&3
 
 ghostty_version=$(ghostty --version 2>/dev/null | head -n 1) || fail ghostty-version
 codex_version=$(codex --version 2>/dev/null) || fail codex-version
+[ ! -e /usr/local/bin/codex-code-mode-host ] || fail code-mode-host-present
 printf 'V86_APPLIANCE_GHOSTTY=%s\n' "$ghostty_version" >&3
 printf 'V86_APPLIANCE_CODEX=%s\n' "$codex_version" >&3
 
@@ -176,6 +177,7 @@ while [ "$attempt" -lt 900 ]; do
             done
             printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
             printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
+            printf 'V86_APPLIANCE_NO_CODE_MODE_HOST=PASS\n' >&3
         fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"
