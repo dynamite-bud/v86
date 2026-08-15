@@ -37,12 +37,14 @@ import { spawn_worker } from "./smp_worker_host.js";
 import {
     ctl_base_for,
     CTL_VCPU_STRIDE, CTL_EOI_RING, CTL_EOI_RING_CAP,
+    CTL_PENDING_IRR, CTL_PENDING_TMR,
     CTL_RUN_STATE_PARKED, CTL_RUN_STATE_WAIT_FOR_SIPI,
-    CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_TERMINATE, CTL_COMMAND_RESET,
-    ring_pop, doorbell_post, command_write, run_state_read, insn_read,
+    CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK,
+    CTL_COMMAND_TERMINATE, CTL_COMMAND_RESET, CTL_COMMAND_SAVE, CTL_COMMAND_RESTORE,
+    ring_pop, doorbell_post, command_write, command_read, run_state_read, insn_read,
     jit_inbox_push, pic_pending_set, host_doorbell_word,
     mailbox_record_word, mailbox_service, mailbox_wait_for_request,
-    MAILBOX_STATE, MAILBOX_REQUEST,
+    MAILBOX_STATE, MAILBOX_REQUEST, MAILBOX_IDLE,
     MAILBOX_OP_OUT, MAILBOX_OP_IN, MAILBOX_OP_MMAP_READ, MAILBOX_OP_MMAP_WRITE,
     MAILBOX_OP_IN_REP, MAILBOX_OP_OUT_REP, MAILBOX_OP_PIC_ACK,
 } from "./smpctl.js";
@@ -54,6 +56,15 @@ const SERVICE_REARM_MS = 250;
 const SPAWN_TIMEOUT_MS = 60000;
 // deadline for the workers to acknowledge TERMINATE before a hard terminate
 const TERMINATE_TIMEOUT_MS = 2000;
+// deadline for quiesce acks and state-assembly round trips (design §7):
+// a worker parks within one slice (ms-scale); anything near this bound is
+// a dead worker, which is fail-stop
+const STATE_TIMEOUT_MS = 60000;
+// struct sizes mirrored from the Rust layouts, as in cpu.js get_state_*
+const APIC_STRUCT_SIZE = 4 * 46;
+// current_tsc global (global_pointers.rs): lives inside the per-vCPU state
+// block, so a loaded save area carries the saved TSC
+const CURRENT_TSC_ADDR = 960;
 // synchronous post-service polls before re-arming Atomics.waitAsync
 // (the smp_worker_host.js burst rationale)
 const SERVICE_SPIN = 4000;
@@ -83,6 +94,11 @@ export function SMPVcpuHost(cpu, emulator_bus, guest_memory, total)
     this.commanded_running = false;
     this.halt_event_sent = false;
     this.cpu_exception_hook = function(n) {};
+    // per-worker resolvers of in-flight COMMAND_SAVE / COMMAND_RESTORE
+    // round trips (design §7), keyed by vCPU index
+    this.save_waiters = [];
+    this.restore_waiters = [];
+    this.rebooting = false;
 }
 
 /**
@@ -188,6 +204,20 @@ SMPVcpuHost.prototype.handle_message = function(m, on_ready)
         case "terminated":
             this.terminated_count++;
             break;
+        case "save-state":
+        {
+            const resolve = this.save_waiters[m["index"]];
+            this.save_waiters[m["index"]] = null;
+            resolve && resolve(m);
+            break;
+        }
+        case "restore-done":
+        {
+            const resolve = this.restore_waiters[m["index"]];
+            this.restore_waiters[m["index"]] = null;
+            resolve && resolve(m);
+            break;
+        }
         case "log":
             dbg_log("vcpu" + m["index"] + ": " + m["message"], LOG_CPU);
             break;
@@ -586,18 +616,254 @@ SMPVcpuHost.prototype.park = function()
     }
 };
 
+// ---- Stage W4: quiesce, save/restore assembly, quiesced reboot ----
+// (docs/smp-phase4-design.md §7/§8)
+
 /**
- * Machine reboot (guest reset port / V86.restart): each worker resets its
- * instance, re-enters its per-vCPU role (clearing its control cells) and
- * acks by restoring RUN.
+ * Await `predicate` with a deadline; the service loops keep running (they
+ * are independent async loops), so a worker mid-RPC completes the RPC and
+ * parks at its next slice boundary — no deadlock.
+ * @param {string} label
+ * @param {function(): boolean} predicate
+ * @return {!Promise}
  */
-SMPVcpuHost.prototype.post_reset = function()
+SMPVcpuHost.prototype.wait_for = async function(label, predicate)
 {
-    this.halt_event_sent = false;
+    const deadline = Date.now() + STATE_TIMEOUT_MS;
+    while(!predicate())
+    {
+        if(this.fatal_error)
+        {
+            throw this.fatal_error;
+        }
+        if(Date.now() >= deadline)
+        {
+            throw new Error("smp quiesce: timeout waiting for " + label);
+        }
+        await new Promise(resolve => setTimeout(resolve, 2));
+    }
+};
+
+/**
+ * The §7 quiesce: PARK_REQ + doorbell to every worker, then wait until
+ * each has acked PARKED_ACK at its slice boundary and its mailbox is IDLE
+ * (parked = not in do_many_cycles, mailbox idle, doorbell-waited). Finally
+ * drain the level-EOI rings so the authoritative IOAPIC state is current.
+ * @return {!Promise<boolean>} whether the machine was commanded running
+ *     (the caller passes it back to resume())
+ */
+SMPVcpuHost.prototype.quiesce = async function()
+{
+    const was_running = this.commanded_running;
+    this.park();
     for(let i = 0; i < this.total; i++)
     {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_RESET);
-        doorbell_post(this.i32, this.ctl_base, i);
+        await this.wait_for("worker " + i + " park ack", () =>
+            command_read(this.i32, this.ctl_base, i) === CTL_COMMAND_PARKED_ACK);
+        await this.wait_for("worker " + i + " mailbox idle", () =>
+            Atomics.load(this.i32,
+                mailbox_record_word(this.ctl_base, i) + MAILBOX_STATE) === MAILBOX_IDLE);
+    }
+    this.drain_notifications();
+    return was_running;
+};
+
+/**
+ * Undo a quiesce: resume the workers when the machine was running before,
+ * leave them parked otherwise.
+ * @param {boolean} was_running
+ */
+SMPVcpuHost.prototype.resume = function(was_running)
+{
+    if(was_running)
+    {
+        this.run();
+    }
+};
+
+/**
+ * The §7 save-state assembly, on quiesced workers: each worker drains its
+ * in-flight control-region interrupts into its architectural structures
+ * (vcpu_worker_sync_for_save), syncs its live block (vcpu_prepare_save,
+ * fresh TSC included) and posts its state regions; main writes vCPU block
+ * i and LAPIC struct i into ITS OWN instance's regions (same module bytes
+ * = identical layout), loads the BSP block into its live block so the
+ * per-field state slots read the guest's values, and rebases its TSC on
+ * the BSP's saved value. `capture` (today's get_state-based save) runs
+ * SYNCHRONOUSLY after one final drain of the pending bitmaps into the
+ * assembled LAPIC structs: the device tick keeps running between the
+ * awaits of this function, and a vector it posts to a parked worker after
+ * that worker's own sync lives only in the control region — dropping it
+ * from the image deadlocks a level line (IOAPIC remote_irr set, no LAPIC
+ * bit, no EOI ever) and wedges the restored guest.
+ * @param {function(): T} capture
+ * @return {!Promise<T>}
+ * @template T
+ */
+SMPVcpuHost.prototype.assemble_save = async function(capture)
+{
+    const messages = await Promise.all(
+        Array.from({ length: this.total }, (_, i) => new Promise((resolve, reject) =>
+        {
+            const timeout = setTimeout(
+                () => reject(new Error("vcpu worker " + i + " save-state timed out")),
+                STATE_TIMEOUT_MS);
+            if(timeout["unref"])
+            {
+                timeout["unref"]();
+            }
+            this.save_waiters[i] = m =>
+            {
+                clearTimeout(timeout);
+                resolve(m);
+            };
+            command_write(this.i32, this.ctl_base, i, CTL_COMMAND_SAVE);
+            doorbell_post(this.i32, this.ctl_base, i);
+        })));
+
+    const cpu = this.cpu;
+    const buffer = cpu.wasm_memory.buffer;
+    const vcpu_addr = cpu.get_vcpu_state_addr();
+    const vcpu_size = cpu.get_vcpu_state_size();
+    const struct_size = vcpu_size / this.total;
+    for(let i = 0; i < this.total; i++)
+    {
+        new Uint8Array(buffer, vcpu_addr + i * struct_size, struct_size)
+            .set(messages[i]["vcpu_region"].subarray(i * struct_size, (i + 1) * struct_size));
+        new Uint8Array(buffer, cpu.get_apic_addr() + i * APIC_STRUCT_SIZE, APIC_STRUCT_SIZE)
+            .set(messages[i]["apics"].subarray(i * APIC_STRUCT_SIZE, (i + 1) * APIC_STRUCT_SIZE));
+    }
+    // make the BSP's block live on the main instance: get_state's
+    // per-field slots then hold the guest's values (and its
+    // vcpu_prepare_save call re-syncs the identical bytes)
+    cpu.vcpu_finish_restore(0);
+    const tsc = new Uint32Array(buffer, CURRENT_TSC_ADDR, 2);
+    cpu.set_tsc(tsc[0], tsc[1]);
+    // final drain + capture, in one synchronous stretch (no interleaved
+    // device tick): xchg every pending bitmap word into the assembled
+    // LAPIC irr/tmr (LAPIC irr at i32 words 16..23 of the struct, tmr at
+    // 32..39 — the apic.rs layout mirrored by cpu.js set_state_apic)
+    for(let i = 0; i < this.total; i++)
+    {
+        const apic = new Int32Array(buffer, cpu.get_apic_addr() + i * APIC_STRUCT_SIZE,
+            APIC_STRUCT_SIZE >> 2);
+        for(let word = 0; word < 8; word++)
+        {
+            const irr = Atomics.exchange(this.i32,
+                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_IRR + 4 * word >> 2, 0);
+            const tmr = Atomics.exchange(this.i32,
+                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_TMR + 4 * word >> 2, 0);
+            apic[16 + word] |= irr;
+            apic[32 + word] |= tmr;
+        }
+    }
+    return capture();
+};
+
+/**
+ * The §7 restore distribution, on quiesced workers, after main validated
+ * and restored its own instance exactly as today (fail-fast intact): read
+ * the restored regions back from the main instance — the same v7 bytes —
+ * and send each worker its restore payload; the worker loads the blocks,
+ * re-enters its role (clearing its control cells) and acks. Afterwards
+ * re-deliver device state the cell-clear may have raced: held IOAPIC lines
+ * via reevaluate, an asserting 8259 via a fresh PIC flag.
+ * @return {!Promise}
+ */
+SMPVcpuHost.prototype.distribute_restore = async function()
+{
+    const cpu = this.cpu;
+    // covers cpus=1 images (no trailing vcpu slot: the live block is the
+    // only source); for cpus>1 this re-writes identical bytes
+    cpu.vcpu_prepare_save();
+    const buffer = cpu.wasm_memory.buffer;
+    const payload = {
+        type: "restore-state",
+        "current": cpu.get_current_vcpu(),
+        "vcpu_region": new Uint8Array(
+            buffer, cpu.get_vcpu_state_addr(), cpu.get_vcpu_state_size()).slice(),
+        "apics": new Uint8Array(
+            buffer, cpu.get_apic_addr(), this.total * APIC_STRUCT_SIZE).slice(),
+    };
+    await Promise.all(
+        Array.from({ length: this.total }, (_, i) => new Promise((resolve, reject) =>
+        {
+            const timeout = setTimeout(
+                () => reject(new Error("vcpu worker " + i + " restore-done timed out")),
+                STATE_TIMEOUT_MS);
+            if(timeout["unref"])
+            {
+                timeout["unref"]();
+            }
+            this.restore_waiters[i] = () =>
+            {
+                clearTimeout(timeout);
+                resolve();
+            };
+            // payload first, then the command: the worker consumes the
+            // queued message when it sees COMMAND_RESTORE
+            this.channels[i].post(payload);
+            command_write(this.i32, this.ctl_base, i, CTL_COMMAND_RESTORE);
+            doorbell_post(this.i32, this.ctl_base, i);
+        })));
+    // device IRQs posted between main's chipset restore and the workers'
+    // control-cell clears would be lost: reevaluate held IOAPIC lines and
+    // re-post the PIC flag while INTR is asserted
+    const exports = cpu.wm.exports;
+    exports["host_chipset_reevaluate"]();
+    if(exports["host_pic_has_requested"]())
+    {
+        pic_pending_set(this.i32, this.ctl_base, 0);
+        doorbell_post(this.i32, this.ctl_base, 0);
+    }
+    this.halt_event_sent = false;
+};
+
+/**
+ * Machine reboot (guest reset port / V86.restart), design §8: quiesce,
+ * main-side chipset reset, per-worker reset commands (each worker resets
+ * its instance, re-enters its per-vCPU role — APs return to WaitForSipi —
+ * and acks by PARKING), then release the whole machine at once. The
+ * all-acked barrier before RUN is load-bearing: a released BSP runs
+ * SeaBIOS, whose one-shot INIT+SIPI broadcast must not race a sibling's
+ * pending reset — set_worker_vcpu clears that vCPU's ipi_special latch,
+ * which would silently swallow the AP's startup IPI. Fire-and-forget from
+ * reboot_internal, which may run inside a mailbox dispatch: the quiesce
+ * must not be awaited there, or the triggering worker's pending RPC would
+ * deadlock it.
+ * @param {function()} reset_main main-side chipset/device reset
+ * @return {!Promise}
+ */
+SMPVcpuHost.prototype.reboot = async function(reset_main)
+{
+    if(this.rebooting || this.fatal_error)
+    {
+        return;
+    }
+    this.rebooting = true;
+    try
+    {
+        const was_running = await this.quiesce();
+        reset_main();
+        this.halt_event_sent = false;
+        for(let i = 0; i < this.total; i++)
+        {
+            command_write(this.i32, this.ctl_base, i, CTL_COMMAND_RESET);
+            doorbell_post(this.i32, this.ctl_base, i);
+        }
+        for(let i = 0; i < this.total; i++)
+        {
+            await this.wait_for("worker " + i + " reset ack", () =>
+                command_read(this.i32, this.ctl_base, i) === CTL_COMMAND_PARKED_ACK);
+        }
+        if(was_running)
+        {
+            this.run();
+        }
+    }
+    finally
+    {
+        this.rebooting = false;
     }
 };
 

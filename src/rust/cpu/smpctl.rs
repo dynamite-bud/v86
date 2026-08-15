@@ -25,6 +25,16 @@
 //                                  published per slice; main sums the cells
 //                                  for get_instruction_counter (design §8);
 //                                  same writer as run_state_pub
+//     0x04C  excl_busy      u32    W4 exclusive execution (design §5 final
+//                                  form): 1 while this vCPU's worker is
+//                                  inside its guest-execution section
+//                                  (handle_irqs + do_many_cycles), 0 at
+//                                  every safe point (slice boundary, parked,
+//                                  spinning for the exclusive cell). Written
+//                                  only by the own worker — same writer,
+//                                  same line as run_state_pub. An exclusive
+//                                  owner waits for every other worker's
+//                                  cell to read 0
 //     0x080  command        u32    RUN / PARK_REQ / PARKED_ACK / TERMINATE
 //     0x084  pic_pending    u32    W3, vCPU 0 only: 8259-INTR flag posted by
 //                                  the device host, xchg-taken by the BSP
@@ -85,6 +95,16 @@
 //                                  changes); main parks in Atomics.waitAsync
 //                                  on it — the worker-to-main mirror of the
 //                                  per-vCPU doorbells
+//     0x640  exclusive      u32    W4 exclusive execution (design §5 final
+//                                  form): 0 = free, else owner vCPU index
+//                                  + 1. CAS-acquired by a worker whose
+//                                  misaligned/page-crossing/mmap-target
+//                                  locked RMW needs bus-lock exactness; the
+//                                  owner then waits for every other
+//                                  worker's excl_busy to clear, performs
+//                                  the RMW, stores 0 + notify. Purely
+//                                  peer-to-peer — no host mediation, no
+//                                  command-word interaction
 //
 //   code_bitmaps at CTL_BASE + machine end (W3, topology (b)): one bitmap
 //   per vCPU, one bit per guest phys page, owned (written) exclusively by
@@ -115,6 +135,7 @@ pub const DOORBELL: u32 = 0x000;
 pub const RUN_STATE_PUB: u32 = 0x040;
 pub const HEARTBEAT: u32 = 0x044;
 pub const INSN_PUB: u32 = 0x048;
+pub const EXCL_BUSY: u32 = 0x04C;
 pub const COMMAND: u32 = 0x080;
 pub const PIC_PENDING: u32 = 0x084;
 pub const PENDING_IRR: u32 = 0x0C0;
@@ -172,12 +193,18 @@ pub const MAILBOX_OP_PIC_ACK: i32 = 7;
 
 // command[i] values (design §2/§8 quiesce protocol; RESET is the W2
 // machine-reboot request — the worker runs reset_cpu on its instance and
-// acks by writing RUN back)
+// acks by writing RUN back). SAVE/RESTORE are the W4 state-assembly
+// requests (design §7), only ever posted to a PARKED_ACK'd worker: SAVE =
+// run store_current_tsc + vcpu_prepare_save and post the state regions via
+// postMessage, ack PARKED_ACK; RESTORE = receive the state regions via
+// postMessage, load them into the live instance, ack PARKED_ACK.
 pub const COMMAND_RUN: i32 = 0;
 pub const COMMAND_PARK_REQ: i32 = 1;
 pub const COMMAND_PARKED_ACK: i32 = 2;
 pub const COMMAND_TERMINATE: i32 = 3;
 pub const COMMAND_RESET: i32 = 4;
+pub const COMMAND_SAVE: i32 = 5;
+pub const COMMAND_RESTORE: i32 = 6;
 
 // run_state_pub values: RunState (vcpu.rs) plus the published-only Halted
 pub const RUN_STATE_RUNNABLE: i32 = 0;
@@ -200,7 +227,8 @@ pub const MACHINE_BUSLOCK: u32 = 0x40;
 pub const MACHINE_JIT_DIRTY_RING: u32 = 0x80;
 pub const MACHINE_DEV_IRQ_RING: u32 = 0x1C0;
 pub const MACHINE_HOST_DOORBELL: u32 = 0x600;
-pub const MACHINE_SIZE: u32 = 0x640;
+pub const MACHINE_EXCLUSIVE: u32 = 0x640;
+pub const MACHINE_SIZE: u32 = 0x680;
 
 pub const JIT_DIRTY_RING_CAP: u32 = 64;
 pub const DEV_IRQ_RING_CAP: u32 = 256;
@@ -221,6 +249,7 @@ const _: () = assert!(DOORBELL % CACHE_LINE == 0);
 const _: () = assert!(RUN_STATE_PUB % CACHE_LINE == 0);
 const _: () = assert!(HEARTBEAT == RUN_STATE_PUB + 4); // same writer, same line
 const _: () = assert!(INSN_PUB == HEARTBEAT + 4); // same writer, same line
+const _: () = assert!(EXCL_BUSY == INSN_PUB + 4); // same writer, same line
 const _: () = assert!(COMMAND % CACHE_LINE == 0);
 const _: () = assert!(PIC_PENDING == COMMAND + 4); // same (host) writer, same line
 const _: () = assert!(PENDING_IRR % CACHE_LINE == 0);
@@ -244,7 +273,9 @@ const _: () = assert!(MACHINE_DEV_IRQ_RING % CACHE_LINE == 0);
 const _: () =
     assert!(MACHINE_DEV_IRQ_RING + RING_SLOTS + 4 * DEV_IRQ_RING_CAP <= MACHINE_HOST_DOORBELL);
 const _: () = assert!(MACHINE_HOST_DOORBELL % CACHE_LINE == 0);
-const _: () = assert!(MACHINE_HOST_DOORBELL + 4 <= MACHINE_SIZE);
+const _: () = assert!(MACHINE_HOST_DOORBELL + 4 <= MACHINE_EXCLUSIVE);
+const _: () = assert!(MACHINE_EXCLUSIVE % CACHE_LINE == 0);
+const _: () = assert!(MACHINE_EXCLUSIVE + 4 <= MACHINE_SIZE);
 const _: () = assert!(MACHINE_SIZE % CACHE_LINE == 0);
 
 /// Offset of the routing table relative to CTL_BASE.
@@ -336,6 +367,8 @@ pub const PROBE_INSN_PUB: u32 = 15;
 pub const PROBE_PIC_PENDING: u32 = 16;
 pub const PROBE_JIT_INBOX: u32 = 17;
 pub const PROBE_MACHINE_HOST_DOORBELL: u32 = 18;
+pub const PROBE_EXCL_BUSY: u32 = 19;
+pub const PROBE_MACHINE_EXCLUSIVE: u32 = 20;
 
 /// Exported for JS/tests: offset (relative to CTL_BASE) of a layout field —
 /// the cross-language layout check of the worker-skeleton test iterates over
@@ -364,6 +397,8 @@ pub fn get_smpctl_offset(field: u32, i: u32, n: u32) -> u32 {
         PROBE_PIC_PENDING => vcpu + PIC_PENDING,
         PROBE_JIT_INBOX => vcpu + JIT_INBOX,
         PROBE_MACHINE_HOST_DOORBELL => machine_offset(n) + MACHINE_HOST_DOORBELL,
+        PROBE_EXCL_BUSY => vcpu + EXCL_BUSY,
+        PROBE_MACHINE_EXCLUSIVE => machine_offset(n) + MACHINE_EXCLUSIVE,
         _ => u32::MAX,
     }
 }
@@ -575,6 +610,63 @@ pub unsafe fn host_doorbell_post(n: u32) -> i32 {
     let old = cell::add32(addr, 1);
     cell::notify(addr, i32::MAX);
     old
+}
+
+// ---- exclusive execution (W4, design §5 final form) ----
+//
+// The cells of the peer-to-peer exclusive protocol. Requesters CAS the
+// machine `exclusive` cell (0 -> own index + 1); every worker brackets its
+// guest-execution section with `excl_busy` = 1/0 and re-checks the
+// exclusive cell at each safe point. Dekker-style seq-cst ordering makes
+// the pair sound: a worker stores busy=1 BEFORE loading the exclusive
+// cell, the owner's CAS precedes its busy loads, so either the entering
+// worker observes the owner (and waits at the safe point) or the owner
+// observes busy=1 (and waits for the slice to end). All ops are seq-cst
+// gram atomics; the wait forms use memory.atomic.wait32 (workers only).
+
+/// Mark this worker inside its guest-execution section (no notify: nobody
+/// ever waits for busy to BECOME set).
+pub unsafe fn excl_busy_set(i: u32) { cell::store32(vcpu_field(i, EXCL_BUSY), 1) }
+
+/// Mark this worker at a safe point and wake any exclusive owner waiting
+/// on the cell.
+pub unsafe fn excl_busy_clear(i: u32) {
+    let addr = vcpu_field(i, EXCL_BUSY);
+    cell::store32(addr, 0);
+    cell::notify(addr, i32::MAX);
+}
+
+pub unsafe fn excl_busy_read(i: u32) -> i32 { cell::load32(vcpu_field(i, EXCL_BUSY)) }
+
+/// Owner-side wait for worker i's busy cell to clear. Returns the wait32
+/// outcome (0 woken / 1 not-equal / 2 timed out); the caller re-checks the
+/// cell either way.
+pub unsafe fn excl_busy_wait_clear(i: u32, timeout_ns: i64) -> i32 {
+    cell::wait32(vcpu_field(i, EXCL_BUSY), 1, timeout_ns)
+}
+
+unsafe fn exclusive_addr(n: u32) -> u32 { base() + machine_offset(n) + MACHINE_EXCLUSIVE }
+
+/// Try to become the exclusive owner: CAS 0 -> `owner` (vCPU index + 1;
+/// never 0).
+pub unsafe fn exclusive_try_acquire(n: u32, owner: i32) -> bool {
+    dbg_assert!(owner > 0);
+    cell::cmpxchg32(exclusive_addr(n), 0, owner) == 0
+}
+
+pub unsafe fn exclusive_release(n: u32) {
+    let addr = exclusive_addr(n);
+    cell::store32(addr, 0);
+    cell::notify(addr, i32::MAX);
+}
+
+pub unsafe fn exclusive_read(n: u32) -> i32 { cell::load32(exclusive_addr(n)) }
+
+/// Wait until the exclusive cell moves away from `current` (a contender or
+/// a worker parked at its slice-entry safe point). Returns the wait32
+/// outcome; the caller re-checks the cell either way.
+pub unsafe fn exclusive_wait(n: u32, current: i32, timeout_ns: i64) -> i32 {
+    cell::wait32(exclusive_addr(n), current, timeout_ns)
 }
 
 // ---- command (quiesce protocol, design §8) ----
@@ -955,7 +1047,7 @@ mod tests {
             // per-vCPU field intervals within one stride, in layout order
             let fields = [
                 (DOORBELL, 4),
-                (RUN_STATE_PUB, 12), // + heartbeat + insn_pub
+                (RUN_STATE_PUB, 16), // + heartbeat + insn_pub + excl_busy
                 (COMMAND, 8),        // + pic_pending
                 (PENDING_IRR, 4 * PENDING_WORDS),
                 (PENDING_TMR, 4 * PENDING_WORDS),
@@ -1288,6 +1380,46 @@ mod tests {
             buslock_release(n);
             assert!(buslock_try_acquire(n));
             buslock_release(n);
+        }
+    }
+
+    #[test]
+    fn exclusive_and_busy_cells() {
+        let n = 2;
+        setup(n);
+        unsafe {
+            // exclusive cell: CAS-owned, released with store 0
+            assert_eq!(exclusive_read(n), 0);
+            assert!(exclusive_try_acquire(n, 1));
+            assert_eq!(exclusive_read(n), 1);
+            assert!(!exclusive_try_acquire(n, 2), "held cell must reject");
+            exclusive_release(n);
+            assert_eq!(exclusive_read(n), 0);
+            assert!(exclusive_try_acquire(n, 2));
+            exclusive_release(n);
+
+            // busy cells are per-vCPU and independent of the machine cell
+            assert_eq!(excl_busy_read(0), 0);
+            excl_busy_set(0);
+            assert_eq!(excl_busy_read(0), 1);
+            assert_eq!(excl_busy_read(1), 0, "vCPU 1's cell untouched");
+            excl_busy_clear(0);
+            assert_eq!(excl_busy_read(0), 0);
+            // busy cells share the run_state line but not a word
+            run_state_publish(0, RUN_STATE_HALTED);
+            excl_busy_set(0);
+            assert_eq!(run_state_read(0), RUN_STATE_HALTED);
+            excl_busy_clear(0);
+
+            // probe export covers the new fields
+            assert_eq!(
+                get_smpctl_offset(PROBE_EXCL_BUSY, 1, n),
+                VCPU_STRIDE + EXCL_BUSY
+            );
+            assert_eq!(
+                get_smpctl_offset(PROBE_MACHINE_EXCLUSIVE, 0, n),
+                machine_offset(n) + MACHINE_EXCLUSIVE
+            );
         }
     }
 }

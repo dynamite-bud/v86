@@ -18,11 +18,25 @@
 //   phase 3  INIT/SIPI restart: the parked AP is INIT (reset to
 //            WaitForSipi on the live block) + SIPI'd again over the
 //            control region and reruns its loop: counter == 3K exactly.
+//   phase 4  W4 exclusive execution (design §5 final form): both vCPUs are
+//            INIT/SIPI-restarted into new programs — vCPU 0 hammers a
+//            MISALIGNED `lock inc dword` on a page-crossing cell (the
+//            bus-lock fallback class, now exclusive execution: all other
+//            workers parked per RMW), vCPU 1 concurrently hammers an
+//            ALIGNED `lock inc dword` elsewhere (the CAS path, which now
+//            parks at its slice boundary while an exclusive RMW runs).
+//            Both counters exact.
+//   phase 5  exclusive-vs-exclusive arbitration: both vCPUs hammer the
+//            SAME page-crossing cell with misaligned locked incs — two
+//            concurrent exclusive requesters contending on the machine
+//            exclusive cell. Total exact.
 //
 // The AP is started by test-posted INIT/SIPI latches (real mode cannot
 // reach the LAPIC MMIO window); the full guest-driven ICR path (BSP
 // write_icr0 -> snapshot fan-out -> AP consume) is covered by SeaBIOS/
-// Linux AP bring-up in tests/threads/vcpu-workers-smp.js.
+// Linux AP bring-up in tests/threads/vcpu-workers-smp.js. SIPI entry is
+// architectural since W4: linear vector << 12 (the historical linear-0
+// entry of apply_sipi survives only in the time-sliced path).
 //
 // build/v86-multimem-debug.wasm is optional: the test skips cleanly when
 // missing (the repo pattern).
@@ -60,29 +74,53 @@ const SIPI_VECTOR = 0x9B;       // AP entry page -> 0x9B000
 const IPI_INIT_BIT = 1;
 const IPI_SIPI_BIT = 2;
 
-// Real-mode program (identical for both vCPUs up to the done-flag
-// address and stack): set a PER-vCPU stack first — both vCPUs come out of
-// reset/SIPI with the same SS:SP, and two CPUs taking storm interrupts on
-// one shared stack corrupt each other's frames (a genuine guest-side SMP
-// race: it made an iret pop a clobbered CS:IP roughly once per five runs
-// before the mov sp landed) — then spin on the go flag, `lock inc dword
-// [COUNTER]` K times with interrupts enabled, bump the own done counter,
-// and cli;hlt (Parked).
-function program_bytes(done_addr, sp)
+// phase 4/5 (W4 exclusive execution): fresh programs, go flags, counters.
+// The misaligned counters sit two bytes before a page boundary, so the
+// dword RMW crosses the page — the bus-lock fallback class that now runs
+// under exclusive execution. Exclusive acquisition may wait out the peer's
+// do_many_cycles window, so the misaligned iteration counts are far
+// smaller than K (the ops are slice-latency-bounded while the peer runs).
+const GO2_FLAG = 0x1008;
+const GO3_FLAG = 0x100C;
+const MIS_COUNTER = 0x4FFE;     // dword crossing the 0x4000/0x5000 boundary
+const ALIGNED_COUNTER = 0x6000;
+const MIS2_COUNTER = 0x8FFE;    // phase 5: the shared crossing cell
+const DONE2_BASE = 0x2010;
+const DONE3_BASE = 0x2020;
+const K_MIS = 20_000;
+const K_ALIGNED = 200_000;
+// phase 4/5 program pages, entered directly by SIPI vector
+// (architectural entry: linear vector << 12 — the W4 worker consume)
+const P4_VECTORS = [0x10, 0x11];
+const P5_VECTORS = [0x12, 0x13];
+
+// Real-mode program (identical for both vCPUs up to the counter/done
+// addresses and stack): set a PER-vCPU stack first — both vCPUs come out
+// of reset/SIPI with the same SS:SP, and two CPUs taking storm interrupts
+// on one shared stack corrupt each other's frames (a genuine guest-side
+// SMP race: it made an iret pop a clobbered CS:IP roughly once per five
+// runs before the mov sp landed) — then spin on the go flag, `lock inc
+// dword [counter]` k times (with interrupts enabled when `sti` — the
+// phase-1 storm delivers mid-loop), bump the own done counter, and
+// cli;hlt (Parked).
+function program_bytes({ counter, k, go_flag, done_addr, sp, sti })
 {
     const code = [];
     // mov sp, imm16 (SS base 0x300 from reset; frames land below 0x300+sp)
     code.push(0xBC, sp & 0xFF, sp >> 8);
-    // wait: mov eax, [GO_FLAG]; test eax, eax; jz wait
-    code.push(0x66, 0xA1, GO_FLAG & 0xFF, GO_FLAG >> 8);
+    // wait: mov eax, [go_flag]; test eax, eax; jz wait
+    code.push(0x66, 0xA1, go_flag & 0xFF, go_flag >> 8);
     code.push(0x66, 0x85, 0xC0);
     code.push(0x74, 0xF7); // -9
-    // sti (storm vectors may deliver mid-loop)
-    code.push(0xFB);
-    // mov ecx, K
-    code.push(0x66, 0xB9, K & 0xFF, K >> 8 & 0xFF, K >> 16 & 0xFF, K >>> 24);
-    // loop: lock inc dword [COUNTER]; dec ecx; jnz loop
-    code.push(0xF0, 0x66, 0xFF, 0x06, COUNTER & 0xFF, COUNTER >> 8);
+    if(sti)
+    {
+        // sti (storm vectors may deliver mid-loop)
+        code.push(0xFB);
+    }
+    // mov ecx, k
+    code.push(0x66, 0xB9, k & 0xFF, k >> 8 & 0xFF, k >> 16 & 0xFF, k >>> 24);
+    // loop: lock inc dword [counter]; dec ecx; jnz loop
+    code.push(0xF0, 0x66, 0xFF, 0x06, counter & 0xFF, counter >> 8);
     code.push(0x66, 0x49);
     code.push(0x75, 0xF6); // -10
     // inc dword [done_addr]; cli; hlt
@@ -152,8 +190,8 @@ async function main()
     }
     const watchdog = setTimeout(() =>
     {
-        throw new Error("vcpu-workers-lock: global 180s timeout");
-    }, 180_000);
+        throw new Error("vcpu-workers-lock: global 300s timeout");
+    }, 300_000);
 
     const guest_pages = MEMORY_SIZE / 0x10000 + 1 + ctl_pages(TOTAL_CPUS, MEMORY_SIZE);
     const guest_memory = new WebAssembly.Memory(
@@ -162,14 +200,32 @@ async function main()
     const i32 = new Int32Array(guest_memory.buffer);
     const mem8 = new Uint8Array(guest_memory.buffer);
 
-    // guest image: reset vector -> BSP program at F0000; linear 0 -> AP
-    // program (covers both real-mode SIPI entry conventions: the ljmp at 0
-    // lands in the same program the SIPI vector points at)
+    // guest image: reset vector -> BSP program at F0000; each SIPI'd
+    // program is entered at its architectural entry point (linear
+    // vector << 12 — the W4 worker consume; the historical linear-0 entry
+    // relied on sledding through pristine low memory and broke on reboot)
     mem8.set([0xEA, 0x00, 0x00, 0x00, 0xF0], 0xFFFF0);           // ljmp F000:0000
-    mem8.set(program_bytes(DONE_BASE, 0x100), 0xF0000);          // BSP, stack < 0x400
-    mem8.set([0xEA, 0x00, 0x00, 0x00, SIPI_VECTOR], 0);          // ljmp 9B00:0000
-    mem8.set(program_bytes(DONE_BASE + 4, 0x300),                // AP, stack < 0x600
+    mem8.set(program_bytes({ counter: COUNTER, k: K, go_flag: GO_FLAG,
+        done_addr: DONE_BASE, sp: 0x100, sti: true }), 0xF0000); // BSP, stack < 0x400
+    // the AP program (phases 1 and 3), entered by SIPI vector 0x9B
+    mem8.set(program_bytes({ counter: COUNTER, k: K, go_flag: GO_FLAG,
+        done_addr: DONE_BASE + 4, sp: 0x300, sti: true }),       // AP, stack < 0x600
         SIPI_VECTOR << 12);
+    // phase 4: one vCPU -> misaligned page-crossing lock incs, the other
+    // -> aligned lock incs elsewhere (both released by GO2)
+    mem8.set(program_bytes({ counter: MIS_COUNTER, k: K_MIS, go_flag: GO2_FLAG,
+        done_addr: DONE2_BASE, sp: 0x100, sti: false }), P4_VECTORS[0] << 12);
+    mem8.set(program_bytes({ counter: ALIGNED_COUNTER, k: K_ALIGNED, go_flag: GO2_FLAG,
+        done_addr: DONE2_BASE + 4, sp: 0x300, sti: false }), P4_VECTORS[1] << 12);
+    // phase 5: both vCPUs on the SAME crossing cell (released by GO3)
+    mem8.set(program_bytes({ counter: MIS2_COUNTER, k: K_MIS, go_flag: GO3_FLAG,
+        done_addr: DONE3_BASE, sp: 0x100, sti: false }), P5_VECTORS[0] << 12);
+    mem8.set(program_bytes({ counter: MIS2_COUNTER, k: K_MIS, go_flag: GO3_FLAG,
+        done_addr: DONE3_BASE + 4, sp: 0x300, sti: false }), P5_VECTORS[1] << 12);
+
+    // unaligned dword reads of the crossing counters (only ever read after
+    // both vCPUs published Parked, which orders the plain bytes)
+    const dview = new DataView(guest_memory.buffer);
     mem8[IRET_STUB] = 0xCF;                                     // iret
     for(let v = 0x20; v <= 0x27; v++)
     {
@@ -319,6 +375,61 @@ async function main()
     assert.equal(Atomics.load(i32, counter_word), 3 * K,
         "restarted AP must add exactly K more increments");
     console.log(`phase 3: INIT/SIPI restart exact (counter == 3x${K})`);
+
+    // phase 4 — W4 exclusive execution, mixed classes: INIT/SIPI both
+    // vCPUs into the phase-4 programs. The misaligned page-crossing
+    // `lock inc` takes the exclusive-execution path (all other workers
+    // parked per RMW); the concurrent aligned `lock inc` takes the CAS
+    // path and parks at its slice boundary whenever the exclusive cell is
+    // held. Exactness of BOTH counters proves no update was lost on
+    // either side and the machinery neither deadlocks nor corrupts.
+    post_ipi_special(i32, ctl_base, 0, IPI_INIT_BIT | IPI_SIPI_BIT | P4_VECTORS[0] << 8);
+    post_ipi_special(i32, ctl_base, 1, IPI_INIT_BIT | IPI_SIPI_BIT | P4_VECTORS[1] << 8);
+    await wait_for("both running phase 4 programs", () =>
+    {
+        check_errors();
+        return state(0) === CTL_RUN_STATE_RUNNABLE && state(1) === CTL_RUN_STATE_RUNNABLE;
+    }, 60_000);
+    assert.equal(dview.getUint32(MIS_COUNTER, true), 0, "no early misaligned increments");
+    Atomics.store(i32, GO2_FLAG >> 2, 1);
+    await wait_for("phase 4 loops done", () =>
+    {
+        check_errors();
+        return Atomics.load(i32, DONE2_BASE >> 2) === 1 &&
+            Atomics.load(i32, DONE2_BASE + 4 >> 2) === 1;
+    }, 240_000);
+    await wait_for("both parked after phase 4", () =>
+        state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);
+    assert.equal(dview.getUint32(MIS_COUNTER, true), K_MIS,
+        "misaligned page-crossing lock incs must be exact under exclusive execution");
+    assert.equal(Atomics.load(i32, ALIGNED_COUNTER >> 2), K_ALIGNED,
+        "concurrent aligned lock incs must stay exact");
+    console.log(`phase 4: ${K_MIS} misaligned page-crossing lock incs exact against ` +
+        `${K_ALIGNED} concurrent aligned lock incs (exclusive execution)`);
+
+    // phase 5 — exclusive-vs-exclusive arbitration: both vCPUs hammer the
+    // SAME crossing cell; two exclusive requesters contend on the machine
+    // exclusive cell (the loser clears its busy flag while spinning, so
+    // neither deadlocks). Total must be exact.
+    post_ipi_special(i32, ctl_base, 0, IPI_INIT_BIT | IPI_SIPI_BIT | P5_VECTORS[0] << 8);
+    post_ipi_special(i32, ctl_base, 1, IPI_INIT_BIT | IPI_SIPI_BIT | P5_VECTORS[1] << 8);
+    await wait_for("both running phase 5 programs", () =>
+    {
+        check_errors();
+        return state(0) === CTL_RUN_STATE_RUNNABLE && state(1) === CTL_RUN_STATE_RUNNABLE;
+    }, 60_000);
+    Atomics.store(i32, GO3_FLAG >> 2, 1);
+    await wait_for("phase 5 loops done", () =>
+    {
+        check_errors();
+        return Atomics.load(i32, DONE3_BASE >> 2) === 1 &&
+            Atomics.load(i32, DONE3_BASE + 4 >> 2) === 1;
+    }, 240_000);
+    await wait_for("both parked after phase 5", () =>
+        state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);
+    assert.equal(dview.getUint32(MIS2_COUNTER, true), 2 * K_MIS,
+        "contending misaligned lock incs on one crossing cell must sum exactly");
+    console.log(`phase 5: 2x${K_MIS} contending exclusive RMWs on one crossing cell exact`);
 
     // teardown
     for(let i = 0; i < TOTAL_CPUS; i++)

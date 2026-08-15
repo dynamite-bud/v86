@@ -69,21 +69,44 @@ pub unsafe fn set_worker_mode(v: u32) { WORKER_MODE = v != 0 }
 
 pub unsafe fn in_worker_mode() -> bool { WORKER_MODE }
 
+/// Whether this instance takes the W4 exclusive-execution path (design §5
+/// final form) instead of a bus-lock cell: a per-vCPU worker in a
+/// multi-worker machine — the one configuration where other vCPUs really
+/// execute concurrently. Topology (c) and single-worker (b) keep the cell:
+/// exactly one instance executes guest code there, so the cell remains
+/// sound (and µs cheaper than a park round).
+unsafe fn use_exclusive() -> Option<u32> {
+    match crate::cpu::worker::vcpu_index() {
+        Some(i) if crate::cpu::vcpu::count() > 1 => Some(i),
+        _ => None,
+    }
+}
+
 /// Acquire the bus lock and fence. Outside worker mode the instance-local
 /// compare_exchange can never actually spin (single thread; the bus-locked
 /// sections neither re-enter nor unwind), but it is the protocol the
 /// control-region cell keeps — and in worker mode the same CAS protocol
-/// runs against `machine.buslock` through gram's seq-cst cmpxchg. The fence
-/// is gram.wasm's real `atomic.fence`: core::sync::atomic::fence compiles
-/// to nothing in this module (built without the wasm atomics target
-/// feature, so LLVM drops singlethread fences), which is why ordering must
-/// be established inside gram.wasm.
+/// runs against `machine.buslock` through gram's seq-cst cmpxchg. In
+/// multi-worker topology (b) the cell is upgraded to exclusive execution
+/// (worker.rs exclusive_acquire): every other vCPU worker is parked at a
+/// safe point for the duration of the RMW, making bus-lock semantics exact
+/// even against aligned atomics on overlapping cells. The fence is
+/// gram.wasm's real `atomic.fence`: core::sync::atomic::fence compiles to
+/// nothing in this module (built without the wasm atomics target feature,
+/// so LLVM drops singlethread fences), which is why ordering must be
+/// established inside gram.wasm.
 pub unsafe fn bus_lock_acquire() {
-    if WORKER_MODE {
+    if let Some(index) = use_exclusive() {
+        crate::profiler::stat_increment(crate::profiler::stat::SAFE_READ_WRITE_LOCKED_EXCLUSIVE);
+        crate::cpu::worker::exclusive_acquire(index);
+    }
+    else if WORKER_MODE {
+        crate::profiler::stat_increment(crate::profiler::stat::SAFE_READ_WRITE_LOCKED_BUSLOCK_CELL);
         let n = crate::cpu::vcpu::count() as u32;
         while !smpctl::buslock_try_acquire(n) {}
     }
     else {
+        crate::profiler::stat_increment(crate::profiler::stat::SAFE_READ_WRITE_LOCKED_BUSLOCK_CELL);
         while BUS_LOCK
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
@@ -94,7 +117,10 @@ pub unsafe fn bus_lock_acquire() {
 
 pub unsafe fn bus_lock_release() {
     memory::gram_fence();
-    if WORKER_MODE {
+    if use_exclusive().is_some() {
+        crate::cpu::worker::exclusive_release();
+    }
+    else if WORKER_MODE {
         smpctl::buslock_release(crate::cpu::vcpu::count() as u32);
     }
     else {

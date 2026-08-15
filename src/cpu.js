@@ -2121,7 +2121,11 @@ CPU.prototype.load_bios = function()
  *   pages to the worker, whose JIT cache is the live one;
  * - main_loop becomes the host's device tick (PIT/RTC/ACPI timers live
  *   here; the worker keeps its own LAPIC deadline);
- * - reboot_internal additionally resets the worker's instance.
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park the worker, reset the main-side chipset/devices, then the
+ *   worker's reset command. Fire-and-forget — reboot_internal may run
+ *   inside a mailbox dispatch (guest reset port), where awaiting the
+ *   quiesce would deadlock the triggering worker's pending RPC.
  *
  * Everything else (io.js tables, device models, mmap handlers, save Rust
  * chipset state) stays as constructed — the mailbox server dispatches onto
@@ -2139,8 +2143,7 @@ CPU.prototype.attach_smp_worker_host = function(host)
     const reboot = CPU.prototype.reboot_internal.bind(this);
     this.reboot_internal = () =>
     {
-        reboot();
-        host.post_reset();
+        host.reboot(reboot);
     };
 };
 
@@ -2156,7 +2159,10 @@ CPU.prototype.attach_smp_worker_host = function(host)
  * - jit_dirty_cache (write_blob during DMA/IDE) broadcasts dirty events
  *   into every worker's jit inbox — the live JIT caches are theirs;
  * - main_loop becomes the host's device tick;
- * - reboot_internal additionally resets every worker.
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park all workers, reset the main-side chipset/devices, then
+ *   per-worker reset commands (APs return to WaitForSipi). Fire-and-forget
+ *   for the same mailbox-dispatch reason as the (c) attach above.
  *
  * @param {!Object} host an SMPVcpuHost (src/browser/smp_vcpu_host.js)
  */
@@ -2168,8 +2174,7 @@ CPU.prototype.attach_smp_vcpu_host = function(host)
     const reboot = CPU.prototype.reboot_internal.bind(this);
     this.reboot_internal = () =>
     {
-        reboot();
-        host.post_reset();
+        host.reboot(reboot);
     };
 };
 

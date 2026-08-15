@@ -115,6 +115,8 @@ function print_misc_stats(cpu)
         "SEG_OFFSET_NOT_OPTIMISED_FS",
         "SEG_OFFSET_NOT_OPTIMISED_GS",
         "SEG_OFFSET_NOT_OPTIMISED_NOT_FLAT",
+        "SAFE_READ_WRITE_LOCKED_BUSLOCK_CELL",
+        "SAFE_READ_WRITE_LOCKED_EXCLUSIVE",
     ];
 
     let j = 0;

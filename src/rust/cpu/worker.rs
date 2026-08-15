@@ -114,6 +114,11 @@ pub unsafe fn main_loop_worker(index: u32) -> f64 {
             publish_run_state(index);
             return IDLE_PARK_MS;
         }
+        // W4 exclusive execution (design §5 final form): the busy bracket
+        // around the guest-execution section — handle_irqs may write the
+        // guest stack, do_many_cycles is the guest. slice_begin honors a
+        // held exclusive cell before entering.
+        excl_slice_begin(index);
         cpu::handle_irqs();
         if !*in_hlt {
             cpu::do_many_cycles_native();
@@ -123,6 +128,7 @@ pub unsafe fn main_loop_worker(index: u32) -> f64 {
         // instance's apic_timer deadline
         let t = js::run_hardware_timers(*acpi_enabled, now);
         cpu::handle_irqs();
+        excl_slice_end(index);
         smpctl::insn_publish(index, *instruction_counter as i32);
         if vcpu::run_state(index as usize) != vcpu::RunState::Runnable {
             // hlt with IF=0 parked this vCPU mid-slice
@@ -193,9 +199,21 @@ unsafe fn consume_ipi_special(index: u32) {
             let vector =
                 ((special & smpctl::IPI_SIPI_VECTOR_MASK) >> smpctl::IPI_SIPI_VECTOR_SHIFT) as i32;
             dbg_log!("vcpu worker {}: SIPI vector={:02x} consumed", index, vector);
-            // the vcpu::apply_sipi recipe, applied to the live block
+            // The vcpu::apply_sipi recipe, applied to the live block —
+            // with one W4 correction: instruction_pointer is a LINEAR
+            // address in v86 (CS base included), so the architectural
+            // entry CS:IP = (vector<<8):0000 is linear vector<<12, NOT 0.
+            // apply_sipi's literal 0 makes a SIPI'd vCPU start executing
+            // at linear 0 and depend on sledding through pristine low
+            // memory up into the trampoline — an accident that holds on
+            // first boot and breaks on reboot, when low RAM holds guest
+            // leftovers (found empirically by the W4 reboot gate: the
+            // AP's garbage sled corrupted SeaBIOS's relocated POST code).
+            // The time-sliced path keeps the historical entry: vcpu.rs is
+            // part of the default artifact, whose byte identity W4 must
+            // not break.
             cpu::switch_cs_real_mode(vector << 8);
-            *instruction_pointer = 0;
+            *instruction_pointer = vector << 12;
             vcpu::set_run_state(index as usize, vcpu::RunState::Runnable);
             publish_run_state(index);
             apic::publish_current_routing();
@@ -251,6 +269,136 @@ unsafe fn drain_jit_inbox(index: u32) {
         );
         jit::jit_clear_cache_js();
         cpu::full_clear_tlb();
+    }
+}
+
+// ---- exclusive execution (W4, design §5 final form) ----
+//
+// The upgrade of the interim bus-lock cell for multi-worker topology (b):
+// a worker whose locked RMW falls outside the CAS-able classes
+// (misaligned, page-crossing, mmap-target) parks every OTHER worker for
+// the duration of the RMW — QEMU MTTCG's start_exclusive, made of two
+// kinds of control-region cells (smpctl.rs):
+//
+//   machine.exclusive   0 = free, else owner index + 1; CAS-acquired
+//   excl_busy[i]        1 while worker i is inside its guest-execution
+//                       section, 0 at every safe point
+//
+// Chosen mechanism: purely peer-to-peer. Host mediation was rejected
+// because nothing the host owns is involved — the contended resource is
+// guest RAM, which every worker reaches directly — and a host round trip
+// would add two mailbox-class latencies to a path that only needs
+// cross-worker ordering. Workers cannot service each other's mailboxes,
+// but no mailbox is needed: the owner waits on the busy CELLS, and a
+// worker blocked in a mailbox RPC keeps busy=1 until the device host
+// (which keeps servicing throughout) completes the RPC and the slice
+// reaches its boundary — the same "mid-RPC completes first" property as
+// the §7 quiesce.
+//
+// Soundness (Dekker/store-buffering over seq-cst gram atomics): a worker
+// stores busy=1 BEFORE loading the exclusive cell at slice entry; the
+// owner's CAS precedes its busy loads. In the seq-cst total order either
+// the entering worker sees the owner's CAS (and waits at the safe point
+// with busy=0) or the owner sees busy=1 (and waits for that slice to
+// end). Either way no other worker touches guest memory between the
+// owner's acquisition returning and its release. A contending requester
+// clears its own busy while spinning — it sits at a safe point
+// (mid-instruction, but provably not touching guest memory), so a
+// concurrent owner never deadlocks on it; livelock is excluded by the
+// finite worker count and µs-scale exclusive sections.
+//
+// Residual (documented, same class as the interim cell's DMA story): the
+// main thread's device writes (write_blob/DMA, rep-I/O servicing) do not
+// participate — device DMA racing a guest's misaligned locked RMW on the
+// same bytes remains hardware-race-class, unchanged from every earlier
+// stage. Guest-vs-guest bus-lock semantics are now exact, including
+// against aligned atomics on overlapping cells (the split-lock hole of
+// design §5 is closed in this topology).
+
+/// 1 s wait slices while waiting for a peer; ~10 s of no progress means a
+/// dead worker, which is fail-stop (design §8) — panic loudly.
+const EXCL_WAIT_SLICE_NS: i64 = 1_000_000_000;
+const EXCL_WAIT_SLICES_MAX: i32 = 10;
+
+/// Slice entry: publish busy=1, then honor a held exclusive cell (wait at
+/// this safe point until it frees). Cheap when free: one store + one load.
+pub unsafe fn excl_slice_begin(index: u32) {
+    let n = total();
+    smpctl::excl_busy_set(index);
+    loop {
+        let owner = smpctl::exclusive_read(n);
+        if owner == 0 {
+            return;
+        }
+        dbg_assert!(owner != index as i32 + 1);
+        smpctl::excl_busy_clear(index);
+        smpctl::exclusive_wait(n, owner, EXCL_WAIT_SLICE_NS);
+        smpctl::excl_busy_set(index);
+    }
+}
+
+/// Slice end: publish the safe point (wakes a waiting exclusive owner).
+pub unsafe fn excl_slice_end(index: u32) { smpctl::excl_busy_clear(index); }
+
+/// Acquire exclusive execution: become the owner, then wait until every
+/// other worker is at a safe point. Called mid-instruction from the locked
+/// fallback paths (cpu/lock.rs) — the caller's own busy cell stays set on
+/// the success path; while contending it is cleared so a concurrent owner
+/// treats this worker as safe (it is: it spins right here, touching no
+/// guest memory).
+pub unsafe fn exclusive_acquire(index: u32) {
+    let n = total();
+    let own = index as i32 + 1;
+    let mut slices = 0;
+    while !smpctl::exclusive_try_acquire(n, own) {
+        smpctl::excl_busy_clear(index);
+        let owner = smpctl::exclusive_read(n);
+        if owner != 0 {
+            if smpctl::exclusive_wait(n, owner, EXCL_WAIT_SLICE_NS) == 2 {
+                slices += 1;
+                if slices > EXCL_WAIT_SLICES_MAX {
+                    panic!("exclusive: owner never released");
+                }
+            }
+        }
+        smpctl::excl_busy_set(index);
+    }
+    for j in 0..n {
+        if j == index {
+            continue;
+        }
+        slices = 0;
+        while smpctl::excl_busy_read(j) != 0 {
+            if smpctl::excl_busy_wait_clear(j, EXCL_WAIT_SLICE_NS) == 2 {
+                slices += 1;
+                if slices > EXCL_WAIT_SLICES_MAX {
+                    panic!("exclusive: peer never reached a safe point");
+                }
+            }
+        }
+    }
+}
+
+/// Release exclusive execution: free the cell and wake every worker parked
+/// at a safe point (and any contending requester).
+pub unsafe fn exclusive_release() { smpctl::exclusive_release(total()); }
+
+/// Stage W4 save-time sync (design §7), called by the worker runtime on
+/// COMMAND_SAVE before vcpu_prepare_save: drain every in-flight
+/// control-region interrupt into the architectural structures the save
+/// captures. Bits posted to pending_irr/tmr after this vCPU's last
+/// consume, or an INIT/SIPI latched while it parked, live ONLY in the
+/// control region — a snapshot taken without this drain silently drops
+/// them (found empirically: a lost virtio INTx level raise wedged the
+/// restored guest's 9p root). Consuming at a park boundary is exactly the
+/// slice-boundary consume of the running loop.
+#[no_mangle]
+pub unsafe fn vcpu_worker_sync_for_save() {
+    if let Some(index) = vcpu_index() {
+        consume_ipi_special(index);
+        merge_pending_interrupts(index);
+        drain_jit_inbox(index);
+        publish_run_state(index);
     }
 }
 

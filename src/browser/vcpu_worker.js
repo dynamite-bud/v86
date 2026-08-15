@@ -47,7 +47,7 @@ import {
     ctl_base_for, ctl_total_size, ctl_probe_offset, SMPCTL_PROBE_FIELD_COUNT,
     ctl_machine_offset, ctl_code_bitmap_offset,
     CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK, CTL_COMMAND_TERMINATE,
-    CTL_COMMAND_RESET,
+    CTL_COMMAND_RESET, CTL_COMMAND_SAVE, CTL_COMMAND_RESTORE,
     CTL_RUN_STATE_RUNNABLE, CTL_RUN_STATE_PARKED, CTL_RUN_STATE_HALTED,
     CTL_MACHINE_JIT_DIRTY_RING, CTL_MACHINE_DEV_IRQ_RING,
     CTL_JIT_DIRTY_RING_CAP, CTL_DEV_IRQ_RING_CAP, CTL_DEV_IRQ_RAISE_BIT,
@@ -92,8 +92,38 @@ async function connect_channel()
 
 const channel = await connect_channel();
 
-channel.on_message(payload =>
+// Inbound messages beyond the spawn payload exist since Stage W4: the
+// restore-state payload (design §7) arrives while the loop briefly returns
+// to the event loop on COMMAND_RESTORE. Queue-based dispatch: every message
+// lands in the queue (or resolves the pending take_message), the first one
+// is the spawn payload.
+const message_queue = [];
+let message_waiter = null;
+
+channel.on_message(m =>
 {
+    if(message_waiter)
+    {
+        const waiter = message_waiter;
+        message_waiter = null;
+        waiter(m);
+    }
+    else
+    {
+        message_queue.push(m);
+    }
+});
+
+function take_message()
+{
+    if(message_queue.length)
+    {
+        return Promise.resolve(message_queue.shift());
+    }
+    return new Promise(resolve => { message_waiter = resolve; });
+}
+
+take_message().then(payload =>
     run_worker(payload).catch(e =>
     {
         channel.post({ type: "error", message: String(e && e.message || e), stack: String(e && e.stack || "") });
@@ -101,8 +131,7 @@ channel.on_message(payload =>
         // non-zero, in the browser the worker's error event fires —
         // fail-stop either way (design §8)
         setTimeout(() => { throw e; }, 0);
-    });
-});
+    }));
 
 async function run_worker(payload)
 {
@@ -142,6 +171,16 @@ async function run_worker(payload)
     const rpc = (op, addr, size, value, value_hi, value_2, value_3) =>
         mailbox_request(i32, record, op, addr, size, value, RPC_TIMEOUT_MS,
             value_hi, value_2, value_3);
+
+    // Stage W4 state assembly (design §7): struct sizes mirrored from the
+    // Rust layouts (apic.rs / pic.rs / ioapic.rs), the same constants
+    // cpu.js get_state_* use; current_tsc (global_pointers.rs) is inside
+    // the per-vCPU state block, so a loaded save area carries it.
+    const APIC_STRUCT_SIZE = 4 * 46;
+    const PIC_STRUCT_SIZE = 13;
+    const IOAPIC_STRUCT_SIZE = 4 * 52;
+    const CURRENT_TSC_ADDR = 960;
+    const machine_ring_base = ctl_base + ctl_machine_offset(total);
 
     // worker-local JIT plumbing (§6 codegen_finalize row): own table, own
     // instance memory, WebAssembly.instantiate in this worker
@@ -384,14 +423,14 @@ async function run_worker(payload)
 
     if(machine)
     {
-        machine_loop();
+        await machine_loop();
         channel.close();
         return;
     }
 
     if(vcpu)
     {
-        vcpu_loop();
+        await vcpu_loop();
         channel.close();
         return;
     }
@@ -404,6 +443,155 @@ async function run_worker(payload)
     park_loop();
     channel.close();
 
+    // ---- Stage W4 state assembly (design §7) ----
+
+    // Topology-(c) ring drain (jit dirt strictly before device IRQs):
+    // used by the machine loop every iteration, before parking, and
+    // before a save snapshot — an undelivered raise/lower event must
+    // reach this instance's chipset before the image is taken.
+    function drain_rings()
+    {
+        const jit_ring = machine_ring_base + CTL_MACHINE_JIT_DIRTY_RING;
+        const irq_ring = machine_ring_base + CTL_MACHINE_DEV_IRQ_RING;
+        for(let page; (page = ring_pop(i32, jit_ring, CTL_JIT_DIRTY_RING_CAP)) !== undefined;)
+        {
+            const start = (page >>> 0) * 0x1000;
+            exports["jit_dirty_cache"](start, start + 0x1000);
+        }
+        for(let event; (event = ring_pop(i32, irq_ring, CTL_DEV_IRQ_RING_CAP)) !== undefined;)
+        {
+            if(event & CTL_DEV_IRQ_RAISE_BIT)
+            {
+                exports["device_raise_irq"](event & 0xFF);
+            }
+            else
+            {
+                exports["device_lower_irq"](event & 0xFF);
+            }
+        }
+    }
+
+    // COMMAND_SAVE: sync the live block (fresh TSC included) into this
+    // instance's save region and post every state region the host may
+    // need. Uniform payload for both modes — the host picks: in (b) it
+    // takes vCPU block `index` and LAPIC `index` (its own chipset is
+    // authoritative for PIC/IOAPIC); in (c) this worker IS the machine, so
+    // everything is taken.
+    function collect_state()
+    {
+        if(vcpu)
+        {
+            // drain in-flight control-region interrupts (pending_irr/tmr
+            // bits, INIT/SIPI latches, jit events) into the architectural
+            // structures first — the snapshot regions do not include the
+            // control region, so anything left there would be silently
+            // dropped from the image (design §7, W4 note)
+            exports["vcpu_worker_sync_for_save"]();
+        }
+        if(machine)
+        {
+            // same rule for the (c) wire: undelivered ring events must
+            // reach the chipset before the snapshot
+            drain_rings();
+        }
+        exports["store_current_tsc"]();
+        exports["vcpu_prepare_save"]();
+        const buffer = exports.memory.buffer;
+        return {
+            type: "save-state",
+            "index": index,
+            "current": exports["get_current_vcpu"](),
+            "vcpu_region": new Uint8Array(
+                buffer, exports["get_vcpu_state_addr"](), exports["get_vcpu_state_size"]()).slice(),
+            "apics": new Uint8Array(
+                buffer, exports["get_apic_addr"](), total * APIC_STRUCT_SIZE).slice(),
+            "pic_master": new Uint8Array(
+                buffer, exports["get_pic_addr_master"](), PIC_STRUCT_SIZE).slice(),
+            "pic_slave": new Uint8Array(
+                buffer, exports["get_pic_addr_slave"](), PIC_STRUCT_SIZE).slice(),
+            "ioapic": new Uint8Array(
+                buffer, exports["get_ioapic_addr"](), IOAPIC_STRUCT_SIZE).slice(),
+        };
+    }
+
+    // COMMAND_RESTORE payload application: load the distributed regions
+    // (read from the host instance after its own validated restore — the
+    // same v7 bytes) into this live instance. Per-vCPU mode loads the OWN
+    // block as current and re-enters the worker role (which also clears
+    // this vCPU's control cells and republishes run state + routing from
+    // the restored structs); machine mode restores the whole machine
+    // including the chipset it owns. TSC continues from the restored
+    // block's current_tsc — vcpu_finish_restore made it live at
+    // CURRENT_TSC_ADDR, set_tsc rebases this instance's offset on it.
+    function apply_restore(m)
+    {
+        const buffer = exports.memory.buffer;
+        new Uint8Array(buffer, exports["get_vcpu_state_addr"](), exports["get_vcpu_state_size"]())
+            .set(m["vcpu_region"]);
+        new Uint8Array(buffer, exports["get_apic_addr"](), total * APIC_STRUCT_SIZE)
+            .set(m["apics"]);
+        if(machine)
+        {
+            new Uint8Array(buffer, exports["get_pic_addr_master"](), PIC_STRUCT_SIZE)
+                .set(m["pic_master"]);
+            new Uint8Array(buffer, exports["get_pic_addr_slave"](), PIC_STRUCT_SIZE)
+                .set(m["pic_slave"]);
+            new Uint8Array(buffer, exports["get_ioapic_addr"](), IOAPIC_STRUCT_SIZE)
+                .set(m["ioapic"]);
+        }
+        exports["vcpu_finish_restore"](machine ? m["current"] : index);
+        const tsc = new Uint32Array(exports.memory.buffer, CURRENT_TSC_ADDR, 2);
+        exports["set_tsc"](tsc[0], tsc[1]);
+        exports["update_state_flags"]();
+        // the restored machine may be live again: allow a later full halt
+        // to fire the machine-dead event again on this instance
+        exports["rearm_cpu_event_halt"] && exports["rearm_cpu_event_halt"]();
+        if(vcpu)
+        {
+            // re-enter the per-vCPU role: full_clear_tlb (the finish_restore
+            // contract), control-cell clear (stale pre-restore IPIs/jit
+            // events must never leak into the restored machine), run-state
+            // and routing publication from the restored structs
+            exports["set_worker_vcpu"](index, total);
+        }
+        else
+        {
+            exports["full_clear_tlb"]();
+        }
+        // the restored guest RAM invalidates every compiled page
+        exports["jit_clear_cache_js"]();
+    }
+
+    // Shared W4 command cases of both loops. Returns true when the command
+    // was handled (the caller continues its loop; the next iteration sees
+    // PARKED_ACK and parks).
+    async function handle_state_command(command)
+    {
+        if(command === CTL_COMMAND_SAVE)
+        {
+            channel.post(collect_state());
+            command_ack(i32, ctl_base, index, CTL_COMMAND_SAVE, CTL_COMMAND_PARKED_ACK);
+            return true;
+        }
+        if(command === CTL_COMMAND_RESTORE)
+        {
+            // the restore payload was posted before the command word: it
+            // is already queued (or arrives as soon as this await yields
+            // to the event loop)
+            const m = await take_message();
+            if(!m || m["type"] !== "restore-state")
+            {
+                throw new Error("vcpu worker " + index +
+                    ": expected the restore-state payload, got " + (m && m["type"]));
+            }
+            apply_restore(m);
+            command_ack(i32, ctl_base, index, CTL_COMMAND_RESTORE, CTL_COMMAND_PARKED_ACK);
+            channel.post({ type: "restore-done", "index": index });
+            return true;
+        }
+        return false;
+    }
+
     // The Stage W2 machine loop (topology (c), design §9 W2 note): the
     // worker-side replacement of src/main.js's do_tick/yield cycle. Per
     // iteration: honor the command protocol, drain cross-thread work (JIT
@@ -413,11 +601,8 @@ async function run_worker(payload)
     // deadline main_loop returned. The doorbell is read BEFORE the drains
     // and main_loop, so any event posted while the machine ran turns the
     // wait into an immediate wake — no lost-wakeup window.
-    function machine_loop()
+    async function machine_loop()
     {
-        const machine_base = ctl_base + ctl_machine_offset(total);
-        const jit_ring = machine_base + CTL_MACHINE_JIT_DIRTY_RING;
-        const irq_ring = machine_base + CTL_MACHINE_DEV_IRQ_RING;
         channel.post({ type: "machine-ready" });
         for(;;)
         {
@@ -431,38 +616,35 @@ async function run_worker(payload)
             }
             if(command === CTL_COMMAND_PARK_REQ || command === CTL_COMMAND_PARKED_ACK)
             {
+                // drain the rings BEFORE parking: an undelivered device
+                // IRQ event (a virtio INTx raise, say) must reach this
+                // instance's chipset at the park boundary — a save taken
+                // while it sat in the ring would silently drop it from
+                // the image (design §7, W4 note); jit dirt drains first,
+                // the standing drain-before-IRQ order
+                drain_rings();
                 command_ack(i32, ctl_base, index, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK);
                 run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_PARKED);
                 doorbell_wait(i32, ctl_base, index, seen, PARK_TIMEOUT_MS);
+                continue;
+            }
+            if(await handle_state_command(command))
+            {
                 continue;
             }
             if(command === CTL_COMMAND_RESET)
             {
                 // machine reboot requested by the device host (guest reset
                 // port write serviced there): reset THIS instance's CPU and
-                // ack by restoring RUN
+                // ack by PARKING (Stage W4 barrier) — the host writes RUN
+                // once the whole machine has finished resetting
                 exports["reset_cpu"]();
-                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_RUN);
+                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_PARKED_ACK);
                 continue;
             }
             run_state_publish(i32, ctl_base, index, CTL_RUN_STATE_RUNNABLE);
             heartbeat_publish(i32, ctl_base, index);
-            for(let page; (page = ring_pop(i32, jit_ring, CTL_JIT_DIRTY_RING_CAP)) !== undefined;)
-            {
-                const start = (page >>> 0) * 0x1000;
-                exports["jit_dirty_cache"](start, start + 0x1000);
-            }
-            for(let event; (event = ring_pop(i32, irq_ring, CTL_DEV_IRQ_RING_CAP)) !== undefined;)
-            {
-                if(event & CTL_DEV_IRQ_RAISE_BIT)
-                {
-                    exports["device_raise_irq"](event & 0xFF);
-                }
-                else
-                {
-                    exports["device_lower_irq"](event & 0xFF);
-                }
-            }
+            drain_rings();
             const t = exports["main_loop"]();
             // deliver deferred codegen_finalize_finished callbacks (FIFO)
             // now that the module is reentrant again (outside main_loop)
@@ -487,7 +669,7 @@ async function run_worker(payload)
     // protocol and the doorbell park. The doorbell is read BEFORE
     // main_loop runs, so anything posted mid-slice turns the wait into an
     // immediate wake — no lost-wakeup window (the machine_loop invariant).
-    function vcpu_loop()
+    async function vcpu_loop()
     {
         channel.post({ type: "vcpu-ready", "index": index });
         for(;;)
@@ -506,14 +688,24 @@ async function run_worker(payload)
                 doorbell_wait(i32, ctl_base, index, seen, PARK_TIMEOUT_MS);
                 continue;
             }
+            if(await handle_state_command(command))
+            {
+                continue;
+            }
             if(command === CTL_COMMAND_RESET)
             {
-                // machine reboot: reset this instance and re-enter the
+                // Machine reboot: reset this instance and re-enter the
                 // per-vCPU role (which also clears this vCPU's control
-                // cells so pre-reset IPIs/jit events never leak)
+                // cells so pre-reset IPIs/jit events never leak), then ack
+                // by PARKING — the Stage W4 reset barrier. The host writes
+                // RUN only after EVERY worker has acked: a released BSP
+                // running SeaBIOS would otherwise broadcast its one-shot
+                // INIT+SIPI while a sibling's pending reset (whose cell
+                // clear wipes the ipi_special latch) hasn't run yet, and
+                // the AP would silently lose its startup IPI.
                 exports["reset_cpu"]();
                 exports["set_worker_vcpu"](index, total);
-                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_RUN);
+                command_ack(i32, ctl_base, index, CTL_COMMAND_RESET, CTL_COMMAND_PARKED_ACK);
                 continue;
             }
             heartbeat_publish(i32, ctl_base, index);

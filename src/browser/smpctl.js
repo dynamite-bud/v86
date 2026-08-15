@@ -27,6 +27,9 @@ export const CTL_DOORBELL = 0x000;
 export const CTL_RUN_STATE_PUB = 0x040;
 export const CTL_HEARTBEAT = 0x044;
 export const CTL_INSN_PUB = 0x048;
+// W4 exclusive execution (design §5 final form): 1 while the worker is
+// inside its guest-execution section; written only by the own worker
+export const CTL_EXCL_BUSY = 0x04C;
 export const CTL_COMMAND = 0x080;
 export const CTL_PIC_PENDING = 0x084;
 export const CTL_PENDING_IRR = 0x0C0;
@@ -65,7 +68,10 @@ export const CTL_MACHINE_BUSLOCK = 0x40;
 export const CTL_MACHINE_JIT_DIRTY_RING = 0x80;
 export const CTL_MACHINE_DEV_IRQ_RING = 0x1C0;
 export const CTL_MACHINE_HOST_DOORBELL = 0x600;
-export const CTL_MACHINE_SIZE = 0x640;
+// W4 exclusive execution: 0 = free, else owner vCPU index + 1 (CAS'd by
+// the requesting worker; purely peer-to-peer, no host involvement)
+export const CTL_MACHINE_EXCLUSIVE = 0x640;
+export const CTL_MACHINE_SIZE = 0x680;
 export const CTL_JIT_DIRTY_RING_CAP = 64;
 export const CTL_DEV_IRQ_RING_CAP = 256;
 
@@ -79,12 +85,16 @@ export const CTL_RING_SLOTS = 0x8;
 export const CTL_DEV_IRQ_RAISE_BIT = 1 << 8;
 
 // command[i] values (quiesce protocol, design §8; RESET is the W2
-// machine-reboot request, acked by the worker writing RUN back)
+// machine-reboot request, acked by the worker writing RUN back;
+// SAVE/RESTORE are the W4 state-assembly requests of design §7, only ever
+// posted to a PARKED_ACK'd worker and acked back to PARKED_ACK)
 export const CTL_COMMAND_RUN = 0;
 export const CTL_COMMAND_PARK_REQ = 1;
 export const CTL_COMMAND_PARKED_ACK = 2;
 export const CTL_COMMAND_TERMINATE = 3;
 export const CTL_COMMAND_RESET = 4;
+export const CTL_COMMAND_SAVE = 5;
+export const CTL_COMMAND_RESTORE = 6;
 
 // run_state_pub values: RunState (vcpu.rs) plus the published-only Halted
 export const CTL_RUN_STATE_RUNNABLE = 0;
@@ -187,8 +197,9 @@ export function ctl_base_for(memory_size)
 }
 
 // field ids of the get_smpctl_offset probe export (smpctl.rs); the
-// worker-skeleton test iterates over these to prove the two layouts agree
-export const SMPCTL_PROBE_FIELD_COUNT = 15;
+// worker-skeleton test and every worker's spawn-time layout check iterate
+// over these to prove the two layouts agree
+export const SMPCTL_PROBE_FIELD_COUNT = 21;
 
 /**
  * JS twin of the Rust get_smpctl_offset(field, i, n) probe export.
@@ -216,6 +227,12 @@ export function ctl_probe_offset(field, i, n)
         case 12: return ctl_machine_offset(n) + CTL_MACHINE_BUSLOCK;
         case 13: return ctl_machine_offset(n) + CTL_MACHINE_JIT_DIRTY_RING;
         case 14: return ctl_machine_offset(n) + CTL_MACHINE_DEV_IRQ_RING;
+        case 15: return vcpu + CTL_INSN_PUB;
+        case 16: return vcpu + CTL_PIC_PENDING;
+        case 17: return vcpu + CTL_JIT_INBOX;
+        case 18: return ctl_machine_offset(n) + CTL_MACHINE_HOST_DOORBELL;
+        case 19: return vcpu + CTL_EXCL_BUSY;
+        case 20: return ctl_machine_offset(n) + CTL_MACHINE_EXCLUSIVE;
         default: return -1 >>> 0;
     }
 }

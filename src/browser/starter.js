@@ -116,7 +116,7 @@ export function V86(options)
     dbg_assert(guest_memory_shared_option === "auto" || typeof guest_memory_shared_option === "boolean",
         "options.guest_memory_shared must be \"auto\", true or false");
 
-    // NOTE: Experimental (XWAH-9 Phase 4 Stages W2+W3): smp_workers
+    // NOTE: Experimental (XWAH-9 Phase 4 Stages W2-W4): smp_workers
     // requests worker execution (docs/smp-phase4-design.md §8/§9) over the
     // shared imported guest memory while this thread becomes the device
     // host — one worker per vCPU (topology (b), real parallelism) for
@@ -159,8 +159,6 @@ export function V86(options)
             (typeof globalThis.crossOriginIsolated === "undefined" ||
                 Boolean(globalThis.crossOriginIsolated));
         const failure =
-            options.initial_state ?
-                "initial_state restore lands with Stage W4 (state assembly across workers)" :
             options.multiboot ?
                 "multiboot pokes CPU registers from the main thread, which has no guest" :
             options.wasm_fn ?
@@ -1030,7 +1028,10 @@ V86.prototype.continue_init = async function(emulator, options)
 
         if(settings.initial_state)
         {
-            emulator.restore_state(settings.initial_state);
+            // worker-aware (Stage W4): under smp_workers the workers are
+            // still parked here (run() only fires on emulator-started), so
+            // the restore distributes the state before anything executes
+            await this.restore_state_internal(settings.initial_state);
 
             // The GC can't free settings, since it is referenced from
             // several closures. This isn't needed anymore, so we delete it
@@ -1409,12 +1410,41 @@ V86.prototype.remove_listener = function(event, listener)
 V86.prototype.restore_state = async function(state)
 {
     dbg_assert(arguments.length === 1);
-    if(this.smp_worker_host)
+    await this.restore_state_internal(state);
+};
+
+/**
+ * Worker-aware restore (XWAH-9 Phase 4 Stage W4, design §7). Without a
+ * worker host this is today's synchronous restore. Under smp_workers:
+ * quiesce all workers (each parks at its next slice boundary; a mid-RPC
+ * worker completes the RPC first — the device host keeps servicing),
+ * validate and restore the main instance exactly as today (fail-fast
+ * intact: a rejected image leaves the machine unharmed and resumed), then
+ * distribute each worker's state regions and resume.
+ * @param {ArrayBuffer} state
+ */
+V86.prototype.restore_state_internal = async function(state)
+{
+    const host = this.smp_worker_host;
+    if(!host)
     {
-        throw new Error("restore_state is not yet supported under smp_workers " +
-            "(state assembly across workers lands with Stage W4)");
+        this.v86.restore_state(state);
+        return;
     }
-    this.v86.restore_state(state);
+    const was_running = await host.quiesce();
+    try
+    {
+        this.v86.restore_state(state);
+    }
+    catch(e)
+    {
+        // the fail-fast validation rejected the image before any mutation:
+        // the quiesced machine is intact, resume it
+        host.resume(was_running);
+        throw e;
+    }
+    await host.distribute_restore();
+    host.resume(was_running);
 };
 
 /**
@@ -1425,12 +1455,26 @@ V86.prototype.restore_state = async function(state)
 V86.prototype.save_state = async function()
 {
     dbg_assert(arguments.length === 0);
-    if(this.smp_worker_host)
+    const host = this.smp_worker_host;
+    if(!host)
     {
-        throw new Error("save_state is not yet supported under smp_workers " +
-            "(state assembly across workers lands with Stage W4)");
+        return this.v86.save_state();
     }
-    return this.v86.save_state();
+    // XWAH-9 Phase 4 Stage W4 (design §7): quiesce, pull every worker's
+    // state regions into the main instance, run today's get_state
+    // unchanged (v7 extends untouched), resume. The capture runs inside
+    // assemble_save, synchronously after its final in-flight-interrupt
+    // drain — the device tick must not slip a vector into the control
+    // region between drain and capture.
+    const was_running = await host.quiesce();
+    try
+    {
+        return await host.assemble_save(() => this.v86.save_state());
+    }
+    finally
+    {
+        host.resume(was_running);
+    }
 };
 
 /**

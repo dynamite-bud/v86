@@ -31,10 +31,12 @@ import {
     ctl_base_for, ctl_machine_offset,
     CTL_MACHINE_JIT_DIRTY_RING, CTL_MACHINE_DEV_IRQ_RING,
     CTL_JIT_DIRTY_RING_CAP, CTL_DEV_IRQ_RING_CAP, CTL_DEV_IRQ_RAISE_BIT,
-    CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_TERMINATE, CTL_COMMAND_RESET,
-    ring_push, doorbell_post, command_write,
+    CTL_RING_HEAD, CTL_RING_TAIL,
+    CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK,
+    CTL_COMMAND_TERMINATE, CTL_COMMAND_RESET, CTL_COMMAND_SAVE, CTL_COMMAND_RESTORE,
+    ring_push, doorbell_post, command_write, command_read,
     mailbox_record_word, mailbox_service, mailbox_wait_for_request,
-    MAILBOX_STATE, MAILBOX_REQUEST,
+    MAILBOX_STATE, MAILBOX_REQUEST, MAILBOX_IDLE,
     MAILBOX_OP_OUT, MAILBOX_OP_IN, MAILBOX_OP_MMAP_READ, MAILBOX_OP_MMAP_WRITE,
     MAILBOX_OP_IN_REP, MAILBOX_OP_OUT_REP,
 } from "./smpctl.js";
@@ -46,6 +48,14 @@ const SERVICE_REARM_MS = 250;
 const SPAWN_TIMEOUT_MS = 60000;
 // deadline for the worker to acknowledge TERMINATE before a hard terminate
 const TERMINATE_TIMEOUT_MS = 2000;
+// deadline for quiesce acks and state-assembly round trips (design §7)
+const STATE_TIMEOUT_MS = 60000;
+// struct sizes mirrored from the Rust layouts, as in cpu.js get_state_*
+const APIC_STRUCT_SIZE = 4 * 46;
+const PIC_STRUCT_SIZE = 13;
+const IOAPIC_STRUCT_SIZE = 4 * 52;
+// current_tsc global (global_pointers.rs): inside the per-vCPU state block
+const CURRENT_TSC_ADDR = 960;
 
 /**
  * Environment adapter around a dedicated worker running vcpu_worker.js:
@@ -120,6 +130,12 @@ export function SMPWorkerHost(cpu, emulator_bus, guest_memory, total)
     this.fatal_error = null;
     this.service_done = null;
     this.cpu_exception_hook = function(n) {};
+    // resolvers of in-flight COMMAND_SAVE / COMMAND_RESTORE round trips
+    this.save_waiter = null;
+    this.restore_waiter = null;
+    // whether run() was last commanded (quiesce/resume bookkeeping)
+    this.commanded_running = false;
+    this.rebooting = false;
 }
 
 /**
@@ -213,6 +229,20 @@ SMPWorkerHost.prototype.handle_message = function(m, on_ready)
         case "terminated":
             this.terminated = true;
             break;
+        case "save-state":
+        {
+            const resolve = this.save_waiter;
+            this.save_waiter = null;
+            resolve && resolve(m);
+            break;
+        }
+        case "restore-done":
+        {
+            const resolve = this.restore_waiter;
+            this.restore_waiter = null;
+            resolve && resolve(m);
+            break;
+        }
         case "log":
             dbg_log(m["message"], LOG_CPU);
             break;
@@ -551,24 +581,254 @@ SMPWorkerHost.prototype.tick = function()
 
 SMPWorkerHost.prototype.run = function()
 {
+    this.commanded_running = true;
     command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_RUN);
     doorbell_post(this.i32, this.ctl_base, 0);
 };
 
 SMPWorkerHost.prototype.park = function()
 {
+    this.commanded_running = false;
     command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_PARK_REQ);
     doorbell_post(this.i32, this.ctl_base, 0);
 };
 
+// ---- Stage W4: quiesce, save/restore assembly, quiesced reboot ----
+// (docs/smp-phase4-design.md §7/§8; the topology-(c) shape: the single
+// machine worker owns vCPUs, LAPICs, PIC and IOAPIC, so state assembly
+// carries the whole chipset across, unlike the (b) host, whose main
+// instance is chipset-authoritative)
+
 /**
- * Machine reboot (guest reset port / V86.restart): the worker resets its
- * instance at the next loop boundary and acks by restoring RUN.
+ * @param {string} label
+ * @param {function(): boolean} predicate
+ * @return {!Promise}
  */
-SMPWorkerHost.prototype.post_reset = function()
+SMPWorkerHost.prototype.wait_for = async function(label, predicate)
 {
-    command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_RESET);
-    doorbell_post(this.i32, this.ctl_base, 0);
+    const deadline = Date.now() + STATE_TIMEOUT_MS;
+    while(!predicate())
+    {
+        if(this.fatal_error)
+        {
+            throw this.fatal_error;
+        }
+        if(Date.now() >= deadline)
+        {
+            throw new Error("smp quiesce: timeout waiting for " + label);
+        }
+        await new Promise(resolve => setTimeout(resolve, 2));
+    }
+};
+
+/**
+ * The §7 quiesce for the machine worker: PARK_REQ + doorbell, wait for
+ * the PARKED_ACK at the loop boundary and an idle mailbox. The service
+ * loop keeps running throughout, so a mid-RPC machine completes the RPC
+ * first — no deadlock.
+ * @return {!Promise<boolean>} whether the machine was commanded running
+ */
+SMPWorkerHost.prototype.quiesce = async function()
+{
+    const was_running = this.commanded_running;
+    this.park();
+    await this.wait_for("machine worker park ack", () =>
+        command_read(this.i32, this.ctl_base, 0) === CTL_COMMAND_PARKED_ACK);
+    await this.wait_for("machine worker mailbox idle", () =>
+        Atomics.load(this.i32, this.record + MAILBOX_STATE) === MAILBOX_IDLE);
+    return was_running;
+};
+
+/**
+ * @param {boolean} was_running
+ */
+SMPWorkerHost.prototype.resume = function(was_running)
+{
+    if(was_running)
+    {
+        this.run();
+    }
+};
+
+/**
+ * The §7 save-state assembly on the quiesced machine worker: the worker
+ * drains the shared rings into its chipset, syncs its live block, and
+ * posts its whole state — vCPU region, all LAPICs, PIC, IOAPIC (in (c)
+ * the worker owns the entire chipset); main writes everything into ITS
+ * OWN instance's regions, loads the current vCPU's block into its live
+ * block and rebases its TSC on the saved value, then runs `capture`
+ * (today's get_state-based save) SYNCHRONOUSLY. The SAVE round trip
+ * repeats while the rings are non-empty at message receipt: the device
+ * tick keeps running between the awaits of this function, and a
+ * raise/lower it posts after the worker's drain lives only in the ring —
+ * dropping it from the image would leave a device asserted with a chipset
+ * that never saw the line (a lost virtio INTx wedges the restored guest's
+ * 9p root, found empirically).
+ * @param {function(): T} capture
+ * @return {!Promise<T>}
+ * @template T
+ */
+SMPWorkerHost.prototype.assemble_save = async function(capture)
+{
+    let message;
+    for(;;)
+    {
+        message = await new Promise((resolve, reject) =>
+        {
+            const timeout = setTimeout(
+                () => reject(new Error("machine worker save-state timed out")),
+                STATE_TIMEOUT_MS);
+            if(timeout["unref"])
+            {
+                timeout["unref"]();
+            }
+            this.save_waiter = m =>
+            {
+                clearTimeout(timeout);
+                resolve(m);
+            };
+            command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_SAVE);
+            doorbell_post(this.i32, this.ctl_base, 0);
+        });
+        this.flush_backlogs();
+        const rings_empty =
+            Atomics.load(this.i32, this.jit_ring + CTL_RING_HEAD >> 2) ===
+                Atomics.load(this.i32, this.jit_ring + CTL_RING_TAIL >> 2) &&
+            Atomics.load(this.i32, this.irq_ring + CTL_RING_HEAD >> 2) ===
+                Atomics.load(this.i32, this.irq_ring + CTL_RING_TAIL >> 2) &&
+            this.jit_backlog.length === 0 && this.irq_backlog.length === 0;
+        if(rings_empty)
+        {
+            break;
+        }
+        // events landed after the worker's drain: wake it (the parked
+        // loop drains on every wake) and take a fresh snapshot
+    }
+
+    const cpu = this.cpu;
+    const buffer = cpu.wasm_memory.buffer;
+    new Uint8Array(buffer, cpu.get_vcpu_state_addr(), cpu.get_vcpu_state_size())
+        .set(message["vcpu_region"]);
+    new Uint8Array(buffer, cpu.get_apic_addr(), this.total * APIC_STRUCT_SIZE)
+        .set(message["apics"]);
+    new Uint8Array(buffer, cpu.get_pic_addr_master(), PIC_STRUCT_SIZE)
+        .set(message["pic_master"]);
+    new Uint8Array(buffer, cpu.get_pic_addr_slave(), PIC_STRUCT_SIZE)
+        .set(message["pic_slave"]);
+    new Uint8Array(buffer, cpu.get_ioapic_addr(), IOAPIC_STRUCT_SIZE)
+        .set(message["ioapic"]);
+    cpu.vcpu_finish_restore(message["current"]);
+    const tsc = new Uint32Array(buffer, CURRENT_TSC_ADDR, 2);
+    cpu.set_tsc(tsc[0], tsc[1]);
+    // capture in the same synchronous stretch as the final ring check
+    return capture();
+};
+
+/**
+ * Reset the shared rings while the worker is parked: events queued before
+ * the quiesce belong to the pre-restore machine and must not replay into
+ * restored chipset state. Safe here — the consumer is parked and the
+ * producer (this thread) clears its backlogs in the same breath.
+ */
+SMPWorkerHost.prototype.clear_rings = function()
+{
+    this.irq_backlog.length = 0;
+    this.jit_backlog.length = 0;
+    for(const ring of [this.jit_ring, this.irq_ring])
+    {
+        const head = Atomics.load(this.i32, ring + CTL_RING_HEAD >> 2);
+        Atomics.store(this.i32, ring + CTL_RING_TAIL >> 2, head);
+    }
+};
+
+/**
+ * The §7 restore distribution to the quiesced machine worker, after main
+ * validated and restored its own instance exactly as today: read the
+ * restored regions back from the main instance and send the worker its
+ * restore payload (whole machine, chipset included); the worker loads the
+ * blocks and acks.
+ * @return {!Promise}
+ */
+SMPWorkerHost.prototype.distribute_restore = async function()
+{
+    const cpu = this.cpu;
+    // covers cpus=1 images (no trailing vcpu slot: the live block is the
+    // only source); for cpus>1 this re-writes identical bytes
+    cpu.vcpu_prepare_save();
+    this.clear_rings();
+    const buffer = cpu.wasm_memory.buffer;
+    const payload = {
+        type: "restore-state",
+        "current": cpu.get_current_vcpu(),
+        "vcpu_region": new Uint8Array(
+            buffer, cpu.get_vcpu_state_addr(), cpu.get_vcpu_state_size()).slice(),
+        "apics": new Uint8Array(
+            buffer, cpu.get_apic_addr(), this.total * APIC_STRUCT_SIZE).slice(),
+        "pic_master": new Uint8Array(
+            buffer, cpu.get_pic_addr_master(), PIC_STRUCT_SIZE).slice(),
+        "pic_slave": new Uint8Array(
+            buffer, cpu.get_pic_addr_slave(), PIC_STRUCT_SIZE).slice(),
+        "ioapic": new Uint8Array(
+            buffer, cpu.get_ioapic_addr(), IOAPIC_STRUCT_SIZE).slice(),
+    };
+    await new Promise((resolve, reject) =>
+    {
+        const timeout = setTimeout(
+            () => reject(new Error("machine worker restore-done timed out")),
+            STATE_TIMEOUT_MS);
+        if(timeout["unref"])
+        {
+            timeout["unref"]();
+        }
+        this.restore_waiter = () =>
+        {
+            clearTimeout(timeout);
+            resolve();
+        };
+        // payload first, then the command: the worker consumes the queued
+        // message when it sees COMMAND_RESTORE
+        this.channel.post(payload);
+        command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_RESTORE);
+        doorbell_post(this.i32, this.ctl_base, 0);
+    });
+};
+
+/**
+ * Machine reboot (guest reset port / V86.restart), design §8: quiesce,
+ * main-side chipset/device reset, worker reset command (the worker resets
+ * its instance at the loop boundary and acks by parking; RUN releases it
+ * — the same barrier protocol as the (b) host, degenerate with one
+ * worker).
+ * Fire-and-forget from reboot_internal, which may run inside a mailbox
+ * dispatch: the quiesce must not be awaited there, or the triggering
+ * worker's pending RPC would deadlock it.
+ * @param {function()} reset_main
+ * @return {!Promise}
+ */
+SMPWorkerHost.prototype.reboot = async function(reset_main)
+{
+    if(this.rebooting || this.fatal_error)
+    {
+        return;
+    }
+    this.rebooting = true;
+    try
+    {
+        const was_running = await this.quiesce();
+        reset_main();
+        command_write(this.i32, this.ctl_base, 0, CTL_COMMAND_RESET);
+        doorbell_post(this.i32, this.ctl_base, 0);
+        await this.wait_for("machine worker reset ack", () =>
+            command_read(this.i32, this.ctl_base, 0) === CTL_COMMAND_PARKED_ACK);
+        if(was_running)
+        {
+            this.run();
+        }
+    }
+    finally
+    {
+        this.rebooting = false;
+    }
 };
 
 /**
