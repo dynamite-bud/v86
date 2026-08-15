@@ -243,127 +243,10 @@ let serial_text = "";
 let serial_render_pending = false;
 let guest_ready = false;
 let readiness_timer;
-let accelerated_scanout_ready = !accelerated || benchmark_enabled;
-let scanout_probe_pending = false;
-let next_scanout_probe_at = 0;
-
-async function probe_accelerated_scanout()
-{
-    const now = performance.now();
-    if(accelerated_scanout_ready || scanout_probe_pending || now < next_scanout_probe_at)
-    {
-        return;
-    }
-    next_scanout_probe_at = now + 1000;
-    const device = emulator.v86?.cpu?.devices?.virtio_gpu;
-    const scanout = device?.scanouts?.[0];
-    const resource = scanout && device.resources.get(scanout.resource_id);
-    if(!resource?.is_3d)
-    {
-        return;
-    }
-    scanout_probe_pending = true;
-    try
-    {
-        const bytes_per_pixel = resource.bytes_per_pixel;
-        const pixels = await device.backend.transferFromHost3D({
-            resource_id: scanout.resource_id,
-            x: scanout.x,
-            y: scanout.y,
-            width: scanout.width,
-            height: scanout.height,
-            stride: scanout.width * bytes_per_pixel,
-            offset: 0,
-            z: 0,
-            depth: 1,
-            level: 0,
-        });
-        let pixel_offset = -1;
-        for(let offset = 0; offset < pixels.length; offset += bytes_per_pixel)
-        {
-            if(pixels[offset] + pixels[offset + 1] + pixels[offset + 2] > 24)
-            {
-                pixel_offset = offset;
-                break;
-            }
-        }
-
-        const region_counts = [new Map(), new Map()];
-        for(let y = 16; y < scanout.height - 16; y += 16)
-        {
-            for(let x = 16; x < scanout.width - 16; x += 16)
-            {
-                const diagonal = x / scanout.width + y / scanout.height;
-                const region = diagonal < 0.85 ? 0 : diagonal > 1.15 ? 1 : -1;
-                if(region < 0)
-                {
-                    continue;
-                }
-                const offset = (y * scanout.width + x) * bytes_per_pixel;
-                const key = `${pixels[offset]},${pixels[offset + 1]},${pixels[offset + 2]}`;
-                region_counts[region].set(key, (region_counts[region].get(key) || 0) + 1);
-            }
-        }
-        const dominant_color = counts =>
-        {
-            let color = null;
-            let count = -1;
-            for(const [candidate, candidate_count] of counts)
-            {
-                if(candidate_count > count)
-                {
-                    color = candidate;
-                    count = candidate_count;
-                }
-            }
-            return {
-                color: color === null ? null : color.split(",").map(Number),
-                count,
-            };
-        };
-        const upper_left = dominant_color(region_counts[0]);
-        const lower_right = dominant_color(region_counts[1]);
-        const max_delta = upper_left.color && lower_right.color ?
-            Math.max(...upper_left.color.map((channel, index) =>
-                Math.abs(channel - lower_right.color[index]))) : Infinity;
-        const background_uniform = max_delta <= 2;
-
-        const sample_offset = Math.max(0, pixel_offset);
-        window.acceleratedScanoutPixel =
-            Array.from(pixels.slice(sample_offset, sample_offset + bytes_per_pixel));
-        window.acceleratedBackgroundProbe = {
-            upper_left,
-            lower_right,
-            max_delta,
-            uniform: background_uniform,
-        };
-        window.acceleratedScanoutProbeError = background_uniform ? null :
-            `Accelerated background split across fullscreen diagonal: ` +
-                `${upper_left.color} vs ${lower_right.color}`;
-        accelerated_scanout_ready = pixel_offset >= 0 && background_uniform;
-    }
-    catch(error)
-    {
-        window.acceleratedScanoutProbeError = String(error);
-    }
-    finally
-    {
-        scanout_probe_pending = false;
-    }
-    if(accelerated_scanout_ready)
-    {
-        update_readiness();
-    }
-}
 
 
 function update_readiness()
 {
-    if(document.body.dataset.result)
-    {
-        clearInterval(readiness_timer);
-        return;
-    }
     if(serial_text.includes("V86_APPLIANCE_READY=FAIL"))
     {
         status.textContent = "The appliance failed its guest readiness contract. Open the serial log.";
@@ -371,14 +254,13 @@ function update_readiness()
         clearInterval(readiness_timer);
         return;
     }
-    if(!guest_ready)
+    if(document.body.dataset.result)
     {
+        clearInterval(readiness_timer);
         return;
     }
-    if(accelerated && !accelerated_scanout_ready)
+    if(!guest_ready)
     {
-        status.textContent = "Guest ready; waiting for rendered WebGPU pixels…";
-        void probe_accelerated_scanout();
         return;
     }
     const canvas = document.querySelector(".v86-virtio-gpu-canvas");
