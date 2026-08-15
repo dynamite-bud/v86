@@ -195,9 +195,6 @@ async function run_scenario(browser_ws, base_url, renderer)
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
                 `renderer_stage: window.name || "", ` +
-                `scanout_pixel: window.acceleratedScanoutPixel || null, ` +
-                `background_probe: window.acceleratedBackgroundProbe || null, ` +
-                `scanout_probe_error: window.acceleratedScanoutProbeError || null, ` +
                 `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
                 `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
                 `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
@@ -230,11 +227,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                     `Renderer stage: ${state.renderer_stage}\n` +
                     `Renderer stages: ${renderer_stages.join(" -> ")}\n` +
                     `GPU state: ${JSON.stringify(state.gpu)}\n` +
-                    `Scanout probe: ${JSON.stringify({
-                        pixel: state.scanout_pixel,
-                        background: state.background_probe,
-                        error: state.scanout_probe_error,
-                    })}\n3D rejections:\n` +
+                    `3D rejections:\n` +
                     (state.gpu?.invalid_3d_errors || []).join("\n"));
                 error.terminal = true;
                 throw error;
@@ -242,6 +235,18 @@ async function run_scenario(browser_ws, base_url, renderer)
             return state.result === "pass";
         }, READY_TIMEOUT_MS, `${renderer} appliance readiness`);
         const ready_ms = performance.now() - started;
+        if(SCENARIO === "appliance" || SCENARIO === "accelerated")
+        {
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const stable = await evaluate(cdp,
+                `({ result: document.body?.dataset?.result || null, ` +
+                `serial: window.applianceSerialText || "" })`);
+            assert.equal(stable.result, "pass",
+                `Appliance session exited after readiness:\n${stable.serial.slice(-12000)}`);
+            assert.doesNotMatch(stable.serial, /V86_APPLIANCE_READY=FAIL/,
+                "Appliance reported a post-readiness failure");
+        }
+
 
         const state = await evaluate(cdp, `(() => {
             const serial = window.applianceSerialText || "";
@@ -262,6 +267,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 }
                 cursor_alpha = { transparent, opaque };
             }
+            const rect = canvas.getBoundingClientRect();
             return {
                 session_id: window.applianceSessionId,
                 serial,
@@ -271,9 +277,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
                 canvas_width: canvas.width,
                 canvas_height: canvas.height,
-                accelerated_scanout_pixel: window.acceleratedScanoutPixel || null,
-                accelerated_background_probe: window.acceleratedBackgroundProbe || null,
-                accelerated_scanout_probe_error: window.acceleratedScanoutProbeError || null,
+                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
                 cursor_alpha,
             };
         })()`);
@@ -614,6 +618,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
         }
         const accelerated = SCENARIO === "accelerated";
+        let accelerated_screenshot = null;
         assert.match(state.serial, accelerated ?
             /V86_APPLIANCE_RENDERER=.*webgpuvirt/i :
             /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
@@ -625,7 +630,6 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.canvas_visible, true);
         assert.equal(state.canvas_width, state.scanout.width);
         assert.equal(state.canvas_height, state.scanout.height);
-        assert.equal(state.accelerated_scanout_probe_error, null);
         if(accelerated)
         {
             const gpu = await evaluate(cdp, `(() => {
@@ -641,14 +645,12 @@ async function run_scenario(browser_ws, base_url, renderer)
             assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
                 "Accelerated Ghostty did not submit a standard VirGL command stream");
             assert.equal(gpu.last_invalid_3d_error, null);
-            assert.ok(state.accelerated_scanout_pixel,
-                "Accelerated readiness did not sample the rendered scanout");
-            assert.ok(state.accelerated_scanout_pixel.slice(0, 3)
-                .reduce((sum, channel) => sum + channel, 0) > 24,
-            `Accelerated Ghostty scanout is black: ${state.accelerated_scanout_pixel}`);
-            assert.equal(state.accelerated_background_probe?.uniform, true,
+            accelerated_screenshot = await sample_canvas_screenshot(cdp, state);
+            assert.ok(accelerated_screenshot.nonblack,
+                "Accelerated Ghostty scanout is black");
+            assert.equal(accelerated_screenshot.background.uniform, true,
                 `Accelerated Ghostty background is not uniform: ${
-                    JSON.stringify(state.accelerated_background_probe)}`);
+                    JSON.stringify(accelerated_screenshot.background)}`);
             assert.ok(state.cursor_alpha?.transparent > 0,
                 `Accelerated cursor has no transparent pixels: ${JSON.stringify(state.cursor_alpha)}`);
             assert.ok(state.cursor_alpha?.opaque > 0,
@@ -750,8 +752,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             login_unconfigured: true,
             keyboard_input: true,
             responsive_layout: true,
-            accelerated_scanout_pixel: state.accelerated_scanout_pixel,
-            accelerated_background_probe: state.accelerated_background_probe,
+            accelerated_scanout_pixel: accelerated_screenshot?.nonblack || null,
+            accelerated_background_probe: accelerated_screenshot?.background || null,
             cursor_alpha: state.cursor_alpha,
             fresh_reset,
         };
@@ -864,14 +866,72 @@ async function sample_canvas_screenshot(cdp, rendered)
         copy.height = image.naturalHeight;
         const context = copy.getContext("2d", { willReadFrequently: true });
         context.drawImage(image, 0, 0);
-        const center = Array.from(context.getImageData(
-            Math.floor(copy.width / 2), Math.floor(copy.height / 2), 1, 1).data);
+        const pixels = context.getImageData(0, 0, copy.width, copy.height).data;
+        let nonblack = null;
+        for(let offset = 0; offset < pixels.length; offset += 4)
+        {
+            if(pixels[offset] + pixels[offset + 1] + pixels[offset + 2] > 24)
+            {
+                nonblack = Array.from(pixels.slice(offset, offset + 4));
+                break;
+            }
+        }
+        const pixel_at = (x, y) => Array.from(
+            pixels.slice((y * copy.width + x) * 4, (y * copy.width + x) * 4 + 4));
+        const center = pixel_at(Math.floor(copy.width / 2), Math.floor(copy.height / 2));
         const corner_x = Math.min(copy.width - 1,
             Math.max(0, Math.floor(8 * copy.width / ${rendered.canvas_width})));
         const corner_y = Math.min(copy.height - 1,
             Math.max(0, Math.floor(8 * copy.height / ${rendered.canvas_height})));
-        const corner = Array.from(context.getImageData(corner_x, corner_y, 1, 1).data);
-        return { center, corner };
+        const corner = pixel_at(corner_x, corner_y);
+        const region_counts = [new Map(), new Map()];
+        for(let y = 16; y < copy.height - 16; y += 16)
+        {
+            for(let x = 16; x < copy.width - 16; x += 16)
+            {
+                const diagonal = x / copy.width + y / copy.height;
+                const region = diagonal < 0.85 ? 0 : diagonal > 1.15 ? 1 : -1;
+                if(region < 0)
+                {
+                    continue;
+                }
+                const color = pixel_at(x, y).slice(0, 3).join(",");
+                region_counts[region].set(color, (region_counts[region].get(color) || 0) + 1);
+            }
+        }
+        const dominant_color = counts =>
+        {
+            let color = null;
+            let count = -1;
+            for(const [candidate, candidate_count] of counts)
+            {
+                if(candidate_count > count)
+                {
+                    color = candidate;
+                    count = candidate_count;
+                }
+            }
+            return {
+                color: color === null ? null : color.split(",").map(Number),
+                count,
+            };
+        };
+        const upper_left = dominant_color(region_counts[0]);
+        const lower_right = dominant_color(region_counts[1]);
+        const max_delta = upper_left.color && lower_right.color ?
+            Math.max(...upper_left.color.map((channel, index) =>
+                Math.abs(channel - lower_right.color[index]))) : Infinity;
+        return {
+            center,
+            corner,
+            nonblack,
+            background: {
+                upper_left,
+                lower_right,
+                max_delta,
+                uniform: max_delta <= 2,
+            },
+        };
     })()`);
 }
 

@@ -298,8 +298,8 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
 |Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
-|Compressed flat files|279,268,573|295,224,610|-15,956,037 bytes|5.40%|
-|Filesystem JSON|581,408|695,517|-114,109 bytes|16.41%|
+|Compressed flat files|279,268,469|295,224,610|-15,956,141 bytes|5.40%|
+|Filesystem JSON|581,407|695,517|-114,110 bytes|16.41%|
 |Flat-file count|7,951|9,175|-1,224|13.34%|
 |Package closure|311|420|-109|25.95%|
 
@@ -314,10 +314,10 @@ The final reproducible XWAH-5 rebuild produced these SHA-256 values:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`af97b250b713641af4239336920bfa46eedaaa0f12a4835286481ef45535d75f`|
-|Filesystem JSON|`3c849f9c9f2f56a9d6be423d428fe08de3e35755b949ad1c94c7f14a6775761d`|
-|Flat-file manifest|`e3e033fa77e15a0420bdae7825c1095293ebb0225182772e2630302617dc0e29`|
-|Image contract|`d4a88655061432be6dd1395e99b1c5971d29628587bd7878dd98944fc45d29da`|
+|Rootfs tar|`a2e2b4edb37d4051ad5d295c3042caad5133fe9ee2a6139d17064915a3b107c5`|
+|Filesystem JSON|`9d7f1292fd82af9d522441d6a48c2b770a12022d5631ff0b4355de8276fb9ab0`|
+|Flat-file manifest|`c24f126186de0d9c1a024077628ec981af294b4842a04fd0d8f2d6d662bfae2f`|
+|Image contract|`e5846f10615b7eb41e382973f348614fca5356c6e68fcc1fd37a47e4c3c03c00`|
 
 ## Original OMP Gate
 
