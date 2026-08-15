@@ -18,6 +18,9 @@ Alpine OpenRC
   -> Mesa llvmpipe (default) or targeted webgpuvirt Gallium (opt-in)
   -> maximized undecorated Ghostty
   -> codex --sandbox workspace-write --ask-for-approval never
+       --disable code_mode --disable code_mode_only --disable code_mode_host
+       --enable shell_tool --enable unified_exec
+       -c code_mode.disable_in_process_fallback=false
 ```
 
 The default guest remains software-rendered and uses standard VirtIO GPU 2D scanout with either browser presentation backend. The opt-in `accelerated=1` mode is available only with the Rust/Wasm `wgpu` backend: Linux negotiates capset 7, the targeted `webgpuvirt` Gallium winsys emits the measured Ghostty command subset, and the standard 2D path still presents the completed scanout. The direct JavaScript backend remains 2D-only. This is not general OpenGL, Vulkan, virgl, or virgl2 support.
@@ -53,7 +56,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `xinitrc` | Openbox, selected renderer check, 1024x768 mode, Ghostty, and Codex process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
 | `ghostty-config` | Undecorated maximized window and the Codex launcher command. |
-| `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup. |
+| `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup with unavailable Code Mode disabled and supported direct shell/unified execution enabled. |
 
 Docker assembles and exports the root filesystem; it is not part of the browser runtime. `normalize_rootfs.py --preserve-owners` sorts archive members, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged home and workspace.
 
@@ -98,6 +101,9 @@ Do not commit generated images or Docker exports. An intentional input change re
 4. rebuild twice and confirm the generated image-contract checksum is stable;
 5. update the artifact sizes and checksums in `docs/gpu/ghostty-codex-appliance.md`;
 6. rerun both renderer scenarios and the shared VirtIO GPU regressions.
+7. retain the release-stripped custom Mesa build and package only its runtime
+   objects; default boots keep Alpine's system Gallium file, so a duplicate
+   system backup only inflates the exported rootfs.
 
 ## Launch on Port 8082
 
@@ -148,11 +154,17 @@ V86_APPLIANCE_OPENBOX=PASS
 V86_APPLIANCE_GHOSTTY_PROCESS=PASS
 V86_APPLIANCE_GHOSTTY_WINDOW=PASS
 V86_APPLIANCE_CODEX_PROCESS=PASS
+V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
 V86_APPLIANCE_READY=PASS
 V86_APPLIANCE_END
 ```
 
-The browser declares success only after both the final guest marker and a visible dedicated WebGPU canvas. Startup failure copies bounded Xorg, Openbox, Ghostty, and GL diagnostics to serial, emits a precise `V86_APPLIANCE_FAILURE=...`, and leaves the serial console available.
+The browser declares success only after both the final guest marker and a
+visible dedicated WebGPU canvas. Accelerated acceptance also requires matching
+dominant colors in opposite interior triangles and both transparent and opaque
+cursor pixels. Startup failure copies bounded Xorg, Openbox, Ghostty, and GL
+diagnostics to serial, emits a precise `V86_APPLIANCE_FAILURE=...`, and leaves
+the serial console available.
 
 ## Capset-7 Transport Gate
 
@@ -265,8 +277,10 @@ terminal hash and report zero invalid commands, backend errors, WebGPU
 validation errors, or long tasks.
 
 Both targets own port 8082. Acceptance requires a `webgpuvirt` renderer marker,
-Ghostty and Codex readiness, capset-7 `SUBMIT_3D` traffic, and zero invalid
-commands, backend errors, or browser WebGPU validation errors.
+Ghostty and Codex readiness, verified direct-tool process arguments, capset-7
+`SUBMIT_3D` traffic, a uniform off-diagonal background, a mixed-alpha cursor,
+and zero invalid commands, backend errors, browser console errors, or WebGPU
+validation errors.
 
 ## Verification
 
@@ -302,18 +316,34 @@ TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 
 The acceptance harness checks guest architecture and UID, pinned versions,
 hostname, relay behavior, CA-validated HTTPS when configured, the expected
-llvmpipe or `webgpuvirt` renderer, Xorg/Openbox/Ghostty/Codex processes, visible
-scanout, keyboard delivery, responsive layout, absence of desktop packages,
-writable workspace, and pristine fresh-session reset.
+llvmpipe or `webgpuvirt` renderer, Xorg/Openbox/Ghostty/Codex processes, the
+live Codex direct-tool flags, visible scanout, accelerated background
+uniformity, cursor alpha, keyboard delivery, responsive layout, absence of
+desktop packages, writable workspace, and pristine fresh-session reset.
 
 ## Observed Codex Limitations
 
-An authenticated run through the configured relay reached `gpt-5.6-sol` and returned a normal response. It also exposed two application-level limitations that are not hidden by the appliance readiness contract:
+An authenticated run through the configured relay reached `gpt-5.6-sol` and
+returned a normal response. It exposed two application-level limitations that
+are not hidden by the appliance readiness contract:
 
-- `codex_apps` MCP startup can time out during `tools/list` pagination. This is an external MCP startup failure; the observed normal Codex response still completed.
-- Code Mode fails closed because the pinned downstream release contains the main Codex archive and checksum but does not ship `/usr/local/bin/codex-code-mode-host`. The image must not fabricate a stub or silence this warning. A future i386 release must build, package, checksum, and test the real host before enabling that feature.
+- `codex_apps` MCP startup can time out during `tools/list` pagination. This is
+  an external MCP startup failure; the observed normal response still
+  completed.
+- The initial Code Mode request failed closed because the pinned i386 archive
+  does not ship `/usr/local/bin/codex-code-mode-host`.
 
-These warnings do not prove an emulator, VirtIO NIC, or Ghostty failure. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. Preserve the visible diagnostics until their underlying components are implemented.
+The appliance now selects Codex's supported direct path: it disables
+`code_mode`, `code_mode_only`, and `code_mode_host`, enables `shell_tool` and
+`unified_exec`, keeps in-process fallback enabled, and verifies those arguments
+from `/proc/<pid>/cmdline` before readiness. `codex features list` on the exact
+packaged i386 binary confirms the resulting feature states. This does not
+implement Code Mode or weaken the no-credential image contract.
+
+[XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3,
+tracks a real i686 Code Mode host and bounded MCP pagination diagnosis.
+Preserve visible diagnostics until their underlying components are
+implemented.
 
 ## Troubleshooting
 
@@ -324,6 +354,16 @@ These warnings do not prove an emulator, VirtIO NIC, or Ghostty failure. [XWAH-6
 - **Package closure differs:** reconcile the reviewed direct and transitive locks. Never remove the `cmp` check.
 - **Browser harness cannot bind port 8082:** stop the manual `python3 -m http.server` instance; the harness starts its own server.
 - **Cold boot appears stalled:** software rendering in the emulated i686 guest can take roughly 90–120 seconds. Wait for the serial contract instead of adding arbitrary browser sleeps.
+- **Diagonal split across the terminal background:** the renderer is using the
+  cell-background shader for the global background. Keep `BackgroundColor`
+  separate and run the accelerated acceptance's off-diagonal color probe.
+- **Black square around the pointer:** cursor conversion forced X-format alpha
+  opaque. Preserve the cursor resource's fourth byte; do not change the
+  scanout X-format rule.
+- **Codex says Code Mode is unavailable or cannot run commands:** inspect
+  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require
+  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`. Do not add a fake
+  `codex-code-mode-host`.
 
 ## Cage Sibling Handoff
 

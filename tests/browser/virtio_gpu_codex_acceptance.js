@@ -195,13 +195,16 @@ async function run_scenario(browser_ws, base_url, renderer)
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
                 `renderer_stage: window.name || "", ` +
+                `scanout_pixel: window.acceleratedScanoutPixel || null, ` +
+                `background_probe: window.acceleratedBackgroundProbe || null, ` +
+                `scanout_probe_error: window.acceleratedScanoutProbeError || null, ` +
                 `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
                 `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
                 `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
                 `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
                 `({ id, resources: Array.from(context.resources) })), ` +
                 `last_invalid_3d_error: device.backend?.last_invalid_3d_error || null, ` +
-                    `active_calls: device.backend?.active_calls ?? null, ` +
+                `active_calls: device.backend?.active_calls ?? null, ` +
                 `invalid_3d_errors: device.backend?.invalid_3d_errors || [], ` +
                 `last_transfer_from_host_3d: device.last_transfer_from_host_3d || null, ` +
                 `stats: device.get_performance_stats() } : null; })(), ` +
@@ -226,7 +229,12 @@ async function run_scenario(browser_ws, base_url, renderer)
                     `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
                     `Renderer stage: ${state.renderer_stage}\n` +
                     `Renderer stages: ${renderer_stages.join(" -> ")}\n` +
-                    `GPU state: ${JSON.stringify(state.gpu)}\n3D rejections:\n` +
+                    `GPU state: ${JSON.stringify(state.gpu)}\n` +
+                    `Scanout probe: ${JSON.stringify({
+                        pixel: state.scanout_pixel,
+                        background: state.background_probe,
+                        error: state.scanout_probe_error,
+                    })}\n3D rejections:\n` +
                     (state.gpu?.invalid_3d_errors || []).join("\n"));
                 error.terminal = true;
                 throw error;
@@ -239,6 +247,21 @@ async function run_scenario(browser_ws, base_url, renderer)
             const serial = window.applianceSerialText || "";
             const device = window.emulator.v86.cpu.devices.virtio_gpu;
             const canvas = device.backend.canvas;
+            const cursor_canvas = device.backend.cursor_canvas;
+            let cursor_alpha = null;
+            if(cursor_canvas && !cursor_canvas.hidden)
+            {
+                const data = cursor_canvas.getContext("2d")
+                    .getImageData(0, 0, cursor_canvas.width, cursor_canvas.height).data;
+                let transparent = 0;
+                let opaque = 0;
+                for(let offset = 3; offset < data.length; offset += 4)
+                {
+                    transparent += data[offset] === 0;
+                    opaque += data[offset] === 255;
+                }
+                cursor_alpha = { transparent, opaque };
+            }
             return {
                 session_id: window.applianceSessionId,
                 serial,
@@ -249,7 +272,9 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_width: canvas.width,
                 canvas_height: canvas.height,
                 accelerated_scanout_pixel: window.acceleratedScanoutPixel || null,
+                accelerated_background_probe: window.acceleratedBackgroundProbe || null,
                 accelerated_scanout_probe_error: window.acceleratedScanoutProbeError || null,
+                cursor_alpha,
             };
         })()`);
         if(SCENARIO === "mesa")
@@ -557,6 +582,8 @@ async function run_scenario(browser_ws, base_url, renderer)
                     benchmark.terminal_reference_sha256);
                 assert.equal(run.gpu.invalid_commands, 0);
                 assert.equal(run.gpu.backend_errors, 0);
+                assert.ok(run.gpu.presentations > 0);
+                assert.ok(run.gpu.presented_bytes > 0);
                 assert.deepEqual(run.gpu.invalid_responses, []);
                 assert.ok(run.gpu.fence_responses.every(response =>
                     response.response === 0x1100));
@@ -580,6 +607,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_GHOSTTY_PROCESS=PASS",
             "V86_APPLIANCE_GHOSTTY_WINDOW=PASS",
             "V86_APPLIANCE_CODEX_PROCESS=PASS",
+            "V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS",
             "V86_APPLIANCE_READY=PASS",
         ])
         {
@@ -618,6 +646,13 @@ async function run_scenario(browser_ws, base_url, renderer)
             assert.ok(state.accelerated_scanout_pixel.slice(0, 3)
                 .reduce((sum, channel) => sum + channel, 0) > 24,
             `Accelerated Ghostty scanout is black: ${state.accelerated_scanout_pixel}`);
+            assert.equal(state.accelerated_background_probe?.uniform, true,
+                `Accelerated Ghostty background is not uniform: ${
+                    JSON.stringify(state.accelerated_background_probe)}`);
+            assert.ok(state.cursor_alpha?.transparent > 0,
+                `Accelerated cursor has no transparent pixels: ${JSON.stringify(state.cursor_alpha)}`);
+            assert.ok(state.cursor_alpha?.opaque > 0,
+                `Accelerated cursor has no opaque pixels: ${JSON.stringify(state.cursor_alpha)}`);
         }
 
         if(RELAY_URL)
@@ -716,6 +751,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             keyboard_input: true,
             responsive_layout: true,
             accelerated_scanout_pixel: state.accelerated_scanout_pixel,
+            accelerated_background_probe: state.accelerated_background_probe,
+            cursor_alpha: state.cursor_alpha,
             fresh_reset,
         };
     }

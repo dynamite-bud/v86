@@ -43,6 +43,8 @@ Cross-language layouts are load-bearing. Keep JavaScript memory offsets synchron
 | `tests/` | API, device, boot, differential CPU, JIT paging, golden Wasm, Rust, manual, and benchmark suites. |
 | `examples/` | Browser and Node embedding/lifecycle examples. |
 | `tools/`, `bios/` | Image/filesystem utilities, linker wrapper, containers, and BIOS assets/build scripts. |
+| `tools/virtio-gpu-wgpu/` | Independent Rust/Wasm renderer, private capset versions 1-3, and bounded Mesa/Ghostty translation. |
+| `tools/docker/virtio-gpu-alpine-codex/` | Reproducible i386 Openbox/Ghostty/Codex appliance, Mesa artifacts, readiness contract, and benchmark fixture. |
 | `docs/` | Architecture, networking, 9p, profiling, and guest setup notes. |
 
 ## Development Commands
@@ -65,6 +67,10 @@ make pci-unit-test            # shared PCI INTx ownership and restore
 make virtio-gpu-unit-test     # protocol, state, and memory backend
 make virtio-gpu-test          # source build plus Alpine Linux probe
 make virtio-gpu-test-release  # release bundle plus Alpine Linux probe
+make virtio-gpu-3d-transport-test      # JavaScript transport plus Rust/Wasm decoder/renderer
+make virtio-gpu-webgpuvirt-triangle-test # capset-v3 resources and browser pixels
+make virtio-gpu-codex-accelerated-test # targeted Mesa/Ghostty browser contract on port 8082
+make virtio-gpu-codex-benchmark-accelerated # five-run accelerated terminal benchmark
 make jitpagingtests          # JIT/paging interaction
 make expect-tests            # generated-Wasm golden files
 make rust-test               # Cargo tests plus Wasm output verification
@@ -84,6 +90,16 @@ Integration images are external and ignored. Use the image download command in `
 - Treat compact typed arrays, integer coercions, bit masks, and positional state arrays as intentional performance patterns. Avoid allocations or object wrappers in hot CPU/device paths.
 - Do not edit ignored `src/rust/gen/{interpreter,jit,analyzer}*.rs` directly. Change `gen/x86_table.js` or the relevant `gen/generate_*.js` source and rebuild.
 - Rust is edition 2021 and follows `.rustfmt.toml`; some opcode symbols intentionally encode instruction form, for example `instr16_01_reg`.
+- Keep the global Ghostty background and per-cell background as separate Mesa
+  program classes. The former uses a synthetic full-screen triangle and no
+  storage buffer; conflating them creates a diagonal half-screen artifact.
+- Scanout X formats force opaque alpha, but cursor X formats preserve the
+  fourth guest byte as the cursor mask. A shared conversion rule creates an
+  opaque 64x64 pointer square.
+- The i386 Codex appliance has no Code Mode host. Its launcher disables
+  `code_mode`, `code_mode_only`, and `code_mode_host`, enables `shell_tool` and
+  `unified_exec`, and keeps direct fallback enabled. Preserve the live
+  `/proc/<pid>/cmdline` readiness check and never add a fake host executable.
 
 ## Important Files
 
@@ -101,6 +117,13 @@ Integration images are external and ignored. Use the image download command in `
 - `docs/gpu/README.md`: operational GPU contributor guide, code map, build/test matrix, invariants, debugging, and current 3D handoff.
 - `docs/virtio-gpu-webgpu.md`: canonical implemented 2D protocol, renderer/state/failure design, hard limits, and gated 3D/Mesa architecture.
 - `tools/docker/virtio-gpu-alpine/`: reproducible i386 guest inputs, package locks, probe, build pipeline, and reviewed checksum contract.
+- `docs/gpu/ghostty-codex-appliance.md`: Gate-0 architecture decision,
+  artifact and image contracts, measured rendering evidence, correction
+  history, and scoped performance follow-ups.
+- `tools/docker/virtio-gpu-alpine-codex/AGENTS.md`: fixture-specific image,
+  session, security, and acceptance rules.
+- `tools/virtio-gpu-wgpu/AGENTS.md`: renderer-specific wire, resource,
+  translation, and failure rules.
 
 ## Runtime/Tooling Preferences
 
@@ -123,3 +146,9 @@ JavaScript tests are standalone Node ESM scripts using `node:assert/strict` and 
 - `tests/unit/`: standalone protocol and PCI shared-interrupt tests.
 
 Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NAME="..."`; full tests also support `RUN_SLOW_TESTS`, `TIMEOUT_EXTRA_FACTOR`, `LOG_LEVEL`, `DISABLE_JIT`, and `TEST_ACPI`. Select the narrow suite for the changed contract, then match CI coverage for cross-cutting changes. CI runs device tests separately even though `make all-tests` omits them due to hangs. For browser GPU work, run `make virtio-gpu-unit-test`, serve the repository over localhost, and boot the reproducible Alpine guest with `virtio_gpu.backend: "webgpu-js"`; also run `make virtio-gpu-wgpu` and repeat with `"wgpu"` when shared adapter or protocol behavior changes. Inspect the WebGPU canvas and console validation errors. No coverage tool, threshold, or report is configured; correctness is enforced through targeted behavioral, differential, and golden assertions.
+
+The Codex browser harness owns port 8082. Stop any manual server before running
+it. For an accelerated renderer or cursor change, acceptance is incomplete
+until the browser reports a uniform off-diagonal background, mixed cursor
+alpha, `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`, and zero browser/WebGPU/backend
+errors.

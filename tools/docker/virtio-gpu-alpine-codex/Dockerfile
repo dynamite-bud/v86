@@ -58,6 +58,9 @@ RUN set -eux; \
     . /tmp/mesa-artifacts.lock; \
     test "$expected_commit" = "$MESA_COMMIT"; \
     test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT"
+RUN strip --strip-unneeded \
+    /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so \
+    /opt/webgpuvirt/usr/local/lib/dri/libdril_dri.so
 
 FROM scratch AS mesa-artifacts
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /lib/
@@ -74,8 +77,6 @@ RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
 COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-triangle
 COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
-RUN install -D -m 0755 /usr/lib/libgallium-26.1.6.so \
-    /opt/mesa-system/lib/libgallium-26.1.6.so
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /opt/webgpuvirt/lib/
 COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /opt/webgpuvirt/lib/dri
 RUN set -eux; \

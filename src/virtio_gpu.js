@@ -2282,19 +2282,18 @@ function is_uint32(value)
     return Number.isSafeInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
 }
 
+// Cursor X formats carry a guest alpha mask; unlike scanout X formats, do not force it opaque.
 function convert_cursor_pixels(source, format)
 {
     const result = new Uint8Array(source.byteLength);
     const bgra = format === VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM ||
         format === VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
-    const opaque = format === VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM ||
-        format === VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM;
     for(let offset = 0; offset < source.byteLength; offset += VIRTIO_GPU_BYTES_PER_PIXEL)
     {
         result[offset] = source[offset + (bgra ? 2 : 0)];
         result[offset + 1] = source[offset + 1];
         result[offset + 2] = source[offset + (bgra ? 0 : 2)];
-        result[offset + 3] = opaque ? 0xFF : source[offset + 3];
+        result[offset + 3] = source[offset + 3];
     }
     return result;
 }

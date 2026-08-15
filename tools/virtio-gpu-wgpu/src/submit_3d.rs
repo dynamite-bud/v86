@@ -340,11 +340,10 @@ fn contrasted_color(minimum: f32, foreground: vec4<f32>, background: vec4<f32>) 
 "#;
 const GHOSTTY_FULLSCREEN_VERTEX_SHADER_SOURCE: &str = r#"
 @vertex fn main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
-    let positions = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
+    let positions = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
     );
     return vec4<f32>(positions[vertex], 0.0, 1.0);
 }
@@ -1226,6 +1225,9 @@ fn classify_mesa_program(
     let vertex_inputs = mesa_declared_max(vertex_source, "IN");
     let fragment_samplers = mesa_declared_max(fragment_source, "SAMP");
     let fragment_buffers = mesa_declared_max(fragment_source, "BUFFER");
+    // The uniform-only global background must not share the storage-buffer-backed
+    // cell program: its three-vertex draw covers the full viewport only through
+    // the renderer-owned full-screen triangle.
     match (vertex_inputs, fragment_samplers, fragment_buffers) {
         (None, None, None) => Ok(MesaProgram::BackgroundColor),
         (None, None, Some(_)) => Ok(MesaProgram::CellBackground),

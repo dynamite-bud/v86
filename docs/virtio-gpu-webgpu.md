@@ -238,9 +238,11 @@ The shared browser adapter creates a presentation canvas in the configured
 screen container unless `virtio_gpu.canvas` supplies one. Both renderers enforce
 the host-memory budget, use already aligned source rows directly and repack only
 when WebGPU's 256-byte row alignment requires it, convert all four standard
-32-bit scanout formats, force opaque alpha
-for X formats, and present only on `RESOURCE_FLUSH`. Fenced commands wait for
-submitted GPU work; unfenced commands return after ordered submission.
+32-bit scanout formats, force opaque alpha for X scanout formats, and present
+only on `RESOURCE_FLUSH`. Cursor resources are different: the fourth guest byte
+is the cursor alpha mask for both A and X formats and must be preserved rather
+than forced opaque. Fenced commands wait for submitted GPU work; unfenced
+commands return after ordered submission.
 
 Reset and fatal renderer failures hide the WebGPU canvas and restore the prior
 VGA text/graphics state. A guest-requested scanout disable after WebGPU takeover
@@ -415,6 +417,15 @@ bounded application integration, not general virgl or GLSL support. With
 acceleration off, another backend selected, or preflight unavailable,
 `num_capsets` remains zero and the existing standard 2D implementation is
 unchanged.
+
+The measured shader mapping deliberately separates a whole-window
+`BackgroundColor` program from storage-buffer-driven `CellBackground` draws.
+The whole-window program owns a synthetic full-screen triangle and a uniform
+color; sharing the cell shader would shade only one diagonal half of the
+scanout. Cell backgrounds, glyphs, images, solid rectangles, and probe draws
+retain distinct declaration-based classifications. Any new observed shader
+shape is rejected until its resources, output, and malformed cases are
+implemented explicitly.
 
 Not implemented: depth/stencil, general shader translation, general virgl
 compatibility, Vulkan, resource blobs, UUIDs, host mappings, or 3D on the
@@ -817,7 +828,9 @@ The versioned transport and renderer are covered by:
   bindings, indexed draw, matching reference pixels, fences, device loss, and
   zero leaked objects;
 - `make virtio-gpu-codex-accelerated-test` for the pinned Mesa `webgpuvirt`
-  build and Ghostty OpenGL startup through the measured command subset;
+  build and Ghostty OpenGL startup through the measured command subset,
+  matching off-diagonal background samples, mixed transparent/opaque cursor
+  alpha, and zero browser/WebGPU/backend errors;
 - `make virtio-gpu-codex-benchmark-accelerated` for the same offline terminal
   workload and raw-run schema as the committed llvmpipe baseline.
 

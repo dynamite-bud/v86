@@ -27,6 +27,9 @@ Implemented and tested today:
   virgl/Gallium build. Its explicit `accelerated=1` mode runs the measured
   Ghostty OpenGL call set through capset 7 and the Rust/Wasm renderer while
   retaining the standard 2D scanout for presentation.
+- Accelerated appliance acceptance samples both diagonal halves of the
+  terminal background, requires a transparent hardware-cursor mask, and checks
+  the live Codex process for the direct-tool launcher flags.
 
 Not implemented:
 
@@ -77,6 +80,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | KMS guest | `tools/docker/virtio-gpu-alpine/` | Minimal reproducible Linux DRM/KMS image and probe |
 | Desktop guest | `tools/docker/virtio-gpu-alpine-desktop/` | Reproducible XFCE Xorg/Wayland image and readiness contract |
 | Ghostty appliance | `tools/docker/virtio-gpu-alpine-codex/` | Reproducible llvmpipe default plus opt-in checksum-locked Mesa `webgpuvirt` acceleration |
+| Appliance architecture and evidence | `docs/gpu/ghostty-codex-appliance.md` | Gate-0 decision, image/runtime contract, benchmark evidence, correction history, and follow-up map |
 
 ## Prerequisites
 
@@ -161,6 +165,15 @@ Review the generated contract against the committed contract. Never commit the g
 - Reset/device loss must invalidate stale completions, release host objects, and preserve a working 2D/VGA recovery path.
 - Malformed input returns a deterministic VirtIO GPU error. It must not assert JavaScript, panic Rust, partially submit GPU work, leak an object, or retain a descriptor indefinitely.
 - Keep the direct JavaScript backend 2D-only until it independently meets the same 3D validation contract as Rust/Wasm.
+- The global Ghostty background is a uniform-only full-screen draw. Do not
+  route it through the storage-buffer-backed cell-background shader.
+- Preserve the fourth byte of cursor resource pixels as alpha even for XRGB or
+  XBGR cursor formats. The scanout path may force X-format alpha opaque; the
+  cursor path may not.
+- The i386 Codex archive has no Code Mode host. The appliance must explicitly
+  disable `code_mode`, `code_mode_only`, and `code_mode_host`, enable
+  `shell_tool` and `unified_exec`, and keep direct fallback enabled. Do not
+  replace the missing host with a stub.
 
 ## Debugging
 
@@ -170,6 +183,15 @@ Review the generated contract against the committed contract. Never commit the g
 - A cold desktop boot produces many same-origin `.bin.zst` requests while the lazy 9p rootfs loads libraries, fonts, themes, icons, and applications. This is local guest filesystem traffic, not external networking.
 - If the page remains on VGA, confirm `/dev/dri/card0`, the serial readiness markers, and a live scanout.
 - If WebGPU fails, inspect browser console errors and `backend.fatal_error`; do not mask device loss with retries or sleeps.
+- A diagonal terminal background means `BackgroundColor` was incorrectly
+  translated as a cell draw. Run the accelerated browser gate; it compares
+  dominant colors in opposite interior triangles.
+- A black 64x64 pointer square means cursor alpha was forced opaque. Inspect the
+  cursor overlay independently from the scanout canvas.
+- If browser acceptance times out at resized WebGPU presentation, rerun only the
+  reported matrix entry with `V86_GPU_BROWSER_MATRIX=<renderer>:<desktop>`.
+  A passing isolated run indicates host scheduling noise; a repeated timeout is
+  a resize/flush regression. Do not hide it by increasing the timeout.
 
 ## Documentation Map
 
@@ -181,5 +203,11 @@ Review the generated contract against the committed contract. Never commit the g
 - [XWAH-5](https://github.com/dynamite-bud/v86/issues/5): targeted Mesa `webgpuvirt` and accelerated Ghostty implementation and performance gates.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
+- [XWAH-23](https://github.com/dynamite-bud/v86/issues/23): fullscreen Ghostty direct-scanout eligibility.
+- [XWAH-24](https://github.com/dynamite-bud/v86/issues/24): resident BO dirty-range upload batching.
+- [XWAH-25](https://github.com/dynamite-bud/v86/issues/25): eliminate avoidable GPU readbacks.
+- [XWAH-26](https://github.com/dynamite-bud/v86/issues/26): bounded renderer-object caching.
+- [XWAH-27](https://github.com/dynamite-bud/v86/issues/27): frame-fence and queue-notification batching.
+- [XWAH-28](https://github.com/dynamite-bud/v86/issues/28): separate host-rendered terminal transport investigation.
 
 Historical root-level Codex task/plan files were removed after their implemented 2D material and surviving 3D decisions were consolidated into the canonical architecture and this contributor guide.

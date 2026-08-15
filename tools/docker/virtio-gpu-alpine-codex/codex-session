@@ -5,5 +5,35 @@ if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
 fi
 
 cd "$HOME/workspace" || exit 1
-printf '%s\n' "$$" > /tmp/v86-codex.pid
-exec /usr/local/bin/codex --sandbox workspace-write --ask-for-approval never
+# The i386 release has no Code Mode host; select Codex's supported direct tools.
+/usr/local/bin/codex \
+    --sandbox workspace-write \
+    --ask-for-approval never \
+    --disable code_mode \
+    --disable code_mode_only \
+    --disable code_mode_host \
+    --enable shell_tool \
+    --enable unified_exec \
+    -c code_mode.disable_in_process_fallback=false &
+codex_pid=$!
+trap 'kill "$codex_pid" 2>/dev/null' HUP INT TERM
+
+# Publish readiness only after the child has replaced itself with Codex. Otherwise
+# appliance-session can inspect this wrapper's argv and report a false failure.
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    if [ "$(readlink "/proc/$codex_pid/exe" 2>/dev/null)" = /usr/local/bin/codex ]; then
+        printf '%s\n' "$codex_pid" > /tmp/v86-codex.pid.tmp
+        mv /tmp/v86-codex.pid.tmp /tmp/v86-codex.pid
+        wait "$codex_pid"
+        exit $?
+    fi
+    kill -0 "$codex_pid" 2>/dev/null || break
+    sleep 0.05
+    attempt=$((attempt + 1))
+done
+
+kill "$codex_pid" 2>/dev/null
+wait "$codex_pid" 2>/dev/null
+printf '%s\n' "Codex failed to start" >&2
+exit 1

@@ -1192,7 +1192,7 @@ class Test3DBackend extends MemoryGpuBackend
     cursor_bytes.set([1, 2, 3, 4, 5, 6, 7, 8]);
     cpu.mem8.set(cursor_bytes, 0x1000);
     assert.equal(await execute(device, make_create(9,
-        VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, 64, 64)), VIRTIO_GPU_RESP_OK_NODATA);
+        VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, 64, 64)), VIRTIO_GPU_RESP_OK_NODATA);
     assert.equal(await execute(device, make_attach(9,
         [{ addr: 0x1000, length: cursor_bytes.byteLength }])), VIRTIO_GPU_RESP_OK_NODATA);
 
@@ -1236,9 +1236,9 @@ class Test3DBackend extends MemoryGpuBackend
     const { cpu, device } = await make_device();
     const cases = [
         [VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, [3, 2, 1, 4]],
-        [VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, [3, 2, 1, 255]],
+        [VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, [3, 2, 1, 4]],
         [VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM, [1, 2, 3, 4]],
-        [VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM, [1, 2, 3, 255]],
+        [VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM, [1, 2, 3, 4]],
     ];
     for(let index = 0; index < cases.length; index++)
     {

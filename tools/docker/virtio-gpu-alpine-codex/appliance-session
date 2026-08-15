@@ -158,7 +158,17 @@ while [ "$attempt" -lt 900 ]; do
         if $benchmark_mode; then
             printf 'V86_APPLIANCE_BENCHMARK_PROCESS=PASS\n' >&3
         else
+            IFS= read -r codex_pid < /tmp/v86-codex.pid
+            # Read NUL-delimited argv as lines and verify the live launcher contract.
+            codex_arguments=$(tr '\0' '\n' < "/proc/$codex_pid/cmdline")
+            for argument in --disable code_mode code_mode_only code_mode_host \
+                --enable shell_tool unified_exec -c code_mode.disable_in_process_fallback=false; do
+                if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
+                    fail codex-exec-flags
+                fi
+            done
             printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
         fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"
