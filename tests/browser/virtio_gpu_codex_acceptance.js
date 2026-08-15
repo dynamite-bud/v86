@@ -613,6 +613,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_CODEX_PROCESS=PASS",
             "V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS",
             "V86_APPLIANCE_NO_CODE_MODE_HOST=PASS",
+            "V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS",
             "V86_APPLIANCE_READY=PASS",
         ])
         {

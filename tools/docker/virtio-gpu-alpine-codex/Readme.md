@@ -30,7 +30,7 @@ The default guest remains software-rendered and uses standard VirtIO GPU 2D scan
 v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, OMP, Bun, or Linux artifacts requested by the original XWAH-3 contract. The implemented appliance therefore pins reviewed downstream i386 ports:
 
 - Ghostty [`v1.3.1-i386.1`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386.1), built for Alpine `x86-linux-musl`;
-- Codex [`rust-v0.147.0-i386.2`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.2), built for `i686-unknown-linux-musl`.
+- Codex [`rust-v0.147.0-i386.3`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.3), built for `i686-unknown-linux-musl`.
 
 `artifacts.lock` owns their release URLs and SHA-256 values. The image build downloads only those URLs, verifies both archives before extraction, runs both version commands, and removes download and build residue.
 
@@ -135,7 +135,7 @@ No model credential or `/home/codex/.codex/auth.json` is baked into the image. P
 
 The root filesystem is writable only for the current emulator session. **Reset fresh session** reloads the page and discards authentication, workspace changes, and all other guest mutations. Persistence is intentionally out of scope for this reference fixture.
 
-The i386 Codex port cannot apply Codex's normal Linux network seccomp filter because the filter's compiler dependency does not support 32-bit x86. The `workspace-write` filesystem sandbox remains enabled, but model commands lack that extra network isolation. Run this appliance only inside an external isolation boundary.
+The i386 Codex port cannot apply Codex's normal Linux network seccomp filter because the filter's compiler dependency does not support 32-bit x86. The port deliberately skips that extra filter instead of aborting direct commands. The `workspace-write` Bubblewrap filesystem sandbox remains enabled, but model commands lack the additional network isolation. Run this appliance only inside an external isolation boundary.
 
 ## Readiness Contract
 
@@ -156,6 +156,7 @@ V86_APPLIANCE_GHOSTTY_WINDOW=PASS
 V86_APPLIANCE_CODEX_PROCESS=PASS
 V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
 V86_APPLIANCE_NO_CODE_MODE_HOST=PASS
+V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS
 V86_APPLIANCE_READY=PASS
 V86_APPLIANCE_END
 ```
@@ -337,7 +338,10 @@ appliance disables `code_mode`, `code_mode_only`, and `code_mode_host`, enables
 the stable `shell_tool` and `unified_exec` features, keeps fallback enabled,
 and verifies those arguments from `/proc/<pid>/cmdline` before readiness.
 `codex features list` on the packaged i386 binary confirms the resulting
-feature states.
+feature states. Readiness also executes `/bin/sh` through
+`codex sandbox --` and requires `V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS`,
+proving that the missing i386 seccomp backend no longer aborts direct
+commands.
 
 This does not implement Code Mode, package V8, or weaken the no-credential
 image contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6)
@@ -359,10 +363,12 @@ retains the bounded MCP pagination diagnosis.
   opaque. Preserve the cursor resource's fourth byte; do not change the
   scanout X-format rule.
 - **Codex cannot run commands:** inspect
-  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require both
-  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS` and
-  `V86_APPLIANCE_NO_CODE_MODE_HOST=PASS`. Do not add a fake or V8-backed
-  `codex-code-mode-host`; this fixture uses direct tools.
+  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require
+  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`,
+  `V86_APPLIANCE_NO_CODE_MODE_HOST=PASS`, and
+  `V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS`. The image provides `/bin/sh`, not
+  Bash. Do not add a fake or V8-backed `codex-code-mode-host`; this fixture
+  uses direct tools.
 
 ## Cage Sibling Handoff
 

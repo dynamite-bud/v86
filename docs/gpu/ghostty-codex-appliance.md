@@ -132,6 +132,9 @@ The acceptance harness verifies:
 - live Codex process arguments that disable Code Mode and its host, enable
   direct shell/unified execution, and retain in-process fallback;
 - verified absence of the external Code Mode host and its V8 runtime;
+- a direct `/bin/sh` command executed through `codex sandbox --`, proving
+  Bubblewrap enforces the filesystem sandbox while the
+  unavailable i386 network seccomp backend is bypassed without aborting;
 - a uniform accelerated terminal background and a non-rectangular,
   alpha-masked hardware cursor.
 
@@ -299,7 +302,7 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
 |Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
-|Compressed flat files|279,267,718|295,224,610|-15,956,892 bytes|5.40%|
+|Compressed flat files|279,267,802|295,224,610|-15,956,808 bytes|5.40%|
 |Filesystem JSON|581,407|695,517|-114,110 bytes|16.41%|
 |Flat-file count|7,951|9,175|-1,224|13.34%|
 |Package closure|311|420|-109|25.95%|
@@ -315,10 +318,10 @@ The final reproducible XWAH-5 rebuild produced these SHA-256 values:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`337f9d120b9d730bae99165969d73d03cf4fe7663f325e3f6043407c6322d007`|
-|Filesystem JSON|`20e05525ba3466c213ec845bc42fd3ee7532def7dc5daacffc61a575e0fc1d82`|
-|Flat-file manifest|`df1f46e93fdb106bcec88ee08c2946bd2217ba6e33fc90d9b98da928d8667665`|
-|Image contract|`00301cb320d6da283b933424430997f9c82f834436909e0a5c1371405c87b545`|
+|Rootfs tar|`34da3e74563d830c8d1befc918ecc0a10e053025dc51ac9f4b0393b51faecd3c`|
+|Filesystem JSON|`06b1075e00a9a7a7cfb98a30676858d43eef2b6f3cf3842df96593baadce372c`|
+|Flat-file manifest|`4aca0a2a8bdec0190a8ae1c05445ef7965c2f2bafcd8e0e8570acfaa1ad97122`|
+|Image contract|`ad0d74e91903fb6410a3d54aaef2a5cb7a1e3260d4f391bf17fe759ba76ae7d5`|
 
 ## Original OMP Gate
 
