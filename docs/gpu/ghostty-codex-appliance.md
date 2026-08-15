@@ -8,10 +8,10 @@ Status: **IMPLEMENTED**
 
 The appliance remains Alpine Linux 3.24.1 on `linux/386`, matching v86's supported guest architecture. It uses two downstream artifacts:
 
-|Application|Pinned release|Compressed size|Installed executable|SHA-256|
-|---|---:|---:|---:|---|
-|Ghostty|[`v1.3.1-i386`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386)|16,931,023 bytes|22,209,744 bytes|`a52ecaef55ea16c45d1ea154ca93674f0859a597280480303e96346110b0c64c`|
-|Codex|[`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1)|33,010,567 bytes|70,069,640 bytes|`e26bae168d40474d976eb272c48ef86b8acd86bfb3028e9e83060d8f18855438`|
+|Application|Pinned release|Archive size|Archive SHA-256|Installed executable size|Installed executable SHA-256|
+|---|---:|---:|---|---:|---|
+|Ghostty|[`v1.3.1-i386.1`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386.1)|16,930,924 bytes|`73391e2ea610e76d419b85634943877e98dcf1e0d412c03d2f0fc5662556114e`|22,209,904 bytes|`99930b1e0f6c13d318d13ed2e29bb8045cd440264d5e2b34900a2fe8d6dafa8a`|
+|Codex|[`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1)|33,010,567 bytes|`e26bae168d40474d976eb272c48ef86b8acd86bfb3028e9e83060d8f18855438`|70,069,640 bytes|`ddcf34dba92dcd4c6549325011ccb2b7e1832a98c91467e822034eed2120f9e4`|
 
 Ghostty was cross-compiled for `x86-linux-musl` against an Alpine x86 sysroot. The release workflow and complete patch stack are on the Ghostty fork's `i386` branch. Its release artifact starts under Alpine `linux/386` and reports Ghostty 1.3.1.
 
@@ -30,9 +30,9 @@ Alpine OpenRC
   -> unprivileged codex user on tty1
   -> Xorg modesetting driver at 1024x768x24
   -> Openbox
-  -> Mesa llvmpipe OpenGL
+  -> Mesa llvmpipe (default) or targeted webgpuvirt (explicit acceleration)
   -> maximized undecorated Ghostty
-  -> Codex
+  -> Codex with direct shell/unified-exec tools
 ```
 
 The image pins:
@@ -96,11 +96,17 @@ The tty1 session writes bounded evidence to `ttyS0`:
 - Ghostty and Codex versions;
 - `/dev/dri/card0`;
 - `NETWORK=PASS` or `NETWORK=UNCONFIGURED`;
-- the Mesa renderer, which must contain `llvmpipe`;
-- live Openbox, Ghostty, and Codex processes;
+- the selected Mesa renderer, `llvmpipe` by default or `webgpuvirt` when
+  acceleration is explicit;
+- live Openbox, Ghostty, and Codex processes plus the checked direct-tool
+  launcher arguments;
 - final `V86_APPLIANCE_READY=PASS` or a precise failure reason.
 
-The page declares success only after the guest PASS marker and a visible WebGPU scanout. Xorg, Openbox, Ghostty, and GL logs are copied to serial on startup failure.
+The page declares success only after the guest PASS marker and a visible WebGPU
+scanout. Accelerated acceptance additionally compares dominant background
+colors on both sides of the screen diagonal and requires both transparent and
+opaque cursor pixels. Xorg, Openbox, Ghostty, and GL logs are copied to serial
+on startup failure.
 
 ## Browser Acceptance
 
@@ -123,17 +129,157 @@ The acceptance harness verifies:
 - unconfigured Codex login with no baked home credential;
 - browser keyboard delivery and responsive narrow layout;
 - a writable workspace and pristine fresh-session reset on the direct JavaScript backend.
+- the live Codex process arguments that disable unavailable Code Mode paths,
+  enable direct shell/unified execution, and retain in-process fallback;
+- a uniform accelerated terminal background and a non-rectangular,
+  alpha-masked hardware cursor.
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
 
-## Observed Authenticated Run
+## XWAH-5 Rendering Benchmark
 
-An authenticated run through a configured relay reached `gpt-5.6-sol` and returned a normal Codex response from `/home/codex/workspace`. It also exposed two application-level limitations:
+The opt-in benchmark launches a fixed ANSI stream inside the same maximized
+Ghostty window, performs two warmups followed by five keyboard-triggered
+measured runs, and preserves the normal 2D/llvmpipe appliance as the control.
+The browser records graphical readiness, aggregate non-idle guest CPU ticks,
+keystroke-to-first-present latency, text/scroll throughput, VirtIO GPU counters,
+frame cadence, timer delay, long tasks, WebGPU diagnostics, and a full-canvas
+SHA-256 reference.
 
-- `codex_apps` MCP startup timed out during `tools/list` pagination after 30 seconds. The normal model response still completed.
-- Code Mode failed closed because `/usr/local/bin/codex-code-mode-host` is absent. The pinned downstream release publishes only the main Codex archive and its checksum; the appliance does not fabricate a host executable or suppress the warning.
+The same Apple M4/Chrome 151 host recorded both committed results:
 
-These are not appliance readiness successes and are not hidden by the serial contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3, tracks the real i686 Code Mode host and bounded MCP pagination diagnosis. A future i386 Codex release must build, package, checksum, and exercise the real Code Mode host before that feature is enabled. External MCP readiness needs its own bounded acceptance scenario rather than a longer appliance boot timeout.
+- `tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json`
+- `tests/benchmark/baselines/ghostty-webgpuvirt-wgpu-apple-m4.json`
+
+|Metric|llvmpipe|`webgpuvirt`|Change|
+|---|---:|---:|---:|
+|Graphical readiness|91,743 ms|42,769.9 ms|53.4% lower|
+|Guest CPU p50 / p95|1,900 / 3,250 ms|330 / 360 ms|82.6% / 88.9% lower|
+|Keystroke-to-first-present p50 / p95|1,478 / 1,877.4 ms|238.1 / 285.3 ms|83.9% / 84.8% lower|
+|Scroll throughput p50|362.65 lines/s|1,633.15 lines/s|350.3% higher|
+|Text throughput p50|0.03768 MiB/s|0.16969 MiB/s|350.3% higher|
+|Browser long tasks|0|0|no regression|
+|Invalid commands / backend errors|0 / 0|0 / 0|no regression|
+|Terminal reference SHA-256|`bbd05cf6097ac9b1f89ea29d2542c1b7b67ee46848393895f5a9e43fa1f621e5`|same|identical|
+
+The accelerated run clears XWAH-5's performance gate on both primary metrics:
+guest CPU p50 falls by 82.6% and keystroke-to-present p95 falls by 84.8%.
+Every accelerated measured run retained the reference hash, completed all
+fences, and reported zero invalid commands, backend errors, WebGPU validation
+errors, and long tasks. The path remains explicit and off by default; this
+result does not advertise general OpenGL, virgl, or Vulkan compatibility.
+
+### Visual correctness corrections
+
+The first accelerated interactive capture exposed two translation bugs that
+the original single-pixel readiness gate could not detect:
+
+- A diagonal two-tone terminal background came from translating Ghostty's
+  uniform whole-window background as a storage-buffer-driven cell-background
+  draw. The renderer now classifies those programs separately and renders the
+  former with a synthetic full-screen triangle.
+- A black 64x64 pointer square came from forcing X-format cursor alpha opaque.
+  Scanout X formats remain opaque, but cursor conversion now preserves the
+  fourth guest byte as the cursor mask.
+
+The accelerated browser gate samples 2,042 interior points in opposing
+triangular regions. The corrected run reported the same dominant
+`[16, 18, 22]` RGB value in both regions with `max_delta: 0`; the 64x64 cursor
+contained 4,002 transparent and 94 opaque pixels. The page reached
+`V86_APPLIANCE_READY=PASS` with no browser console or WebGPU validation errors.
+These are output contracts, not screenshot-only observations.
+
+Reproduce either result on port 8082:
+
+```sh
+V86_CODEX_BROWSER_OUTPUT=tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json \
+V86_CODEX_BENCHMARK_MACHINE=apple-m4-10c \
+make virtio-gpu-codex-benchmark
+
+V86_CODEX_BROWSER_OUTPUT=tests/benchmark/baselines/ghostty-webgpuvirt-wgpu-apple-m4.json \
+V86_CODEX_BENCHMARK_MACHINE=apple-m4-10c \
+make virtio-gpu-codex-benchmark-accelerated
+```
+
+The benchmark does not gate startup on a pre-run scanout readback: an idle
+terminal may have no further dirty frame after the guest emits
+`V86_APPLIANCE_READY=PASS`, which previously caused a false 300-second
+readiness timeout. Benchmark readiness uses the guest marker and visible
+canvas; every measured run must then report nonzero WebGPU presentations and
+presented bytes. The interactive accelerated scenario retains the stricter
+uniform-background pixel probe.
+
+## Observed Authenticated Run and Direct Tools
+
+An authenticated run through a configured relay reached `gpt-5.6-sol` and
+returned a normal Codex response from `/home/codex/workspace`. It also exposed
+two application-level limitations:
+
+- `codex_apps` MCP startup timed out during `tools/list` pagination after 30
+  seconds. The normal model response still completed.
+- The initial launcher requested Code Mode even though
+  `/usr/local/bin/codex-code-mode-host` is absent, so command dispatch failed
+  closed. The pinned release publishes only the main Codex archive and its
+  checksum.
+
+The corrected launcher explicitly disables `code_mode`, `code_mode_only`, and
+`code_mode_host`; enables `shell_tool` and `unified_exec`; and sets
+`code_mode.disable_in_process_fallback=false`. Readiness inspects the live
+process arguments and emits `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`. The exact
+i386 binary reports the three Code Mode features disabled and both direct-tool
+features enabled. This restores the supported direct command path; it does not
+fabricate or claim a Code Mode host.
+
+The clean-image acceptance remains deliberately unauthenticated, so
+model-mediated command execution still requires user-supplied login after
+boot. No credential is persisted or baked into the image.
+
+These application warnings are not appliance readiness successes and are not
+hidden by the serial contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6),
+a child of XWAH-3, tracks a real i686 Code Mode host and bounded MCP pagination
+diagnosis. External MCP readiness needs its own bounded acceptance scenario
+rather than a longer appliance boot timeout.
+
+## Measured Follow-up Map
+
+XWAH-5 is the committed correctness and performance control. Follow-up work is
+split by ownership so a change cannot silently trade one bottleneck for
+another:
+
+The five accelerated raw runs establish this median GPU-side profile for one
+58,399-byte terminal workload:
+
+|Measured item|Median|Primary owner|
+|---|---:|---|
+|VirtIO GPU commands|40|XWAH-24/XWAH-27|
+|Fenced commands|37|XWAH-27|
+|`TRANSFER_TO_HOST_3D` uploads|21|XWAH-24|
+|Uploaded bytes|9,692,936 (9.24 MiB)|XWAH-24|
+|`SUBMIT_3D` commands|12|XWAH-24/XWAH-26/XWAH-27|
+|`TRANSFER_FROM_HOST_3D` readbacks|4|XWAH-25|
+|Presentations|3|XWAH-23|
+|Fence wait / final present enqueue|18.5 / 0.1 ms|XWAH-27 / host already negligible|
+
+This distinguishes the remaining command, copy, and guest synchronization work
+from browser presentation. It does not support replacing correctness gates
+with a host-only shortcut.
+
+- [XWAH-23](https://github.com/dynamite-bud/v86/issues/23): fullscreen direct
+  scanout/page-flip eligibility.
+- [XWAH-24](https://github.com/dynamite-bud/v86/issues/24): resident BOs and
+  dirty-range upload batching.
+- [XWAH-25](https://github.com/dynamite-bud/v86/issues/25): evidence and
+  removal of avoidable GPU readbacks.
+- [XWAH-26](https://github.com/dynamite-bud/v86/issues/26): bounded,
+  generation-safe renderer-object caches.
+- [XWAH-27](https://github.com/dynamite-bud/v86/issues/27): frame fences,
+  descriptor draining, and queue notifications.
+- [XWAH-28](https://github.com/dynamite-bud/v86/issues/28): a separate
+  host-rendered terminal transport investigation.
+
+Each issue requires five-run evidence, the unchanged terminal SHA-256, bounded
+resource ownership, deterministic reset/device-loss cleanup, and a no-go result
+when the proposed complexity does not produce a material improvement.
 
 ## Cage Sibling Boundary
 
@@ -151,22 +297,27 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
-|Rootfs tar|676,556,800|794,818,560|-118,261,760 bytes|14.88%|
-|Compressed flat files|275,304,359|295,224,610|-19,920,251 bytes|6.75%|
-|Filesystem JSON|580,889|695,517|-114,628 bytes|16.48%|
-|Flat-file count|7,946|9,175|-1,229|13.40%|
+|Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
+|Compressed flat files|279,268,573|295,224,610|-15,956,037 bytes|5.40%|
+|Filesystem JSON|581,408|695,517|-114,109 bytes|16.41%|
+|Flat-file count|7,951|9,175|-1,224|13.34%|
 |Package closure|311|420|-109|25.95%|
 
-These values come from the generated image contracts and package locks. Recompute them after any image, package, or artifact change.
+These values come from the generated image contracts and package locks.
+Release-stripping reduced the custom Gallium library from 84,857,252 to
+20,394,120 bytes and its DRI object from 2,747,252 to 95,600 bytes. Default
+boots keep Alpine's system Gallium file in place; accelerated boot replaces it
+once, so the image carries no duplicate system backup. Recompute this evidence
+after any image, package, or artifact change.
 
-The reproducible capset-probe rebuild produced these SHA-256 values:
+The final reproducible XWAH-5 rebuild produced these SHA-256 values:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`a417a48cc7a167c589703d76495954dfe577e86d9e0bbf3c0b83af60aa907344`|
-|Filesystem JSON|`3bdc02a9f78f8ac6b388e174da331aac84a2771009cb91d41bd7d9d59b099a21`|
-|Flat-file manifest|`b211ea07ad06429249db9633ceb871e768c8612bc43b9fb47a67c61be7c0d759`|
-|Image contract|`e6cc7fda37e4a63f1270efb88febcf1dc38649ff8e053f30777a563c8aa4d228`|
+|Rootfs tar|`af97b250b713641af4239336920bfa46eedaaa0f12a4835286481ef45535d75f`|
+|Filesystem JSON|`3c849f9c9f2f56a9d6be423d428fe08de3e35755b949ad1c94c7f14a6775761d`|
+|Flat-file manifest|`e3e033fa77e15a0420bdae7825c1095293ebb0225182772e2630302617dc0e29`|
+|Image contract|`d4a88655061432be6dd1395e99b1c5971d29628587bd7878dd98944fc45d29da`|
 
 ## Original OMP Gate
 

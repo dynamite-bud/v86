@@ -1,0 +1,355 @@
+diff --git a/src/gallium/auxiliary/target-helpers/drm_helper.h b/src/gallium/auxiliary/target-helpers/drm_helper.h
+index 65481b3..acc8fd8 100644
+--- a/src/gallium/auxiliary/target-helpers/drm_helper.h
++++ b/src/gallium/auxiliary/target-helpers/drm_helper.h
+@@ -263,7 +263,7 @@ DRM_DRIVER_DESCRIPTOR_STUB(kgsl)
+ static struct pipe_screen *
+ pipe_virtio_gpu_create_screen(int fd, const struct pipe_screen_config *config)
+ {
+-   struct pipe_screen *screen = NULL;
++   struct pipe_screen *screen = webgpuvirt_drm_screen_create(fd, config);
+ 
+    if (!screen)
+       screen = virgl_drm_screen_create(fd, config);
+diff --git a/src/gallium/drivers/virgl/virgl_screen.c b/src/gallium/drivers/virgl/virgl_screen.c
+index 1e0b7cb..ffda12a 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -67,6 +67,8 @@ static const char *
+ virgl_get_name(struct pipe_screen *screen)
+ {
+    struct virgl_screen *vscreen = virgl_screen(screen);
++   if (vscreen->webgpuvirt)
++      return "webgpuvirt (v86 WebGPU)";
+    if (vscreen->caps.caps.v2.host_feature_check_version >= 5)
+       return vscreen->caps.caps.v2.renderer;
+ 
+@@ -1021,6 +1023,7 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
+       screen->base.nir_options[i] = &screen->compiler_options;
+ 
+    screen->vws = vws;
++   screen->webgpuvirt = vws->webgpuvirt;
+    screen->base.get_name = virgl_get_name;
+    screen->base.get_vendor = virgl_get_vendor;
+    screen->base.get_screen_fd = virgl_screen_get_fd;
+diff --git a/src/gallium/drivers/virgl/virgl_screen.h b/src/gallium/drivers/virgl/virgl_screen.h
+index d295725..beb7f31 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.h
++++ b/src/gallium/drivers/virgl/virgl_screen.h
+@@ -56,6 +56,7 @@ struct virgl_screen {
+ 
+    struct virgl_winsys *vws;
+ 
++   bool webgpuvirt;
+    struct virgl_drm_caps caps;
+ 
+    struct slab_parent_pool transfer_pool;
+diff --git a/src/gallium/drivers/virgl/virgl_winsys.h b/src/gallium/drivers/virgl/virgl_winsys.h
+index bc1e51a..92c3b8e 100644
+--- a/src/gallium/drivers/virgl/virgl_winsys.h
++++ b/src/gallium/drivers/virgl/virgl_winsys.h
+@@ -50,6 +50,7 @@ struct virgl_winsys {
+    int supports_fences; /* In/Out fences are supported */
+    int supports_encoded_transfers; /* Encoded transfers are supported */
+    int supports_coherent;          /* Coherent memory is supported */
++   bool webgpuvirt;
+ 
+    void (*destroy)(struct virgl_winsys *vws);
+ 
+diff --git a/src/gallium/winsys/virgl/drm/virgl_drm_public.h b/src/gallium/winsys/virgl/drm/virgl_drm_public.h
+index 32df394..15d79a3 100644
+--- a/src/gallium/winsys/virgl/drm/virgl_drm_public.h
++++ b/src/gallium/winsys/virgl/drm/virgl_drm_public.h
+@@ -26,5 +26,7 @@
+ struct pipe_screen;
+ 
+ struct pipe_screen *virgl_drm_screen_create(int fd, const struct pipe_screen_config *config);
++struct pipe_screen *webgpuvirt_drm_screen_create(int fd,
++                                                 const struct pipe_screen_config *config);
+ 
+ #endif
+diff --git a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c b/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
+index caabb2e..fb8cea6 100644
+--- a/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
++++ b/src/gallium/winsys/virgl/drm/virgl_drm_winsys.c
+@@ -27,6 +27,7 @@
+ #include <stdio.h>
+ #include <sys/ioctl.h>
+ #include <sys/stat.h>
++#include <sys/eventfd.h>
+ 
+ #include "util/os_mman.h"
+ #include "util/os_file.h"
+@@ -963,6 +964,7 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
+    if (cbuf->base.cdw == 0)
+       return 0;
+ 
++
+    memset(&eb, 0, sizeof(struct drm_virtgpu_execbuffer));
+    eb.command = (unsigned long)(void*)cbuf->buf;
+    eb.size = cbuf->base.cdw * 4;
+@@ -1005,12 +1007,117 @@ static int virgl_drm_winsys_submit_cmd(struct virgl_winsys *qws,
+    return ret;
+ }
+ 
++static void
++webgpuvirt_set_format(struct virgl_supported_format_mask *mask,
++                      enum virgl_formats format)
++{
++   mask->bitmask[format / 32] |= 1u << (format % 32);
++}
++
++static int
++webgpuvirt_get_caps(struct virgl_drm_winsys *vdws,
++                    struct virgl_drm_caps *caps)
++{
++   uint8_t private_caps[912] = {0};
++   struct drm_virtgpu_get_caps args = {
++      .cap_set_id = 7,
++      .cap_set_ver = 3,
++      .addr = (uintptr_t)private_caps,
++      .size = sizeof(private_caps),
++   };
++   int ret = drmIoctl(vdws->fd, DRM_IOCTL_VIRTGPU_GET_CAPS, &args);
++   if (ret)
++      return ret;
++
++   uint32_t magic;
++   uint16_t version;
++   uint32_t feature_bits;
++   uint32_t shader_ir_bits;
++   uint32_t max_dimension;
++   memcpy(&magic, private_caps, sizeof(magic));
++   memcpy(&version, private_caps + 4, sizeof(version));
++   memcpy(&feature_bits, private_caps + 12, sizeof(feature_bits));
++   memcpy(&shader_ir_bits, private_caps + 16, sizeof(shader_ir_bits));
++   memcpy(&max_dimension, private_caps + 40, sizeof(max_dimension));
++   if (magic != 0x57363856 || version != 3 ||
++       (feature_bits & 0x85f) != 0x85f || !(shader_ir_bits & 2))
++      return -EINVAL;
++
++   memset(caps, 0, sizeof(*caps));
++   struct virgl_caps_v2 *out = &caps->caps.v2;
++   out->v1.max_version = 2;
++   out->v1.glsl_level = 430;
++   out->v1.max_texture_array_layers = 1;
++   out->v1.max_render_targets = 1;
++   out->v1.max_samples = 1;
++   out->v1.prim_mask = 1u << MESA_PRIM_TRIANGLES;
++   out->v1.max_uniform_blocks = 8;
++   out->v1.max_viewports = 1;
++   out->v1.bset.ubo = 1;
++   out->v1.bset.blend_eq_sep = 1;
++   out->v1.bset.fragment_coord_conventions = 1;
++   out->capability_bits |= VIRGL_CAP_SRGB_WRITE_CONTROL;
++   out->max_vertex_attribs = 16;
++   out->max_vertex_attrib_stride = 2048;
++   out->max_vertex_outputs = 16;
++   out->max_texture_2d_size = max_dimension;
++   out->max_texture_3d_size = 1;
++   out->max_texture_cube_size = 1;
++   out->uniform_buffer_offset_alignment = 256;
++   out->max_texture_samplers = 4;
++   out->max_const_buffer_size[MESA_SHADER_VERTEX] = 64 * 1024;
++   out->max_const_buffer_size[MESA_SHADER_FRAGMENT] = 64 * 1024;
++   out->max_uniform_block_size = 64 * 1024;
++   out->max_shader_storage_blocks[VIRGL_SHADER_VERTEX] = 1;
++   out->max_shader_storage_blocks[VIRGL_SHADER_FRAGMENT] = 1;
++   snprintf(out->renderer, sizeof(out->renderer), "v86 WebGPU webgpuvirt");
++
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8_UNORM);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8_UNORM);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8B8A8_UNORM);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8A8_UNORM);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8X8_UNORM);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8A8_SRGB);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_B8G8R8X8_SRGB);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8G8B8A8_SRGB);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R8_UINT);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R32G32B32A32_UINT);
++   webgpuvirt_set_format(&out->v1.sampler, VIRGL_FORMAT_R32G32B32A32_SINT);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8_UINT);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8B8A8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8A8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8X8_UNORM);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8A8_SRGB);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_B8G8R8X8_SRGB);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R8G8B8A8_SRGB);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R32G32B32A32_UINT);
++   webgpuvirt_set_format(&out->v1.render, VIRGL_FORMAT_R32G32B32A32_SINT);
++   webgpuvirt_set_format(&out->scanout, VIRGL_FORMAT_R8G8B8A8_UNORM);
++   webgpuvirt_set_format(&out->scanout, VIRGL_FORMAT_B8G8R8A8_UNORM);
++   webgpuvirt_set_format(&out->scanout, VIRGL_FORMAT_B8G8R8X8_UNORM);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R32_FLOAT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R32G32_FLOAT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R32G32B32_FLOAT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R32G32B32A32_FLOAT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R8G8B8A8_UNORM);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R8_UINT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R8G8B8A8_UINT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R16G16_UINT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R16G16_SINT);
++   webgpuvirt_set_format(&out->v1.vertexbuffer, VIRGL_FORMAT_R32G32_UINT);
++   return 0;
++}
++
+ static int virgl_drm_get_caps(struct virgl_winsys *vws,
+                               struct virgl_drm_caps *caps)
+ {
+    struct virgl_drm_winsys *vdws = virgl_drm_winsys(vws);
+    struct drm_virtgpu_get_caps args;
+    int ret;
++   if (vws->webgpuvirt)
++      return webgpuvirt_get_caps(vdws, caps);
+ 
+    virgl_ws_fill_new_caps_defaults(caps);
+ 
+@@ -1173,44 +1280,37 @@ virgl_drm_resource_cache_entry_release(struct virgl_resource_cache_entry *entry,
+    virgl_hw_res_destroy(qdws, res);
+ }
+ 
+-static int virgl_init_context(int drmFD)
++static int virgl_init_context(int drmFD, bool webgpuvirt)
+ {
+    int ret;
+    struct drm_virtgpu_context_init init = { 0 };
+    struct drm_virtgpu_context_set_param ctx_set_param = { 0 };
+-   uint64_t supports_capset_virgl, supports_capset_virgl2;
+-   supports_capset_virgl = supports_capset_virgl2 = 0;
+-
+-   supports_capset_virgl = ((1 << VIRTGPU_DRM_CAPSET_VIRGL) &
+-                             params[param_supported_capset_ids].value);
+-
+-   supports_capset_virgl2 = ((1 << VIRTGPU_DRM_CAPSET_VIRGL2) &
+-                              params[param_supported_capset_ids].value);
+-
+-   if (!supports_capset_virgl && !supports_capset_virgl2) {
+-      _debug_printf("No virgl contexts available on host");
++   uint64_t supported_capsets = params[param_supported_capset_ids].value;
++   uint32_t capset_id;
++
++   if (webgpuvirt) {
++      if (!(supported_capsets & (1ull << 7)))
++         return -EINVAL;
++      capset_id = 7;
++   } else if (supported_capsets & (1ull << VIRTGPU_DRM_CAPSET_VIRGL2)) {
++      capset_id = VIRTGPU_DRM_CAPSET_VIRGL2;
++   } else if (supported_capsets & (1ull << VIRTGPU_DRM_CAPSET_VIRGL)) {
++      capset_id = VIRTGPU_DRM_CAPSET_VIRGL;
++   } else {
++      _debug_printf("No compatible virtio-gpu contexts available on host");
+       return -EINVAL;
+    }
+ 
+    ctx_set_param.param = VIRTGPU_CONTEXT_PARAM_CAPSET_ID;
+-   ctx_set_param.value = (supports_capset_virgl2) ?
+-                         VIRTGPU_DRM_CAPSET_VIRGL2 :
+-                         VIRTGPU_DRM_CAPSET_VIRGL;
+-
++   ctx_set_param.value = capset_id;
+    init.ctx_set_params = (unsigned long)(void *)&ctx_set_param;
+    init.num_params = 1;
+-
+    ret = drmIoctl(drmFD, DRM_IOCTL_VIRTGPU_CONTEXT_INIT, &init);
+-   /*
+-    * EEXIST happens when a compositor does DUMB_CREATE before initializing
+-    * virgl.
+-    */
+    if (ret && errno != EEXIST) {
+       _debug_printf("DRM_IOCTL_VIRTGPU_CONTEXT_INIT failed with %s\n",
+-                     strerror(errno));
++                    strerror(errno));
+       return -1;
+    }
+-
+    return 0;
+ }
+ 
+@@ -1223,7 +1323,7 @@ virgl_drm_winsys_get_fd(struct virgl_winsys *vws)
+ }
+ 
+ static struct virgl_winsys *
+-virgl_drm_winsys_create(int drmFD)
++virgl_drm_winsys_create(int drmFD, bool webgpuvirt)
+ {
+    static const unsigned CACHE_TIMEOUT_USEC = 1000000;
+    struct virgl_drm_winsys *qdws;
+@@ -1247,7 +1347,7 @@ virgl_drm_winsys_create(int drmFD)
+       return NULL;
+ 
+    if (params[param_context_init].value) {
+-      ret = virgl_init_context(drmFD);
++      ret = virgl_init_context(drmFD, webgpuvirt);
+       if (ret)
+          return NULL;
+    }
+@@ -1257,6 +1357,7 @@ virgl_drm_winsys_create(int drmFD)
+       return NULL;
+ 
+    qdws->fd = drmFD;
++   qdws->base.webgpuvirt = webgpuvirt;
+    virgl_resource_cache_init(&qdws->cache, CACHE_TIMEOUT_USEC,
+                              virgl_drm_resource_cache_entry_is_busy,
+                              virgl_drm_resource_cache_entry_release,
+@@ -1363,8 +1464,9 @@ equal_fd(const void *key1, const void *key2)
+    return false;
+ }
+ 
+-struct pipe_screen *
+-virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
++static struct pipe_screen *
++virgl_drm_screen_create_mode(int fd, const struct pipe_screen_config *config,
++                             bool webgpuvirt)
+ {
+    struct pipe_screen *pscreen = NULL;
+ 
+@@ -1377,14 +1479,17 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
+ 
+    pscreen = util_hash_table_get(fd_tab, intptr_to_pointer(fd));
+    if (pscreen) {
+-      virgl_screen(pscreen)->refcnt++;
++      if (virgl_screen(pscreen)->webgpuvirt != webgpuvirt)
++         pscreen = NULL;
++      else
++         virgl_screen(pscreen)->refcnt++;
+    } else {
+       struct virgl_winsys *vws;
+       int dup_fd = os_dupfd_cloexec(fd);
+       if (dup_fd < 0)
+          goto unlock;
+ 
+-      vws = virgl_drm_winsys_create(dup_fd);
++      vws = virgl_drm_winsys_create(dup_fd, webgpuvirt);
+       if (!vws) {
+          close(dup_fd);
+          goto unlock;
+@@ -1393,11 +1498,6 @@ virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
+       pscreen = virgl_create_screen(vws, config);
+       if (pscreen) {
+          _mesa_hash_table_insert(fd_tab, intptr_to_pointer(dup_fd), pscreen);
+-
+-         /* Bit of a hack, to avoid circular linkage dependency,
+-          * ie. pipe driver having to call in to winsys, we
+-          * override the pipe drivers screen->destroy():
+-          */
+          virgl_screen(pscreen)->winsys_priv = pscreen->destroy;
+          pscreen->destroy = virgl_drm_screen_destroy;
+       }
+@@ -1407,3 +1507,15 @@ unlock:
+    simple_mtx_unlock(&virgl_screen_mutex);
+    return pscreen;
+ }
++
++struct pipe_screen *
++virgl_drm_screen_create(int fd, const struct pipe_screen_config *config)
++{
++   return virgl_drm_screen_create_mode(fd, config, false);
++}
++
++struct pipe_screen *
++webgpuvirt_drm_screen_create(int fd, const struct pipe_screen_config *config)
++{
++   return virgl_drm_screen_create_mode(fd, config, true);
++}

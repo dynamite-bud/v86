@@ -13,7 +13,13 @@ const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 3000
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
-assert.ok(["appliance", "triangle", "shader"].includes(SCENARIO),
+const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
+const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
+const LLVMPipe_BENCHMARK_PATH =
+    path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
+assert.ok(
+    ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark",
+        "benchmark-accelerated"].includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
@@ -59,7 +65,16 @@ async function main()
         {
             scenarios.push(await run_in_chrome(base_url, renderer));
         }
-        console.log(JSON.stringify({ result: "pass", port: PORT, scenarios }, null, 2));
+        const result = { result: "pass", port: PORT, scenarios };
+        if(OUTPUT_PATH)
+        {
+            const output_file = path.resolve(ROOT, OUTPUT_PATH);
+            assert.ok(output_file.startsWith(ROOT + path.sep),
+                "V86_CODEX_BROWSER_OUTPUT must remain inside the repository");
+            fs.mkdirSync(path.dirname(output_file), { recursive: true });
+            fs.writeFileSync(output_file, JSON.stringify(result, null, 2) + "\n");
+        }
+        console.log(JSON.stringify(result, null, 2));
     }
     finally
     {
@@ -163,19 +178,42 @@ async function run_scenario(browser_ws, base_url, renderer)
             `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
         if(SCENARIO === "shader") url.searchParams.set("shader", "1");
+        else if(SCENARIO === "resources") url.searchParams.set("resources", "1");
+        else if(SCENARIO === "mesa") url.searchParams.set("mesa", "1");
+        else if(SCENARIO === "accelerated") url.searchParams.set("accelerated", "1");
         else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
+        else if(SCENARIO === "benchmark" || SCENARIO === "benchmark-accelerated")
+        {
+            url.searchParams.set("benchmark", "1");
+            if(SCENARIO === "benchmark-accelerated") url.searchParams.set("accelerated", "1");
+            if(BENCHMARK_MACHINE) url.searchParams.set("benchmark_machine", BENCHMARK_MACHINE);
+        }
         await cdp.call("Page.navigate", { url: url.href });
+        const renderer_stages = [];
         await wait_for(async() => {
             const state = await evaluate(cdp,
                 `({ result: document.body?.dataset?.result || null, ` +
                 `serial: window.applianceSerialText || "", ` +
+                `renderer_stage: window.name || "", ` +
+                `scanout_pixel: window.acceleratedScanoutPixel || null, ` +
+                `background_probe: window.acceleratedBackgroundProbe || null, ` +
+                `scanout_probe_error: window.acceleratedScanoutProbeError || null, ` +
                 `gpu: (() => { const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu; ` +
                 `return device ? { resources: Array.from(device.resources.values()).map(resource => ({ ` +
                 `backing_length: resource.backing_length, backing_entries: resource.backing.length })), ` +
                 `contexts: Array.from(device.contexts_3d.entries()).map(([id, context]) => ` +
                 `({ id, resources: Array.from(context.resources) })), ` +
+                `last_invalid_3d_error: device.backend?.last_invalid_3d_error || null, ` +
+                `active_calls: device.backend?.active_calls ?? null, ` +
+                `invalid_3d_errors: device.backend?.invalid_3d_errors || [], ` +
+                `last_transfer_from_host_3d: device.last_transfer_from_host_3d || null, ` +
                 `stats: device.get_performance_stats() } : null; })(), ` +
                 `fatal: window.emulator?.v86?.cpu?.devices?.virtio_gpu?.backend?.fatal_error?.message || null })`);
+            if(state.renderer_stage &&
+                renderer_stages.at(-1) !== state.renderer_stage)
+            {
+                renderer_stages.push(state.renderer_stage);
+            }
             last_readiness_state = state;
             if(state.fatal)
             {
@@ -186,10 +224,18 @@ async function run_scenario(browser_ws, base_url, renderer)
             if(state.result === "fail")
             {
                 const reason = /V86_APPLIANCE_FAILURE=([^\r\n]+)/.exec(state.serial)?.[1] || "unknown";
-                const serial_tail = state.serial.slice(-6000);
+                const serial_tail = state.serial.slice(-60000);
                 const error = new Error(
                     `Appliance readiness contract failed: ${reason}\n${serial_tail}\n` +
-                    `GPU state: ${JSON.stringify(state.gpu)}`);
+                    `Renderer stage: ${state.renderer_stage}\n` +
+                    `Renderer stages: ${renderer_stages.join(" -> ")}\n` +
+                    `GPU state: ${JSON.stringify(state.gpu)}\n` +
+                    `Scanout probe: ${JSON.stringify({
+                        pixel: state.scanout_pixel,
+                        background: state.background_probe,
+                        error: state.scanout_probe_error,
+                    })}\n3D rejections:\n` +
+                    (state.gpu?.invalid_3d_errors || []).join("\n"));
                 error.terminal = true;
                 throw error;
             }
@@ -201,6 +247,21 @@ async function run_scenario(browser_ws, base_url, renderer)
             const serial = window.applianceSerialText || "";
             const device = window.emulator.v86.cpu.devices.virtio_gpu;
             const canvas = device.backend.canvas;
+            const cursor_canvas = device.backend.cursor_canvas;
+            let cursor_alpha = null;
+            if(cursor_canvas && !cursor_canvas.hidden)
+            {
+                const data = cursor_canvas.getContext("2d")
+                    .getImageData(0, 0, cursor_canvas.width, cursor_canvas.height).data;
+                let transparent = 0;
+                let opaque = 0;
+                for(let offset = 3; offset < data.length; offset += 4)
+                {
+                    transparent += data[offset] === 0;
+                    opaque += data[offset] === 255;
+                }
+                cursor_alpha = { transparent, opaque };
+            }
             return {
                 session_id: window.applianceSessionId,
                 serial,
@@ -210,9 +271,53 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
                 canvas_width: canvas.width,
                 canvas_height: canvas.height,
+                accelerated_scanout_pixel: window.acceleratedScanoutPixel || null,
+                accelerated_background_probe: window.acceleratedBackgroundProbe || null,
+                accelerated_scanout_probe_error: window.acceleratedScanoutProbeError || null,
+                cursor_alpha,
             };
         })()`);
-        if(SCENARIO !== "appliance")
+        if(SCENARIO === "mesa")
+        {
+            const result = /V86_GPU_MESA_WEBGPUVIRT=PASS renderer=([^\r\n]+) center=(\d+),(\d+),(\d+),(\d+) corner=(\d+),(\d+),(\d+),(\d+)/.exec(
+                state.serial);
+            assert.ok(result, "Missing Mesa webgpuvirt rendering marker");
+            const center = result.slice(2, 6).map(Number);
+            const corner = result.slice(6, 10).map(Number);
+            assert.ok(center[0] > 180 && center[1] < 100 && center[2] < 100,
+                `Mesa triangle center is not red: ${center}`);
+            assert.ok(corner[2] > corner[0] && corner[2] > corner[1],
+                `Mesa clear color is not blue: ${corner}`);
+            const gpu = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                return {
+                    stats: device.get_performance_stats(),
+                    last_invalid_3d_error: device.backend.last_invalid_3d_error,
+                    last_transfer_from_host_3d: device.last_transfer_from_host_3d,
+                };
+            })()`);
+            assert.equal(gpu.stats.invalid_commands, 0);
+            assert.equal(gpu.stats.backend_errors, 0);
+            assert.ok((gpu.stats.command_counts["0x206"] || 0) >= 1,
+                "Mesa readback did not use TRANSFER_FROM_HOST_3D");
+            assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
+                "Mesa did not submit a standard VirGL command stream");
+            assert.equal(gpu.last_invalid_3d_error, null);
+            assert.ok(gpu.last_transfer_from_host_3d?.resource_id > 0);
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return {
+                renderer,
+                ready_ms: Math.round(ready_ms),
+                mesa_webgpuvirt: true,
+                guest_renderer: result[1],
+                center_rgba: center,
+                corner_rgba: corner,
+                submit_3d_commands: gpu.stats.command_counts["0x207"],
+                readback_commands: gpu.stats.command_counts["0x206"],
+            };
+        }
+        if(["triangle", "shader", "resources"].includes(SCENARIO))
         {
             for(const marker of [
                 "V86_GPU_TRIANGLE_RENDER_NODE=/dev/dri/renderD128",
@@ -228,13 +333,26 @@ async function run_scenario(browser_ws, base_url, renderer)
             {
                 assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
             }
+            const expected_version = SCENARIO === "shader" ? 2 :
+                SCENARIO === "resources" ? 3 : 1;
             assert.ok(state.serial.includes(
-                `V86_GPU_TRIANGLE_GET_CAPS=PASS version=${SCENARIO === "shader" ? 2 : 1}`),
+                `V86_GPU_TRIANGLE_GET_CAPS=PASS version=${expected_version}`),
                 "Guest did not use the requested capset version");
             if(SCENARIO === "shader")
             {
                 assert.ok(state.serial.includes("V86_GPU_SHADER_V2=PASS"),
                     "Missing version-2 guest shader marker");
+            }
+            else if(SCENARIO === "resources")
+            {
+                for(const marker of [
+                    "V86_GPU_LLVMPIPE_REFERENCE=PASS renderer=llvmpipe",
+                    "V86_GPU_TRIANGLE_RESOURCES=PASS textures=2 vertex_buffers=2 index_buffers=1 uniforms=1",
+                    "V86_GPU_SHADER_V3=PASS resources=6 bindings=3 indexed_draws=1",
+                ])
+                {
+                    assert.ok(state.serial.includes(marker), `Missing resource marker: ${marker}`);
+                }
             }
             const rendered = await evaluate(cdp, `(() => {
                 const device = window.emulator.v86.cpu.devices.virtio_gpu;
@@ -275,6 +393,15 @@ async function run_scenario(browser_ws, base_url, renderer)
             {
                 assert.ok((rendered.stats.command_counts[command] || 0) >= 1,
                     `Missing standard virtio-gpu command ${command}`);
+            }
+            if(SCENARIO === "resources")
+            {
+                assert.equal(rendered.stats.live_3d_resources, 6);
+                assert.equal(rendered.stats.live_3d_contexts, 1);
+                assert.ok(rendered.stats.upload_bytes >= 96,
+                    `Guest resources were not uploaded: ${rendered.stats.upload_bytes}`);
+                assert.equal(rendered.stats.invalid_commands, 0);
+                assert.equal(rendered.stats.backend_errors, 0);
             }
             assert.equal(failures.length, 0, failures.join(" | "));
             if(SCENARIO === "shader")
@@ -420,6 +547,56 @@ async function run_scenario(browser_ws, base_url, renderer)
                 leaked_3d_objects: recovery.contexts + recovery.resources + recovery.attachments,
             };
         }
+        if(SCENARIO === "benchmark" || SCENARIO === "benchmark-accelerated")
+        {
+            await wait_for(async() => {
+                const benchmark = await evaluate(cdp,
+                    "window.virtioGpuBenchmark?.result || null");
+                if(benchmark?.status === "fail")
+                {
+                    const error = new Error(benchmark.error || "Ghostty benchmark failed");
+                    error.terminal = true;
+                    throw error;
+                }
+                return benchmark?.status === "pass";
+            }, READY_TIMEOUT_MS, `${renderer} Ghostty benchmark`);
+            const benchmark = await evaluate(cdp,
+                "window.virtioGpuBenchmark.result");
+            assert.equal(benchmark.schema_version, 1);
+            assert.equal(benchmark.scenario.renderer, renderer);
+            const accelerated = SCENARIO === "benchmark-accelerated";
+            assert.equal(benchmark.scenario.guest_renderer,
+                accelerated ? "webgpuvirt" : "llvmpipe");
+            assert.equal(benchmark.scenario.accelerated_3d, accelerated);
+            assert.equal(benchmark.method.warmup_runs, 2);
+            assert.equal(benchmark.method.measured_runs, 5);
+            assert.equal(benchmark.raw_runs.length, 5);
+            assert.match(benchmark.terminal_reference_sha256, /^[0-9a-f]{64}$/);
+            for(const run of benchmark.raw_runs)
+            {
+                assert.ok(run.guest_cpu_ms > 0);
+                assert.ok(run.keystroke_to_present_ms >= 0);
+                assert.ok(run.output_bytes > 0);
+                assert.ok(run.output_lines > 0);
+                assert.equal(run.terminal_reference.sha256,
+                    benchmark.terminal_reference_sha256);
+                assert.equal(run.gpu.invalid_commands, 0);
+                assert.equal(run.gpu.backend_errors, 0);
+                assert.ok(run.gpu.presentations > 0);
+                assert.ok(run.gpu.presented_bytes > 0);
+                assert.deepEqual(run.gpu.invalid_responses, []);
+                assert.ok(run.gpu.fence_responses.every(response =>
+                    response.response === 0x1100));
+            }
+            if(accelerated)
+            {
+                benchmark.performance_comparison =
+                    compare_accelerated_benchmark(benchmark);
+            }
+            assert.equal(failures.length, 0, failures.join(" | "));
+            await evaluate(cdp, "window.emulator.stop()");
+            return benchmark;
+        }
         for(const marker of [
             "V86_APPLIANCE_ARCH=i686",
             "V86_APPLIANCE_UID=1000",
@@ -430,12 +607,16 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_GHOSTTY_PROCESS=PASS",
             "V86_APPLIANCE_GHOSTTY_WINDOW=PASS",
             "V86_APPLIANCE_CODEX_PROCESS=PASS",
+            "V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS",
             "V86_APPLIANCE_READY=PASS",
         ])
         {
             assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
         }
-        assert.match(state.serial, /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
+        const accelerated = SCENARIO === "accelerated";
+        assert.match(state.serial, accelerated ?
+            /V86_APPLIANCE_RENDERER=.*webgpuvirt/i :
+            /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
         assert.match(state.serial, /V86_APPLIANCE_OPENGL=4\.[1-9]/);
         assert.match(state.serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
         assert.ok(state.serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.147.0"));
@@ -444,6 +625,35 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.canvas_visible, true);
         assert.equal(state.canvas_width, state.scanout.width);
         assert.equal(state.canvas_height, state.scanout.height);
+        assert.equal(state.accelerated_scanout_probe_error, null);
+        if(accelerated)
+        {
+            const gpu = await evaluate(cdp, `(() => {
+                const device = window.emulator.v86.cpu.devices.virtio_gpu;
+                return {
+                    stats: device.get_performance_stats(),
+                    last_invalid_3d_error: device.backend.last_invalid_3d_error,
+                    invalid_3d_errors: device.backend.invalid_3d_errors,
+                };
+            })()`);
+            assert.equal(gpu.stats.invalid_commands, 0, JSON.stringify(gpu));
+            assert.equal(gpu.stats.backend_errors, 0);
+            assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
+                "Accelerated Ghostty did not submit a standard VirGL command stream");
+            assert.equal(gpu.last_invalid_3d_error, null);
+            assert.ok(state.accelerated_scanout_pixel,
+                "Accelerated readiness did not sample the rendered scanout");
+            assert.ok(state.accelerated_scanout_pixel.slice(0, 3)
+                .reduce((sum, channel) => sum + channel, 0) > 24,
+            `Accelerated Ghostty scanout is black: ${state.accelerated_scanout_pixel}`);
+            assert.equal(state.accelerated_background_probe?.uniform, true,
+                `Accelerated Ghostty background is not uniform: ${
+                    JSON.stringify(state.accelerated_background_probe)}`);
+            assert.ok(state.cursor_alpha?.transparent > 0,
+                `Accelerated cursor has no transparent pixels: ${JSON.stringify(state.cursor_alpha)}`);
+            assert.ok(state.cursor_alpha?.opaque > 0,
+                `Accelerated cursor has no opaque pixels: ${JSON.stringify(state.cursor_alpha)}`);
+        }
 
         if(RELAY_URL)
         {
@@ -533,12 +743,16 @@ async function run_scenario(browser_ws, base_url, renderer)
             ready_ms: Math.round(ready_ms),
             architecture: "i686",
             uid: 1000,
-            llvmpipe: true,
+            llvmpipe: !accelerated,
+            accelerated_3d: accelerated,
             tls_relay: Boolean(RELAY_URL),
             desktop_exclusions: true,
             login_unconfigured: true,
             keyboard_input: true,
             responsive_layout: true,
+            accelerated_scanout_pixel: state.accelerated_scanout_pixel,
+            accelerated_background_probe: state.accelerated_background_probe,
+            cursor_alpha: state.cursor_alpha,
             fresh_reset,
         };
     }
@@ -547,6 +761,72 @@ async function run_scenario(browser_ws, base_url, renderer)
         cdp.close();
         await fetch(`http://${browser_url.host}/json/close/${target.id}`).catch(() => {});
     }
+}
+
+function compare_accelerated_benchmark(accelerated)
+{
+    const baseline = JSON.parse(
+        fs.readFileSync(LLVMPipe_BENCHMARK_PATH, "utf8")).scenarios[0];
+    assert.equal(baseline.schema_version, accelerated.schema_version);
+    assert.equal(baseline.scenario.renderer, accelerated.scenario.renderer);
+    for(const key of [
+        "label", "user_agent", "platform", "hardware_concurrency",
+        "device_memory_gib",
+    ])
+    {
+        assert.deepEqual(accelerated.machine[key], baseline.machine[key],
+            `Benchmark machine mismatch: ${key}`);
+    }
+    assert.deepEqual(accelerated.machine.webgpu_adapter,
+        baseline.machine.webgpu_adapter, "Benchmark WebGPU adapter mismatch");
+    for(const key of [
+        "workload", "synchronization", "warmup_runs", "measured_runs",
+        "presentation_quiet_ms",
+    ])
+    {
+        assert.deepEqual(accelerated.method[key], baseline.method[key],
+            `Benchmark method mismatch: ${key}`);
+    }
+    assert.equal(accelerated.terminal_reference_sha256,
+        baseline.terminal_reference_sha256);
+
+    const baseline_cpu = baseline.summary.guest_cpu_ms.p50;
+    const accelerated_cpu = accelerated.summary.guest_cpu_ms.p50;
+    const baseline_latency = baseline.summary.keystroke_to_present_ms.p95;
+    const accelerated_latency = accelerated.summary.keystroke_to_present_ms.p95;
+    const cpu_ratio = accelerated_cpu / baseline_cpu;
+    const latency_ratio = accelerated_latency / baseline_latency;
+    assert.ok(cpu_ratio <= 0.8 || latency_ratio <= 0.8,
+        `Acceleration did not improve a primary metric by 20%: ` +
+        `cpu=${cpu_ratio} latency=${latency_ratio}`);
+    assert.ok(cpu_ratio <= 1.05 && latency_ratio <= 1.05,
+        `Acceleration regressed a primary metric by more than 5%: ` +
+        `cpu=${cpu_ratio} latency=${latency_ratio}`);
+
+    const baseline_long_tasks = baseline.raw_runs.reduce(
+        (total, run) => total + run.browser_health.long_tasks.count, 0);
+    const accelerated_long_tasks = accelerated.raw_runs.reduce(
+        (total, run) => total + run.browser_health.long_tasks.count, 0);
+    assert.ok(accelerated_long_tasks <= baseline_long_tasks,
+        "Acceleration increased browser long tasks");
+    const change = (value, control) =>
+        Number(((value - control) * 100 / control).toFixed(1));
+    return {
+        baseline: path.relative(ROOT, LLVMPipe_BENCHMARK_PATH),
+        gate: "pass",
+        guest_cpu_p50_ms: {
+            llvmpipe: baseline_cpu,
+            webgpuvirt: accelerated_cpu,
+            change_percent: change(accelerated_cpu, baseline_cpu),
+        },
+        keystroke_to_present_p95_ms: {
+            llvmpipe: baseline_latency,
+            webgpuvirt: accelerated_latency,
+            change_percent: change(accelerated_latency, baseline_latency),
+        },
+        terminal_reference_identical: true,
+        browser_long_tasks: accelerated_long_tasks,
+    };
 }
 
 async function guest_command(cdp, command, success_marker, failure_marker, timeout)
@@ -732,9 +1012,12 @@ async function run_shader_acceptance_in_page()
     await backend.createContext3D(valid_context_id);
     await backend.createResource3D({
         resource_id,
+        target: 2,
+        bind: 1 << 1,
         format: 67,
         width,
         height,
+        byte_length: width * height * 4,
     });
     await backend.attachResource3D(valid_context_id, resource_id);
     const object_submit = submit([

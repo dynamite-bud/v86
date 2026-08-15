@@ -11,42 +11,51 @@ Implemented and tested today:
 - A deterministic in-memory backend for Node tests.
 - Two browser presentation backends: direct JavaScript WebGPU (`webgpu-js`) and Rust/Wasm `wgpu`. Both upload and present standard 2D resources.
 - Reproducible Linux KMS and Alpine XFCE guests, with Xorg and Wayland exercised through both browser backends.
-- An opt-in capset-7 basic-render path on the Rust/Wasm backend. Frozen version
-  1 maps the pinned Linux/libdrm flow to one startup-validated immutable
-  pipeline. Version 2 accepts bounded guest WGSL, validates it synchronously
-  with Naga, creates context-local WebGPU pipelines atomically under the patched
-  wgpu error scope, caps draw work, and faults the renderer after 5000 ms if
-  compilation or submitted GPU work does not settle.
-- Browser acceptance proves both the pinned red triangle and an arbitrary green
-  triangle, deterministic invalid-source and draw-limit rejection, ordered fence
-  completion, repeated timeout fallback/recovery, and zero leaked standard 3D
-  objects.
+- An opt-in capset-7 path on the Rust/Wasm backend. Frozen version 1 maps the
+  pinned Linux/libdrm flow to one startup-validated immutable pipeline. Version
+  2 accepts bounded guest WGSL. Version 3 accepts WebGPU-restricted SPIR-V,
+  multiple vertex buffers, sampled textures, uniform bindings,
+  premultiplied-alpha blending, and instancing. Naga and the patched wgpu error
+  scope validate object batches atomically; compilation and submitted GPU work
+  fault at a 5000 ms bound.
+- Browser acceptance proves the pinned red triangle, arbitrary green WGSL
+  triangle, and an indexed textured version-3 resource triangle against a Mesa
+  llvmpipe software reference. It also proves deterministic malformed-input
+  rejection, ordered fences, repeated timeout/device-loss fallback and
+  recovery, and zero leaked standard 3D objects.
+- The i386 appliance includes a checksum-locked Mesa `webgpuvirt` winsys and
+  virgl/Gallium build. Its explicit `accelerated=1` mode runs the measured
+  Ghostty OpenGL call set through capset 7 and the Rust/Wasm renderer while
+  retaining the standard 2D scanout for presentation.
+- Accelerated appliance acceptance samples both diagonal halves of the
+  terminal background, requires a transparent hardware-cursor mask, and checks
+  the live Codex process for the direct-tool launcher flags.
 
 Not implemented:
 
-- SPIR-V, resource bindings, vertex/index buffers, sampled textures,
-  depth/stencil, blending, readback, resource blobs/UUIDs, host mappings,
-  Mesa/Gallium, shader translation, virgl compatibility, Vulkan, or 3D on the
-  direct JavaScript backend.
+- Depth/stencil, general shader translation, general virgl compatibility,
+  readback outside the diagnostic Mesa gate, resource blobs/UUIDs, host
+  mappings, Vulkan, or 3D on the direct JavaScript backend.
 - The default device still reports `num_capsets = 0` and does not advertise 3D
   feature bits. Capset 7 is available only with `experimental_3d: true` and a
   successful Rust/Wasm backend preflight.
 
 The exact implemented byte contracts are frozen in
-[`docs/webgpuvirt-wire-v1.md`](../webgpuvirt-wire-v1.md) and
-[`docs/webgpuvirt-wire-v2.md`](../webgpuvirt-wire-v2.md).
+[`docs/webgpuvirt-wire-v1.md`](../webgpuvirt-wire-v1.md),
+[`docs/webgpuvirt-wire-v2.md`](../webgpuvirt-wire-v2.md), and
+[`docs/webgpuvirt-wire-v3.md`](../webgpuvirt-wire-v3.md).
 
 ## Data Flow
 
 ```text
-Linux guest DRM/KMS
-  -> VirtIO GPU control/cursor queues
-  -> src/virtio_gpu.js
-  -> VirtioGpuBackend promise boundary
-  -> MemoryGpuBackend (tests)
-     or webgpu-js (browser JavaScript)
-     or wgpu (Rust/Wasm)
-  -> dedicated WebGPU canvas
+Default guest:
+  Linux DRM/KMS -> standard VirtIO GPU 2D -> selected browser backend
+
+Accelerated appliance:
+  Ghostty OpenGL -> Mesa virgl/Gallium + webgpuvirt winsys
+  -> Linux virtio_gpu ioctls -> capset-7 standard 3D commands
+  -> src/virtio_gpu.js -> Rust/Wasm wgpu
+  -> standard 2D scanout -> dedicated WebGPU canvas
 ```
 
 JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queue ordering, resource IDs, snapshots, and error responses. A browser backend owns renderer objects and presentation. Guest bytes must be copied before an `await`; browser GPU handles never enter VM snapshots.
@@ -59,7 +68,7 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Abstract/test backend | `src/browser/virtio_gpu_backend.js` | Promise contract and deterministic `MemoryGpuBackend` |
 | Shared browser adapter | `src/browser/virtio_gpu_wgpu_backend.js` | Canvas/VGA lifecycle, dynamic renderer boundary, device-loss handling |
 | Direct renderer | `src/browser/virtio_gpu_webgpu_backend.js` | JavaScript `navigator.gpu` 2D textures, uploads, conversion, presentation |
-| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer plus pinned version-1 and bounded arbitrary-WGSL version-2 paths |
+| Rust renderer | `tools/virtio-gpu-wgpu/` | Rust/Wasm `wgpu` 2D renderer, capset versions 1-3, and the bounded measured-Mesa command translator |
 | Browser API wiring | `src/browser/starter.js` | Backend selection, options, state integration |
 | Protocol tests | `tests/unit/virtio_gpu_protocol.js` | Wire layouts, commands, malformed input, limits, state, ordering |
 | Renderer tests | `tests/unit/virtio_gpu_webgpu_backend.js` | Direct renderer and shared browser lifecycle |
@@ -70,6 +79,8 @@ JavaScript owns the guest-visible VirtIO protocol, guest-memory validation, queu
 | Desktop example | `examples/virtio_gpu_desktop.html` | Manual desktop, renderer/session selectors, persistent ready snapshots |
 | KMS guest | `tools/docker/virtio-gpu-alpine/` | Minimal reproducible Linux DRM/KMS image and probe |
 | Desktop guest | `tools/docker/virtio-gpu-alpine-desktop/` | Reproducible XFCE Xorg/Wayland image and readiness contract |
+| Ghostty appliance | `tools/docker/virtio-gpu-alpine-codex/` | Reproducible llvmpipe default plus opt-in checksum-locked Mesa `webgpuvirt` acceleration |
+| Appliance architecture and evidence | `docs/gpu/ghostty-codex-appliance.md` | Gate-0 decision, image/runtime contract, benchmark evidence, correction history, and follow-up map |
 
 ## Prerequisites
 
@@ -132,6 +143,8 @@ Review the generated contract against the committed contract. Never commit the g
 | Capset transport, private submit, or pinned Linux/libdrm path | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test virtio-gpu-3d-transport-test` |
 | Reference triangle guest or browser acceptance | `make virtio-gpu-3d-triangle-test` |
 | Arbitrary WGSL validation, compilation, timeout, or recovery | `make virtio-gpu-3d-shader-test` |
+| Version-3 resources, SPIR-V, or bindings | `make virtio-gpu-webgpuvirt-triangle-test` |
+| Mesa `webgpuvirt` or accelerated Ghostty | `make virtio-gpu-codex-accelerated-test`; run `make virtio-gpu-codex-benchmark-accelerated` for performance comparisons |
 | Browser backend, canvas lifecycle, resize, cursor, or loss | `make virtio-gpu-browser-test` |
 | Scanout color fidelity or fixture inputs | `make virtio-gpu-color-test`; also run `make virtio-gpu-test` for the memory backend |
 | Ready-state persistence | `make virtio-gpu-ready-snapshot-test` |
@@ -152,6 +165,15 @@ Review the generated contract against the committed contract. Never commit the g
 - Reset/device loss must invalidate stale completions, release host objects, and preserve a working 2D/VGA recovery path.
 - Malformed input returns a deterministic VirtIO GPU error. It must not assert JavaScript, panic Rust, partially submit GPU work, leak an object, or retain a descriptor indefinitely.
 - Keep the direct JavaScript backend 2D-only until it independently meets the same 3D validation contract as Rust/Wasm.
+- The global Ghostty background is a uniform-only full-screen draw. Do not
+  route it through the storage-buffer-backed cell-background shader.
+- Preserve the fourth byte of cursor resource pixels as alpha even for XRGB or
+  XBGR cursor formats. The scanout path may force X-format alpha opaque; the
+  cursor path may not.
+- The i386 Codex archive has no Code Mode host. The appliance must explicitly
+  disable `code_mode`, `code_mode_only`, and `code_mode_host`, enable
+  `shell_tool` and `unified_exec`, and keep direct fallback enabled. Do not
+  replace the missing host with a stub.
 
 ## Debugging
 
@@ -161,6 +183,15 @@ Review the generated contract against the committed contract. Never commit the g
 - A cold desktop boot produces many same-origin `.bin.zst` requests while the lazy 9p rootfs loads libraries, fonts, themes, icons, and applications. This is local guest filesystem traffic, not external networking.
 - If the page remains on VGA, confirm `/dev/dri/card0`, the serial readiness markers, and a live scanout.
 - If WebGPU fails, inspect browser console errors and `backend.fatal_error`; do not mask device loss with retries or sleeps.
+- A diagonal terminal background means `BackgroundColor` was incorrectly
+  translated as a cell draw. Run the accelerated browser gate; it compares
+  dominant colors in opposite interior triangles.
+- A black 64x64 pointer square means cursor alpha was forced opaque. Inspect the
+  cursor overlay independently from the scanout canvas.
+- If browser acceptance times out at resized WebGPU presentation, rerun only the
+  reported matrix entry with `V86_GPU_BROWSER_MATRIX=<renderer>:<desktop>`.
+  A passing isolated run indicates host scheduling noise; a repeated timeout is
+  a resize/flush regression. Do not hide it by increasing the timeout.
 
 ## Documentation Map
 
@@ -169,7 +200,14 @@ Review the generated contract against the committed contract. Never commit the g
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../../tools/docker/virtio-gpu-alpine-desktop/Readme.md): desktop image, launch URLs, snapshots, sessions, and image verification.
 - [XWAH-1](https://github.com/dynamite-bud/v86/issues/1): completed bounded capset-7 basic-render milestone.
 - [XWAH-15](https://github.com/dynamite-bud/v86/issues/15): bounded arbitrary-WGSL compilation and patched wgpu error-scope milestone.
+- [XWAH-5](https://github.com/dynamite-bud/v86/issues/5): targeted Mesa `webgpuvirt` and accelerated Ghostty implementation and performance gates.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
+- [XWAH-23](https://github.com/dynamite-bud/v86/issues/23): fullscreen Ghostty direct-scanout eligibility.
+- [XWAH-24](https://github.com/dynamite-bud/v86/issues/24): resident BO dirty-range upload batching.
+- [XWAH-25](https://github.com/dynamite-bud/v86/issues/25): eliminate avoidable GPU readbacks.
+- [XWAH-26](https://github.com/dynamite-bud/v86/issues/26): bounded renderer-object caching.
+- [XWAH-27](https://github.com/dynamite-bud/v86/issues/27): frame-fence and queue-notification batching.
+- [XWAH-28](https://github.com/dynamite-bud/v86/issues/28): separate host-rendered terminal transport investigation.
 
 Historical root-level Codex task/plan files were removed after their implemented 2D material and surviving 3D decisions were consolidated into the canonical architecture and this contributor guide.

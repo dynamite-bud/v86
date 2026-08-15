@@ -14,28 +14,30 @@ hardening required for Linux KMS and desktop use:
 - Bounded fragmented guest-backing reads, ordered asynchronous backend submission, and fence-aware replies.
 - Reset/device-loss recovery, serializable 2D state, ready snapshots, hard resource limits, and performance counters.
 - Reproducible Linux KMS plus Xorg/Wayland desktop acceptance through direct JavaScript WebGPU and Rust/Wasm `wgpu`.
-- An opt-in capset-7 basic-render path on the Rust/Wasm backend: standard
-  contexts/resources/transfers, a bounded private submit decoder, frozen
-  version-1 pinned shaders, bounded version-2 arbitrary WGSL with synchronous
-  Naga and WebGPU validation, context-local pipelines, bounded draw work, and
-  5000 ms compilation and GPU-completion timeouts.
+- An opt-in capset-7 path on the Rust/Wasm backend. Frozen version 1 maps the
+  pinned Linux/libdrm flow to one immutable pipeline; version 2 accepts bounded
+  WGSL; version 3 accepts WebGPU-restricted SPIR-V, multiple vertex buffers,
+  indexed draws, sampled textures, uniform bindings, blending, and instancing.
+  The bounded Mesa `webgpuvirt` translator emits only the measured Ghostty
+  command and shader profiles. Naga validation, WebGPU error scopes, resource
+  ceilings, and 5000 ms compilation/GPU-work timeouts fail closed.
 
-The default device still exposes only standard 2D. Resource blobs, UUIDs, host
-mappings, Mesa, SPIR-V, resource bindings, shader translation, virgl
-compatibility, Vulkan, and 3D on the direct JavaScript backend are not
-implemented or advertised.
+The default device remains standard 2D. Capset 7 is available only with
+`experimental_3d: true` and a successful Rust/Wasm backend preflight. Resource
+blobs, UUIDs, host mappings, general virgl/GLSL compatibility, Vulkan, and 3D
+on the direct JavaScript backend are not implemented or advertised.
 
 ## Documentation Map
 
-- [`docs/gpu/README.md`](gpu/README.md) is the contributor entry point: code map, setup, commands, invariants, debugging, and the next task.
-- This document is canonical for the implemented protocol and the gated future 3D design.
+- [`docs/gpu/README.md`](gpu/README.md) is the contributor entry point: code map, setup, commands, invariants, and debugging.
+- This document is canonical for the implemented protocol, renderer, state, security, and failure boundaries.
+- [`docs/webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md), [`docs/webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md), and [`docs/webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md) freeze the private capset byte contracts.
+- [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../tools/docker/virtio-gpu-alpine-codex/Readme.md) owns the targeted Ghostty/Codex appliance and acceleration contract.
 - [`tools/docker/virtio-gpu-alpine/Readme.md`](../tools/docker/virtio-gpu-alpine/Readme.md) owns the minimal KMS guest.
 - [`tools/docker/virtio-gpu-alpine-desktop/Readme.md`](../tools/docker/virtio-gpu-alpine-desktop/Readme.md) owns the XFCE desktop guest and snapshot workflow.
 
-The obsolete root-level Codex plan and first-task files were removed after
-their implemented 2D material and surviving 3D decisions were consolidated
-here. The active Phase 6 handoff is
-[GitHub issue #1](https://github.com/dynamite-bud/v86/issues/1).
+The active accelerated-appliance acceptance work is
+[XWAH-5](https://github.com/dynamite-bud/v86/issues/5).
 
 ## Data Flow
 
@@ -75,10 +77,10 @@ Fenced renderer commands wait for `waitIdle()` before publishing their used-ring
 - An unsupported complete request returns `VIRTIO_GPU_RESP_ERR_UNSPEC`.
 - A fenced response copies the fence flag, 64-bit fence ID, and context ID.
 - `GET_DISPLAY_INFO` returns the required 408-byte structure: scanout 0 enabled at `(0,0)` with the configured mode; scanouts 1-15 are zeroed.
-- Writable buffers shorter than the command response receive an invalid-parameter header when capacity permits; writes are otherwise safely truncated by the VirtIO buffer-chain helper.
+- Control-queue replies must fit the writable buffer: a short writable buffer receives an invalid-parameter header when capacity permits, and the VirtIO chain helper otherwise truncates safely. Cursor-queue commands are one-way and complete their used descriptors with zero written bytes.
 - Resource IDs must be nonzero and unique; total host resource storage is bounded before allocation.
-- Backing lists are capped at 16,384 entries, reject nonzero high addresses and non-RAM ranges, and must cover the resource without exceeding its page-rounded size.
-- Transfers validate rectangle, offset, row pitch, and fragmented backing bounds before allocating or copying.
+- Backing lists are capped per resource and across the device, reject nonzero high addresses and non-RAM ranges, and must cover the resource without exceeding its allocation. Buffer resources additionally permit the page-rounded staging footprint required by Mesa, still bounded by the capset's sixteen-MiB maximum transfer.
+- Transfers validate rectangle, offset, row pitch, fragmented backing bounds, and the negotiated maximum transfer size before allocating or copying. Version-3 buffers cannot be created above the minimum of the advertised buffer, single-allocation, and transfer ceilings.
 - `SET_SCANOUT` accepts only scanout 0; resource ID 0 disables it. Flush submits backend work only for a scanned-out resource.
 - Supported 2D commands return `VIRTIO_GPU_RESP_OK_NODATA`; invalid resource, scanout, parameter, and memory conditions use their specific protocol errors.
 
@@ -86,7 +88,7 @@ Fenced renderer commands wait for `waitIdle()` before publishing their used-ring
 
 The allocated PCI function is `0x0d << 3`. Device, ISR, common, and notification capabilities use ports `0xe600`, `0xe700`, `0xe800`, and `0xe900`. These values are named in `src/virtio_gpu.js` rather than repeated.
 
-The device configuration reports one scanout, zero capsets, and zero blob alignment. `events_clear` applies write-one-to-clear semantics to `events_read`.
+The default device configuration reports one scanout, zero capsets, and zero blob alignment. The explicit `experimental_3d` configuration reports one capset only after Rust/Wasm backend preflight succeeds. `events_clear` applies write-one-to-clear semantics to `events_read`.
 
 `src/virtio.js` accepts optional programming-interface, subclass, and class bytes. Their defaults remain `00:02:00`, preserving every existing VirtIO device's PCI metadata.
 
@@ -236,9 +238,11 @@ The shared browser adapter creates a presentation canvas in the configured
 screen container unless `virtio_gpu.canvas` supplies one. Both renderers enforce
 the host-memory budget, use already aligned source rows directly and repack only
 when WebGPU's 256-byte row alignment requires it, convert all four standard
-32-bit scanout formats, force opaque alpha
-for X formats, and present only on `RESOURCE_FLUSH`. Fenced commands wait for
-submitted GPU work; unfenced commands return after ordered submission.
+32-bit scanout formats, force opaque alpha for X scanout formats, and present
+only on `RESOURCE_FLUSH`. Cursor resources are different: the fourth guest byte
+is the cursor alpha mask for both A and X formats and must be preserved rather
+than forced opaque. Fenced commands wait for submitted GPU work; unfenced
+commands return after ordered submission.
 
 Reset and fatal renderer failures hide the WebGPU canvas and restore the prior
 VGA text/graphics state. A guest-requested scanout disable after WebGPU takeover
@@ -393,29 +397,44 @@ targets listed above.
 ### Experimental 3D status boundary
 
 **Implemented today:** when `virtio_gpu.experimental_3d` is true and the
-Rust/Wasm `wgpu` backend preflight succeeds, the device advertises capset 7,
-`VIRTIO_GPU_F_VIRGL`, and `VIRTIO_GPU_F_CONTEXT_INIT`. It accepts the exact
-standard command subset and the two private submit ABIs frozen in
-[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md) and
-[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Version 1 maps its two pinned
+Rust/Wasm `wgpu` backend passes preflight, the device exposes the versioned
+private wire contracts in [`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md),
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md), and
+[`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md). Version 1 maps two pinned
 shader handles to the immutable startup pipeline. Version 2 accepts bounded
-UTF-8 WGSL, validates every module synchronously with Naga, validates staged
-WebGPU modules and pipelines through the patched wgpu error scope, commits
-objects atomically, caps draw work, and faults after 5000 ms if compilation or
-submitted GPU work does not settle. Browser acceptance proves both revisions,
-invalid-source and draw-limit accounting, repeated compilation/render timeout
-recovery, and zero leaked standard 3D state. With the option off, another backend
-selected, or preflight unavailable, `num_capsets` remains zero and the device
-is the existing standard 2D implementation.
+UTF-8 WGSL. Version 3 accepts bounded WebGPU-restricted SPIR-V, vertex and
+index buffers, sampled textures, uniform bindings, premultiplied-alpha
+blending, and instancing. Every revision validates complete batches before
+creating WebGPU objects or queue work, captures Naga/wgpu validation errors,
+caps draw work, and faults after 5000 ms if compilation or submitted GPU work
+does not settle.
 
-Not implemented: SPIR-V, buffers, bindings, vertex or index data, texture
-sampling, depth/stencil, blending, readback, resource blobs, UUIDs, host
-mappings, Mesa/Gallium, virgl compatibility, or Vulkan. The direct JavaScript
-backend remains 2D-only.
+The checksum-locked i386 Mesa appliance adds a targeted `webgpuvirt` DRM
+winsys to Mesa's virgl/Gallium path. In explicit `accelerated=1` mode it maps
+the measured Ghostty OpenGL state and shader profiles to version-3 WebGPU work.
+The standard VirtIO GPU 2D scanout remains the presentation path. This is a
+bounded application integration, not general virgl or GLSL support. With
+acceleration off, another backend selected, or preflight unavailable,
+`num_capsets` remains zero and the existing standard 2D implementation is
+unchanged.
+
+The measured shader mapping deliberately separates a whole-window
+`BackgroundColor` program from storage-buffer-driven `CellBackground` draws.
+The whole-window program owns a synthetic full-screen triangle and a uniform
+color; sharing the cell shader would shade only one diagonal half of the
+scanout. Cell backgrounds, glyphs, images, solid rectangles, and probe draws
+retain distinct declaration-based classifications. Any new observed shader
+shape is rejected until its resources, output, and malformed cases are
+implemented explicitly.
+
+Not implemented: depth/stencil, general shader translation, general virgl
+compatibility, Vulkan, resource blobs, UUIDs, host mappings, or 3D on the
+direct JavaScript backend.
 
 The implemented boundary is tracked by
-[XWAH-1](https://github.com/dynamite-bud/v86/issues/1) and
-[XWAH-15](https://github.com/dynamite-bud/v86/issues/15). Naming later
+[XWAH-1](https://github.com/dynamite-bud/v86/issues/1),
+[XWAH-15](https://github.com/dynamite-bud/v86/issues/15), and
+[XWAH-5](https://github.com/dynamite-bud/v86/issues/5). Naming a later
 architecture below does not advertise it.
 
 #### Linux/libdrm capset-7 transport gate
@@ -472,33 +491,33 @@ replayed; the browser restores the existing VGA fallback on renderer failure.
 
 ```text
 OpenGL/EGL application
-  -> Mesa state tracker
-  -> webgpuvirt Gallium driver (state, NIR, command builder)
-  -> webgpuvirt DRM winsys (GEM BOs, transfers, execbuffer, syncobj/fence)
+  -> Mesa virgl/Gallium state tracker
+  -> webgpuvirt DRM winsys (capset 7, GEM BOs, transfers, execbuffer, fences)
   -> Linux virtio_gpu DRM UAPI
   -> standard VirtIO GPU control commands and private SUBMIT_3D payload
   -> src/virtio_gpu.js (standard wire, guest memory, IDs, ordering)
   -> owned Uint8Array across the asynchronous backend boundary
-  -> Rust/Wasm decoder + Naga + wgpu (host objects and WebGPU validation)
-  -> one WebGPU queue and the existing WebGPU canvas
+  -> Rust/Wasm decoder + measured-Mesa translator + Naga/wgpu validation
+  -> one WebGPU queue
+  -> standard 2D scanout and the existing WebGPU canvas
 ```
 
 The concrete sequence is:
 
-1. Linux enumerates capset index 0 with `GET_CAPSET_INFO`; Mesa reads version 1
-   through `DRM_IOCTL_VIRTGPU_GET_CAPS`, then initializes capset 7 before the
-   kernel emits `CTX_CREATE`.
+1. Linux enumerates capset index 0 with `GET_CAPSET_INFO`; the targeted Mesa
+   winsys reads version 3 through `DRM_IOCTL_VIRTGPU_GET_CAPS`, then initializes
+   capset 7 before the kernel emits `CTX_CREATE`.
 2. A Gallium BO uses `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE`; Linux emits
    `RESOURCE_CREATE_3D` and `RESOURCE_ATTACH_BACKING`. The returned resource ID
    is used unchanged by the winsys and private submit resource table.
 3. CPU maps operate on GEM shmem. The winsys uses standard
-   `TRANSFER_TO_HOST_3D` and `TRANSFER_FROM_HOST_3D`; JavaScript validates and
-   gathers/scatters fragmented guest backing, while Rust performs WebGPU
-   uploads or bounded readback.
-4. Gallium emits one bounded command stream and the matching GEM BO list to
-   `DRM_IOCTL_VIRTGPU_EXECBUFFER`. Linux wraps the bytes in standard
-   `SUBMIT_3D`; JavaScript validates the outer command and Rust validates the
-   entire private payload before encoding any WebGPU work.
+   `TRANSFER_TO_HOST_3D`; JavaScript validates and gathers fragmented guest
+   backing while Rust performs bounded WebGPU uploads. The dedicated Mesa
+   diagnostic gate also exercises bounded `TRANSFER_FROM_HOST_3D` readback.
+4. Gallium emits one bounded virgl command stream and the matching GEM BO list
+   to `DRM_IOCTL_VIRTGPU_EXECBUFFER`. Linux wraps the bytes in standard
+   `SUBMIT_3D`; JavaScript validates the outer command and Rust validates and
+   translates the entire measured subset before encoding WebGPU work.
 5. Standard fenced responses complete the DRM fence. A renderable 3D resource
    is presented with the existing standard `SET_SCANOUT` and `RESOURCE_FLUSH`;
    no custom present command or second display ABI is introduced.
@@ -507,7 +526,7 @@ The concrete sequence is:
 
 The VirtIO GPU structures and command numbers remain unmodified:
 
-| Standard command | Future 3D use |
+| Standard command | Implemented capset-7 use |
 | --- | --- |
 | `GET_CAPSET_INFO`, `GET_CAPSET` | Return only the immutable capset described below. |
 | `CTX_CREATE`, `CTX_DESTROY` | Create/destroy a nonzero context selected for capset 7. |
@@ -520,24 +539,28 @@ The VirtIO GPU structures and command numbers remain unmodified:
 
 For capset 7, `RESOURCE_CREATE_3D` uses the stable virgl protocol numeric
 namespaces for target, format, and bind fields, but support is implied only by
-the returned format/feature tables. Version 1 accepts buffer, 2D texture, and
-2D-array targets only. Buffer resources use format 0, byte size in `width`,
-unit height/depth/array, one level, and one sample. Unknown bits or combinations
-are invalid. Blobs, host mappings, and a second resource-creation ABI are not
-part of version 1.
+the returned format/feature tables. Version 3 accepts byte-addressable buffers
+as target 0, format 64 (`R8_UNORM`), byte size in `width`, unit
+height/depth/array, one level, and one sample. Listed 2D/rectangle textures
+include RGBA8 UNORM, R8 UNORM, and format 177 (`R8_UINT`) for the pinned
+Ghostty glyph-atlas path. The renderer stores that R8UI atlas as normalized R8
+because the bounded translated fragment shader consumes normalized alpha.
+Unknown formats, bind combinations, or bits are invalid. Blobs, host mappings,
+and a second resource-creation ABI are not part of version 3.
 
-### Capset 7, version 1
+### Capset 7, versions 1-3
 
-The implemented Phase 6 byte contract is frozen in
-[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md). The broader limits and
-opcodes below describe the versioned architecture ceiling; version 1 advertises
-only the exact nonzero fields listed in that dedicated wire document.
+The exact implemented byte contracts are frozen in
+[`webgpuvirt-wire-v1.md`](webgpuvirt-wire-v1.md),
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md), and
+[`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md).
 
-`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 2, and maximum size
+`GET_CAPSET_INFO(index = 0)` returns ID 7, maximum version 3, and maximum size
 912 bytes. `GET_CAPSET(id = 7, version = 1)` returns the frozen 912-byte
-version-1 payload; version 2 is defined in
-[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md). Other indices, IDs, or versions
-return `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`. All fields are packed
+version-1 payload; versions 2 and 3 are defined in
+[`webgpuvirt-wire-v2.md`](webgpuvirt-wire-v2.md) and
+[`webgpuvirt-wire-v3.md`](webgpuvirt-wire-v3.md). Other indices, IDs, or
+versions return `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`. All fields are packed
 little-endian and each versioned payload is frozen for the device lifetime:
 
 ```text
@@ -599,8 +622,8 @@ copy source, copy destination, scanout, CPU upload, and CPU readback.
 Every numeric limit is
 `min(compiled ceiling, configured limit, WebGPU adapter limit)`. A feature is
 set only when every opcode, format, validation path, and test needed for it is
-complete; associated limits are zero otherwise. An incompatible layout needs
-capset version 2 rather than reinterpretation of version 1.
+complete; associated limits are zero otherwise. An incompatible layout needs a
+new capset major rather than reinterpretation of an existing version.
 
 ### Private `SUBMIT_3D` ABI version 1
 
@@ -675,15 +698,14 @@ ordering, fence replies, generation guards, snapshot policy, and the combined
 2D/3D resource budget. It checks the standard envelope and copies request or
 transfer bytes before any `await`; no guest-memory view crosses the boundary.
 
-Rust/Wasm owns the private decoder, context-local immutable-object handle
-tables, the startup-created pipeline, WebGPU textures, command encoders, the
-WebGPU device, and its queue. Naga parses and validates the two pinned WGSL
-sources before negotiation; a 1×1 WebGPU draw probe must complete without a
-device fault. Guest `CREATE_SHADER` compares source bytes exactly and
-`CREATE_PIPELINE` assigns a handle to that immutable host pipeline, so no guest
-shader compilation promise can hold a VirtIO fence. JavaScript passes only
-owned bytes and already-validated standard descriptors. Rust rechecks sizes,
-IDs, attachment membership, capabilities, and its own allocation accounting.
+Rust/Wasm owns the private decoders, context-local object and Mesa state,
+WebGPU resources, command encoders, the WebGPU device, and its queue. Naga
+parses and validates pinned WGSL, guest WGSL, and version-3 SPIR-V as required
+by each frozen wire revision; a 1×1 WebGPU draw probe must complete before
+negotiation. The measured-Mesa path classifies only explicit shader and command
+profiles and maps them to reviewed WGSL. JavaScript passes only owned bytes and
+already-validated standard descriptors. Rust rechecks sizes, IDs, attachment
+membership, capabilities, command state, and allocation accounting.
 
 The 2D and 3D paths share one Rust `wgpu::Device` and `wgpu::Queue` so transfers,
 draws, scanout flushes, and fences have one order. The direct JavaScript WebGPU
@@ -691,35 +713,23 @@ backend remains 2D-only; selecting it suppresses all 3D negotiation.
 
 ### Mesa winsys, Gallium, and shader path
 
-The out-of-tree Mesa work is split so protocol code is not mixed with Gallium
-state tracking:
+The checksum-locked appliance patch keeps Mesa's existing virgl/Gallium state
+tracker and adds a targeted `webgpuvirt` DRM winsys. The winsys selects private
+capset 7, converts its version-3 limits to the narrow virgl capability view,
+uses standard GEM resources and transfers, and submits bounded virgl command
+streams through `DRM_IOCTL_VIRTGPU_EXECBUFFER`. The DRI target is isolated
+under `/usr/local` and selected only by the explicit accelerated boot mode.
 
-- `webgpuvirt` DRM winsys: render-node probing; `GETPARAM`/`GET_CAPS`;
-  capset-7 `CONTEXT_INIT`; GEM BO create/map; 3D transfers; execbuffer BO lists;
-  syncobj/fence import/export; and the bounded submit/resource table builder.
-- `webgpuvirt` Gallium screen: exposes only the intersection of capset bits,
-  format records, adapter limits, and implemented driver paths.
-- Gallium context/resource/state/shader modules: lower pipe state to explicit
-  immutable objects and submit records, track dirty state, and never guess a
-  capability missing from the screen.
-- An initial DRI target selected with
-  `MESA_LOADER_DRIVER_OVERRIDE=webgpuvirt`; automatic loader selection is
-  deferred until isolation and compatibility gates pass.
+Rust does not implement a general TGSI, NIR, GLSL, or virgl translator. It
+parses the command subset recorded from the pinned Ghostty build, classifies
+reviewed shader profiles, and maps those profiles to bounded WGSL for
+background, cell, glyph-atlas, image, probe, and solid-color draws. Unknown
+commands, state combinations, resources, bindings, formats, shader profiles,
+or limits reject the entire submit and roll back staged context state.
 
-NIR remains Mesa's canonical shader IR. Phase 6 sends one bounded, hardcoded
-WGSL module to prove transport and host validation, not general GLSL support.
-Phase 8 compares two explicit routes: preferred Mesa NIR-to-SPIR-V followed by
-Rust Naga SPIR-V validation and WGSL emission, versus a guest NIR-to-WGSL
-emitter. The gate selects one production route using corpus correctness,
-translation time, code size, and debuggability; the other is removed rather
-than maintained as an implicit fallback.
-
-Before serialization Mesa legalizes robust buffer/texture access, clip depth,
-Y orientation, combined samplers, binding layouts, alignment, and unsupported
-line/point modes. Rust then parses and validates the advertised IR with pinned
-Naga rules, emits WGSL when needed, and creates the `wgpu` module inside an
-error scope. Unsupported capabilities, entry points, binding layouts, or
-non-finite values are deterministic validation failures.
+The direct version-3 SPIR-V resource triangle remains an independent transport
+and renderer proof. The accelerated appliance adds the separate Mesa/Ghostty
+integration gate; neither gate broadens the other.
 
 ### Contexts, resources, fences, reset, and snapshots
 
@@ -806,75 +816,39 @@ hash. An explicit debug-capture option may store a size-capped submit, source
 IR, translated WGSL, pipeline descriptor, adapter summary, and reproduction
 command; it is off by default and never changes validation or limits.
 
-### Phase 6: Transport and one triangle
+### Implemented acceptance gates
 
-Implement capset query/pass-through, opt-in negotiation, the standard context
-and resource commands above, 3D transfers, basic-render submit opcodes, Rust
-validation, fences, and standard scanout presentation. Start with a guest
-utility and one WGSL triangle; do not start with Mesa.
+The versioned transport and renderer are covered by:
 
-The phase is not complete until future targets
-`make virtio-gpu-3d-transport-test` and
-`make virtio-gpu-3d-triangle-test` exist and pass. The first must prove exact
-capset bytes through pinned Linux/libdrm, default-zero 3D advertisement,
-standard error responses, limits, reset, and a malformed-submit corpus. The
-second must boot the pinned guest in a browser, verify triangle pixels through
-the standard scanout, prove fenced completion, force teardown/device loss, and
-end with zero live 3D objects and no WebGPU validation or console errors. Only
-then may the experimental opt-in expose the Phase 6 bits.
+- `make virtio-gpu-3d-transport-test` for Rust decoder and protocol tests;
+- `make virtio-gpu-3d-triangle-test` for the frozen version-1 pipeline;
+- `make virtio-gpu-3d-shader-test` for bounded arbitrary version-2 WGSL,
+  malformed sources, compilation/work timeouts, and recovery;
+- `make virtio-gpu-webgpuvirt-triangle-test` for version-3 SPIR-V, resources,
+  bindings, indexed draw, matching reference pixels, fences, device loss, and
+  zero leaked objects;
+- `make virtio-gpu-codex-accelerated-test` for the pinned Mesa `webgpuvirt`
+  build and Ghostty OpenGL startup through the measured command subset,
+  matching off-diagonal background samples, mixed transparent/opaque cursor
+  alpha, and zero browser/WebGPU/backend errors;
+- `make virtio-gpu-codex-benchmark-accelerated` for the same offline terminal
+  workload and raw-run schema as the committed llvmpipe baseline.
 
-### Phase 7: Mesa winsys and Gallium skeleton
+The default appliance and direct JavaScript backend remain 2D-only. The
+accelerated path is explicit and may not silently fall back to llvmpipe.
 
-Add the out-of-tree winsys, screen, context, resource, state, and DRI target.
-Bring up mapping/fences, clear, non-indexed and indexed draws, vertex buffers,
-textures, uniforms, viewport/scissor, and required copies one capset bit at a
-time.
+### Remaining expansion and hardening
 
-The future `make virtio-gpu-3d-mesa-test` gate must boot the pinned guest with
-`MESA_LOADER_DRIVER_OVERRIDE=webgpuvirt`, assert the renderer is
-`webgpuvirt` and not llvmpipe, compare clear and indexed/non-indexed triangle
-pixels, exercise map/upload/readback and fence waits, close the process, and
-assert zero leaked contexts, resources, shaders, pipelines, or fences.
+Any expansion beyond the measured Ghostty subset requires its own capability,
+wire, implementation, malformed-input coverage, and browser acceptance before
+advertisement. General virgl/GLSL translation, depth/stencil, broad Gallium or
+Piglit coverage, Vulkan, transparent live-3D snapshots, and the direct
+JavaScript 3D backend remain unimplemented.
 
-### Phase 8: Shader translation
-
-Implement and select the NIR translation route, then add only the shader
-features needed by the advertised Gallium level. Keep WGSL and SPIR-V
-acceptance independently gated so a translator cannot be selected merely
-because Naga parses one sample.
-
-The future `make virtio-gpu-3d-shader-test` gate must run a pinned positive and
-negative shader corpus through the chosen end-to-end route, compare rendered
-reference pixels, cover robust out-of-bounds access and every coordinate,
-sampler, binding, and alignment legalization, and verify deterministic
-rejection artifacts. It must also enforce module/compile quotas and leave no
-host objects after invalid, reset, or device-loss cases.
-
-### Phase 9: OpenGL and terminal validation
-
-Validate Gallium tests, surfaceless EGL clear, DRM/GBM and X11 triangles,
-`glmark2-es2`, and a focused Piglit subset before compositors or applications.
-Gate GLES 2, OpenGL 2.1, and OpenGL 3.3 separately; `GL_VERSION` and every
-Gallium cap advance only with the corresponding passing set.
-
-The future `make virtio-gpu-3d-gl-test` gate must run those tests in the pinned
-guest, assert `webgpuvirt` in each process, and record pixel/performance/leak
-results. The future `make virtio-gpu-3d-terminal-test` gate must run Kitty and
-automate glyph-atlas rendering, textured alpha blending, scrolling, and resize
-with reference screenshots and no llvmpipe fallback. Ghostty remains later
-because it adds unrelated platform and packaging variables.
-
-### Phase 10: Hardening and eligibility review
-
-Run long malformed-stream, quota, context-isolation, transfer, reset,
-device-loss, 2D-fallback, and lifecycle campaigns. Keep the explicit live-3D
-snapshot rejection until transparent restore has its own complete design and
-gate.
-
-The future `make virtio-gpu-3d-hardening-test` gate must execute deterministic
-fuzz seeds plus randomized decoder/property tests, inject reset and device loss
-at every asynchronous boundary, prove bounded memory and queue depth, verify
-live-3D snapshot rejection and unchanged 2D snapshot restore, and finish the
-Xorg/Wayland 2D acceptance matrix with 3D both disabled and unavailable.
-Passing this gate permits an eligibility review; it does not by itself make 3D
-the default or authorize any unimplemented feature bit.
+Before considering 3D as a default, run long malformed-stream, quota,
+context-isolation, transfer, reset, device-loss, 2D-fallback, and lifecycle
+campaigns. Inject failure at asynchronous boundaries, prove bounded memory and
+queue depth, retain explicit live-3D snapshot rejection, and finish the
+Xorg/Wayland 2D matrix with 3D both disabled and unavailable. Passing those
+gates permits an eligibility review; it does not itself authorize a new
+feature bit or make 3D the default.

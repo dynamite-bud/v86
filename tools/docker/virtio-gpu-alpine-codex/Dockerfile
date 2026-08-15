@@ -3,22 +3,89 @@ FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af
 COPY probe-world.lock probe-packages.lock /tmp/
 RUN xargs apk add --no-cache < /tmp/probe-world.lock && \
     apk info -v | sort | cmp - /tmp/probe-packages.lock
-COPY virtio-gpu-capset-probe.c virtio-gpu-triangle.c /tmp/
+COPY ghostty-terminal-benchmark.c virtio-gpu-capset-probe.c \
+    virtio-gpu-triangle.c virtio-gpu-triangle-spv.h /tmp/
 RUN cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
     /tmp/virtio-gpu-capset-probe.c -o /virtio-gpu-capset-probe && \
     cc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror -I/usr/include/libdrm \
-    /tmp/virtio-gpu-triangle.c -ldrm -o /virtio-gpu-triangle
+    /tmp/virtio-gpu-triangle.c -ldrm -lEGL -lGLESv2 -lgbm -o /virtio-gpu-triangle && \
+    cc -std=c11 -Wall -Wextra -Werror \
+    /tmp/ghostty-terminal-benchmark.c -o /ghostty-terminal-benchmark
+
+FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8 AS mesa-builder
+
+ARG MESA_COMMIT=ffa422e53d59a4938b38abd5c3fc319555da31dd
+RUN apk add --no-cache \
+    bison \
+    build-base \
+    flex \
+    elfutils-dev \
+    expat-dev \
+    git \
+    libdrm-dev \
+    libxrandr-dev \
+    mesa-dev \
+    meson \
+    py3-mako \
+    py3-packaging \
+    py3-yaml \
+    zlib-dev \
+    zstd-dev
+COPY mesa-webgpuvirt.patch /tmp/mesa-webgpuvirt.patch
+RUN git clone --depth 1 --branch mesa-26.1.6 \
+        https://gitlab.freedesktop.org/mesa/mesa.git /src/mesa && \
+    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT" && \
+    git -C /src/mesa apply --check /tmp/mesa-webgpuvirt.patch && \
+    git -C /src/mesa apply /tmp/mesa-webgpuvirt.patch && \
+    meson setup /src/mesa/build-webgpuvirt /src/mesa \
+        -Dplatforms=x11 \
+        -Dgallium-drivers=virgl \
+        -Dvulkan-drivers=[] \
+        -Dglx=dri \
+        -Degl=enabled \
+        -Dgles1=disabled \
+        -Dgles2=enabled \
+        -Dllvm=disabled \
+        -Dshared-glapi=enabled \
+        -Dbuild-tests=false \
+        -Dvideo-codecs=[] && \
+    meson compile -C /src/mesa/build-webgpuvirt && \
+    DESTDIR=/opt/webgpuvirt meson install -C /src/mesa/build-webgpuvirt
+
+COPY mesa-artifacts.lock /tmp/
+RUN set -eux; \
+    expected_commit=$MESA_COMMIT; \
+    . /tmp/mesa-artifacts.lock; \
+    test "$expected_commit" = "$MESA_COMMIT"; \
+    test "$(git -C /src/mesa rev-parse HEAD)" = "$MESA_COMMIT"
+RUN strip --strip-unneeded \
+    /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so \
+    /opt/webgpuvirt/usr/local/lib/dri/libdril_dri.so
+
+FROM scratch AS mesa-artifacts
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /lib/
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /lib/dri
 
 FROM docker.io/library/alpine@sha256:6f5908cdf811d574b30ec394e405ef74ee293bed5af1620a5187d604604a90a8
 
 ENV KERNEL=lts
 
-COPY world.lock packages.lock artifacts.lock /tmp/
+COPY world.lock packages.lock artifacts.lock mesa-artifacts.lock /tmp/
 RUN mkdir -p /boot && xargs apk add --no-cache < /tmp/world.lock && \
     apk info -v | sort | cmp - /tmp/packages.lock
 
 COPY --from=capset-probe-builder /virtio-gpu-capset-probe /usr/local/bin/virtio-gpu-capset-probe
 COPY --from=capset-probe-builder /virtio-gpu-triangle /usr/local/bin/virtio-gpu-triangle
+COPY --from=capset-probe-builder /ghostty-terminal-benchmark /usr/local/bin/v86-ghostty-benchmark
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/libgallium-26.1.6.so /opt/webgpuvirt/lib/
+COPY --from=mesa-builder /opt/webgpuvirt/usr/local/lib/dri /opt/webgpuvirt/lib/dri
+RUN set -eux; \
+    . /tmp/mesa-artifacts.lock; \
+    printf '%s  %s\n' "$MESA_GALLIUM_SHA256" \
+        /opt/webgpuvirt/lib/libgallium-26.1.6.so | sha256sum -c -; \
+    printf '%s  %s\n' "$MESA_DRI_SHA256" \
+        /opt/webgpuvirt/lib/dri/virtio_gpu_dri.so | sha256sum -c -; \
+    ln -sfn /opt/webgpuvirt/lib/dri/libdril_dri.so /usr/lib/dri/virtio_gpu_dri.so
 
 RUN set -eux; \
     . /tmp/artifacts.lock; \
@@ -31,6 +98,7 @@ RUN set -eux; \
     install -m 0755 /tmp/codex-linux-i386-musl/codex /usr/local/bin/codex; \
     install -D -m 0644 /tmp/codex-linux-i386-musl/I386-BUILD.txt /usr/share/doc/codex/I386-BUILD.txt; \
     install -D -m 0644 /tmp/artifacts.lock /usr/share/v86-appliance/artifacts.lock; \
+    install -D -m 0644 /tmp/mesa-artifacts.lock /usr/share/v86-appliance/mesa-artifacts.lock; \
     install -D -m 0644 /tmp/packages.lock /usr/share/v86-appliance/packages.lock; \
     ghostty --version; \
     codex --version; \

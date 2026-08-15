@@ -70,6 +70,16 @@ export class VirtioGpuBackend
     }
 
     /**
+     * @param {{resource_id: number, x: number, y: number, width: number, height: number,
+     *          stride: number}} download
+     * @return {!Promise<!Uint8Array>}
+     */
+    transferFromHost3D(download)
+    {
+        return Promise.reject(new Error("VirtioGpuBackend.transferFromHost3D is not implemented"));
+    }
+
+    /**
      * @param {number} context_id
      * @param {!Uint8Array} commands
      * @param {!Uint32Array} resource_ids
@@ -233,6 +243,28 @@ export class MemoryGpuBackend extends VirtioGpuBackend
             resource.data.set(upload.data.subarray(source_offset, source_offset + row_bytes), target_offset);
         }
         return Promise.resolve();
+    }
+
+    async downloadResource2D(download)
+    {
+        this.assert_initialized();
+        const resource = this.get_resource(download.resource_id);
+        const rect = validate_rect(download, resource.width, resource.height);
+        const stride = validate_nonnegative_integer(download.stride, "stride");
+        const row_bytes = rect.width * 4;
+        if(stride < row_bytes)
+        {
+            return Promise.reject(new Error("Download stride is smaller than a row"));
+        }
+        const result = new Uint8Array(
+            checked_multiply(stride, rect.height, "Download dimensions overflow"));
+        for(let row = 0; row < rect.height; row++)
+        {
+            const source_offset = ((rect.y + row) * resource.width + rect.x) * 4;
+            result.set(resource.data.subarray(source_offset, source_offset + row_bytes),
+                row * stride);
+        }
+        return result;
     }
 
     async setScanout(scanout)

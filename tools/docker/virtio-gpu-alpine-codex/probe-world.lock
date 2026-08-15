@@ -1,3 +1,4 @@
 gcc=15.2.0-r5
 libdrm-dev=2.4.134-r0
+mesa-dev=26.1.6-r0
 musl-dev=1.2.6-r2

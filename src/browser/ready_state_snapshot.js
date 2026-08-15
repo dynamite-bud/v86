@@ -147,7 +147,18 @@ async function compress_state(state)
     }
     const input = new BlobConstructor([state]);
     const stream = input.stream().pipeThrough(new CompressionStreamConstructor("gzip"));
-    const data = await new Response(stream).blob();
+    const reader = stream.getReader();
+    const chunks = [];
+    while(true)
+    {
+        const chunk = await reader.read();
+        if(chunk.done)
+        {
+            break;
+        }
+        chunks.push(chunk.value);
+    }
+    const data = new BlobConstructor(chunks);
     return {
         compression: "gzip",
         data,

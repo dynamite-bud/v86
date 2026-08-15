@@ -1,16 +1,60 @@
 #!/bin/sh
+wait_fifo=/tmp/v86-xinit-wait.$$
+mkfifo "$wait_fifo" || exit 1
+exec 9<>"$wait_fifo"
+rm -f "$wait_fifo"
+wait_tick()
+{
+    read -r -t 0.1 _ <&9 || true
+}
+pid_file_alive()
+{
+    [ -r "$1" ] || return 1
+    IFS= read -r pid < "$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 
 openbox --sm-disable >/tmp/v86-openbox.log 2>&1 &
 openbox_pid=$!
+printf '%s\n' "$openbox_pid" > /tmp/v86-openbox.pid
+benchmark_mode=false
+if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
+    benchmark_mode=true
+fi
+accelerated_mode=false
+renderer_pattern=llvmpipe
+if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
+    accelerated_mode=true
+    renderer_pattern=webgpuvirt
+fi
+run_accelerated()
+{
+    env -u LIBGL_ALWAYS_SOFTWARE \
+        LD_LIBRARY_PATH=/opt/webgpuvirt/lib \
+        LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri \
+        MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu \
+        GDK_DISABLE=egl \
+        MESA_GL_VERSION_OVERRIDE=4.3 \
+        MESA_GLSL_VERSION_OVERRIDE=430 \
+        GSK_RENDERER=cairo \
+        "$@"
+}
+
 
 attempt=0
 while [ "$attempt" -lt 100 ]; do
-    pidof openbox >/dev/null && break
-    sleep 0.1
+    kill -0 "$openbox_pid" 2>/dev/null && break
+    wait_tick
     attempt=$((attempt + 1))
 done
 
-if glxinfo -B >/tmp/v86-glxinfo.log 2>&1 && grep -qi llvmpipe /tmp/v86-glxinfo.log; then
+if $accelerated_mode; then
+    run_accelerated glxinfo -B >/tmp/v86-glxinfo.log 2>&1
+else
+    glxinfo -B >/tmp/v86-glxinfo.log 2>&1
+fi
+if grep -qi "$renderer_pattern" /tmp/v86-glxinfo.log; then
     touch /tmp/v86-appliance-gl-ready
 else
     cat /tmp/v86-openbox.log >>/tmp/v86-appliance.log
@@ -19,23 +63,43 @@ else
 fi
 
 xrandr --output Virtual-1 --mode 1024x768 >/tmp/v86-xrandr.log 2>&1 || true
-ghostty >/tmp/v86-ghostty.log 2>&1 &
+if $accelerated_mode; then
+    run_accelerated ghostty >/tmp/v86-ghostty.log 2>&1 &
+else
+    ghostty >/tmp/v86-ghostty.log 2>&1 &
+fi
 ghostty_pid=$!
+printf '%s\n' "$ghostty_pid" > /tmp/v86-ghostty.pid
 
 attempt=0
 while [ "$attempt" -lt 900 ]; do
     kill -0 "$ghostty_pid" 2>/dev/null || break
-    if pidof codex >/dev/null; then
+    application_ready=false
+    if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
+        application_ready=true
+    elif ! $benchmark_mode && pid_file_alive /tmp/v86-codex.pid; then
+        application_ready=true
+    fi
+    if $application_ready; then
         touch /tmp/v86-appliance-ui-ready
         wait "$ghostty_pid"
         status=$?
         kill "$openbox_pid" 2>/dev/null || true
         exit "$status"
     fi
-    sleep 0.1
+    wait_tick
     attempt=$((attempt + 1))
 done
 
+{
+    printf 'V86_APPLIANCE_PROCESS_SNAPSHOT\n'
+    ps -ef
+    for task in /proc/"$ghostty_pid"/task/*; do
+        [ -e "$task/status" ] || continue
+        printf 'V86_APPLIANCE_GHOSTTY_TASK=%s WCHAN=' "${task##*/}"
+        cat "$task/wchan" 2>/dev/null || true
+    done
+} >>/tmp/v86-appliance.log 2>&1
 cat /tmp/v86-ghostty.log >>/tmp/v86-appliance.log
 kill "$openbox_pid" 2>/dev/null || true
 exit 1

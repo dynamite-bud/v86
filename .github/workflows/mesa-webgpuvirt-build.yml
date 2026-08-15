@@ -1,0 +1,55 @@
+name: Build webgpuvirt Mesa artifacts
+
+on:
+  push:
+    branches:
+      - feature/XWAH-5/ghostty-webgpuvirt
+    paths:
+      - .github/workflows/mesa-webgpuvirt-build.yml
+      - tools/docker/virtio-gpu-alpine-codex/Dockerfile
+      - tools/docker/virtio-gpu-alpine-codex/mesa-webgpuvirt.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-i386:
+    name: Build Alpine i386 Mesa driver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Enable i386 emulation
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: 386
+
+      - name: Configure Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build pinned Mesa driver
+        run: |
+          docker buildx build \
+            --platform linux/386 \
+            --target mesa-artifacts \
+            --output type=local,dest=mesa-artifacts \
+            --file tools/docker/virtio-gpu-alpine-codex/Dockerfile \
+            tools/docker/virtio-gpu-alpine-codex
+
+      - name: Verify i386 artifacts
+        run: |
+          file mesa-artifacts/lib/libgallium-26.1.6.so | grep -q 'ELF 32-bit LSB'
+          file -L mesa-artifacts/lib/dri/virtio_gpu_dri.so | grep -q 'ELF 32-bit LSB'
+          (cd mesa-artifacts && sha256sum \
+            lib/libgallium-26.1.6.so \
+            lib/dri/virtio_gpu_dri.so > SHA256SUMS)
+
+      - name: Upload Mesa artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesa-webgpuvirt-i386
+          if-no-files-found: error
+          path: mesa-artifacts

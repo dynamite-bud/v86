@@ -41,7 +41,7 @@ jobs:
       - name: Install APT packages
         run: |
           sudo apt-get update -y
-          sudo apt-get install nasm gdb qemu-system-x86 libc6-dev-i386 -y
+          sudo apt-get install nasm gdb qemu-system-x86 libc6-dev-i386 python3-zstandard -y
 
       - name: Build all-debug
         run: |
@@ -100,6 +100,12 @@ jobs:
       - name: Download uncached images
         if: steps.cache-images.outputs.cache-hit != 'true'
         run: mkdir -p images && curl --compressed --output-dir images --remote-name-all https://i.copy.sh/{linux.iso,linux3.iso,linux4.iso,buildroot-bzimage68.bin,TinyCore-11.0.iso,oberon.img,msdos.img,openbsd-floppy.img,kolibri.img,windows101.img,os8.img,freedos722.img,mobius-fd-release5.img,msdos622.img}
+
+      - name: Build VirtIO GPU KMS fixture
+        run: |
+          if [ ! -f images/alpine-virtio-gpu-fs.json ]; then
+            make virtio-gpu-kms-image
+          fi
 
       - name: Run api-tests
         run: make api-tests

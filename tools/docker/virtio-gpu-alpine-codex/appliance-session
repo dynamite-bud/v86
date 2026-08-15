@@ -7,9 +7,27 @@ fail()
     reason=$1
     [ ! -f /tmp/v86-appliance.log ] || tail -n 200 /tmp/v86-appliance.log >&3
     [ ! -f /tmp/v86-glxinfo.log ] || tail -n 200 /tmp/v86-glxinfo.log >&3
+    [ ! -f /tmp/v86-openbox.log ] || tail -n 50 /tmp/v86-openbox.log >&3
+    [ ! -f /tmp/v86-xrandr.log ] || tail -n 50 /tmp/v86-xrandr.log >&3
+    [ ! -f /tmp/v86-ghostty.log ] || tail -n 200 /tmp/v86-ghostty.log >&3
     printf 'V86_APPLIANCE_FAILURE=%s\n' "$reason" >&3
     printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
     exit 1
+}
+
+wait_fifo=/tmp/v86-appliance-wait.$$
+mkfifo "$wait_fifo" || fail wait-fifo
+exec 9<>"$wait_fifo"
+rm -f "$wait_fifo"
+wait_tick()
+{
+    read -r -t 0.1 _ <&9 || true
+}
+pid_file_alive()
+{
+    [ -r "$1" ] || return 1
+    IFS= read -r pid < "$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
 printf 'V86_APPLIANCE_BEGIN\n' >&3
@@ -31,7 +49,7 @@ printf 'V86_APPLIANCE_CODEX=%s\n' "$codex_version" >&3
 attempt=0
 while [ "$attempt" -lt 100 ]; do
     [ -e /dev/dri/card0 ] && break
-    sleep 0.1
+    wait_tick
     attempt=$((attempt + 1))
 done
 [ -e /dev/dri/card0 ] || fail drm-missing
@@ -45,7 +63,25 @@ if grep -qw 'v86_gpu_shader=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-triangle --shader-v2 >&3 2>&3 || fail shader-v2
     exec tail -f /dev/null
 fi
-
+if grep -qw 'v86_gpu_resources=1' /proc/cmdline; then
+    LD_LIBRARY_PATH=/usr/lib \
+    LIBGL_DRIVERS_PATH=/usr/lib/dri \
+    /usr/local/bin/virtio-gpu-triangle --shader-v3 >&3 2>&3 || fail shader-v3-resources
+    exec tail -f /dev/null
+fi
+if grep -qw 'v86_gpu_mesa=1' /proc/cmdline; then
+    printf '%s\n' '<driconf><device><application name="v86 webgpuvirt triangle" executable="virtio-gpu-triangle"><option name="always_have_depth_buffer" value="false"/></application></device></driconf>' > "$HOME/.drirc"
+    LD_LIBRARY_PATH=/opt/webgpuvirt/lib \
+    LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri \
+    LIBGL_DEBUG=verbose \
+    EGL_LOG_LEVEL=debug \
+    MESA_DEBUG=1 \
+    MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu \
+    V86_MESA_WEBGPUVIRT=1 \
+        /usr/local/bin/virtio-gpu-triangle --shader-v3 >&3 2>&3 ||
+        fail mesa-webgpuvirt
+    exec tail -f /dev/null
+fi
 
 if grep -qw 'v86_gpu_triangle=1' /proc/cmdline; then
     /usr/local/bin/virtio-gpu-triangle >&3 2>&3 || fail triangle
@@ -70,22 +106,47 @@ export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CURRENT_DESKTOP=OPENBOX
 export XDG_SESSION_DESKTOP=openbox
 export XDG_SESSION_TYPE=x11
-export LIBGL_ALWAYS_SOFTWARE=1
+if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
+    printf '%s\n' '<driconf><device><application name="Ghostty webgpuvirt" executable="ghostty"><option name="always_have_depth_buffer" value="false"/></application></device></driconf>' > "$HOME/.drirc"
+    # startx launches Xorg before xinitrc. Select the appliance-owned Mesa
+    # install here so both glamor and Ghostty use webgpuvirt.
+    export LD_LIBRARY_PATH=/opt/webgpuvirt/lib
+    export LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri
+    export MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu
+    unset LIBGL_ALWAYS_SOFTWARE
+else
+    export LD_LIBRARY_PATH=/usr/lib
+    export LIBGL_DRIVERS_PATH=/usr/lib/dri
+    unset MESA_LOADER_DRIVER_OVERRIDE
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
 export GSK_RENDERER=gl
 
-rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready
+benchmark_mode=false
+if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
+    benchmark_mode=true
+fi
+rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready \
+    /tmp/v86-appliance-benchmark-ready /tmp/v86-codex.pid \
+    /tmp/v86-openbox.pid /tmp/v86-ghostty.pid
 startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-appliance.log 2>&1 &
 session_pid=$!
 
 attempt=0
 while [ "$attempt" -lt 900 ]; do
     kill -0 "$session_pid" 2>/dev/null || break
+    application_ready=false
+    if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
+        application_ready=true
+    elif ! $benchmark_mode && pid_file_alive /tmp/v86-codex.pid; then
+        application_ready=true
+    fi
     if [ -e /tmp/v86-appliance-gl-ready ] &&
        [ -e /tmp/v86-appliance-ui-ready ] &&
        [ -S /tmp/.X11-unix/X0 ] &&
-       pidof openbox >/dev/null &&
-       pidof ghostty >/dev/null &&
-       pidof codex >/dev/null; then
+       pid_file_alive /tmp/v86-openbox.pid &&
+       pid_file_alive /tmp/v86-ghostty.pid &&
+       $application_ready; then
         renderer=$(sed -n 's/^OpenGL renderer string: //p' /tmp/v86-glxinfo.log | head -n 1)
         opengl_version=$(sed -n 's/^OpenGL version string: //p' /tmp/v86-glxinfo.log | head -n 1)
         printf 'V86_APPLIANCE_XORG=PASS\n' >&3
@@ -94,12 +155,26 @@ while [ "$attempt" -lt 900 ]; do
         printf 'V86_APPLIANCE_OPENBOX=PASS\n' >&3
         printf 'V86_APPLIANCE_GHOSTTY_PROCESS=PASS\n' >&3
         printf 'V86_APPLIANCE_GHOSTTY_WINDOW=PASS\n' >&3
-        printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+        if $benchmark_mode; then
+            printf 'V86_APPLIANCE_BENCHMARK_PROCESS=PASS\n' >&3
+        else
+            IFS= read -r codex_pid < /tmp/v86-codex.pid
+            # Read NUL-delimited argv as lines and verify the live launcher contract.
+            codex_arguments=$(tr '\0' '\n' < "/proc/$codex_pid/cmdline")
+            for argument in --disable code_mode code_mode_only code_mode_host \
+                --enable shell_tool unified_exec -c code_mode.disable_in_process_fallback=false; do
+                if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
+                    fail codex-exec-flags
+                fi
+            done
+            printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
+        fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"
         exit $?
     fi
-    sleep 0.1
+    wait_tick
     attempt=$((attempt + 1))
 done
 
