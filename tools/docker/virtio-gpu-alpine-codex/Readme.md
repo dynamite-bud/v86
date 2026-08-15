@@ -30,7 +30,7 @@ The default guest remains software-rendered and uses standard VirtIO GPU 2D scan
 v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, OMP, Bun, or Linux artifacts requested by the original XWAH-3 contract. The implemented appliance therefore pins reviewed downstream i386 ports:
 
 - Ghostty [`v1.3.1-i386.1`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386.1), built for Alpine `x86-linux-musl`;
-- Codex [`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1), built for `i686-unknown-linux-musl`.
+- Codex [`rust-v0.147.0-i386.2`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.2), built for `i686-unknown-linux-musl`.
 
 `artifacts.lock` owns their release URLs and SHA-256 values. The image build downloads only those URLs, verifies both archives before extraction, runs both version commands, and removes download and build residue.
 
@@ -155,6 +155,7 @@ V86_APPLIANCE_GHOSTTY_PROCESS=PASS
 V86_APPLIANCE_GHOSTTY_WINDOW=PASS
 V86_APPLIANCE_CODEX_PROCESS=PASS
 V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
+V86_APPLIANCE_NO_CODE_MODE_HOST=PASS
 V86_APPLIANCE_READY=PASS
 V86_APPLIANCE_END
 ```
@@ -321,29 +322,26 @@ live Codex direct-tool flags, visible scanout, accelerated background
 uniformity, cursor alpha, keyboard delivery, responsive layout, absence of
 desktop packages, writable workspace, and pristine fresh-session reset.
 
-## Observed Codex Limitations
+## Observed Codex Limitation
 
 An authenticated run through the configured relay reached `gpt-5.6-sol` and
-returned a normal response. It exposed two application-level limitations that
-are not hidden by the appliance readiness contract:
+returned a normal response. `codex_apps` MCP startup can still time out during
+`tools/list` pagination. This external MCP startup failure is reported visibly;
+it does not block the observed core prompt/response path.
 
-- `codex_apps` MCP startup can time out during `tools/list` pagination. This is
-  an external MCP startup failure; the observed normal response still
-  completed.
-- The initial Code Mode request failed closed because the pinned i386 archive
-  does not ship `/usr/local/bin/codex-code-mode-host`.
+The i386 archive intentionally omits `/usr/local/bin/codex-code-mode-host` and
+its V8 runtime. Its downstream tool-mode patch treats unavailable
+model-requested `CodeModeOnly` like `CodeMode`: when in-process fallback is
+enabled, Codex exposes direct tools instead of unusable Code Mode calls. The
+appliance disables `code_mode`, `code_mode_only`, and `code_mode_host`, enables
+the stable `shell_tool` and `unified_exec` features, keeps fallback enabled,
+and verifies those arguments from `/proc/<pid>/cmdline` before readiness.
+`codex features list` on the packaged i386 binary confirms the resulting
+feature states.
 
-The appliance now selects Codex's supported direct path: it disables
-`code_mode`, `code_mode_only`, and `code_mode_host`, enables `shell_tool` and
-`unified_exec`, keeps in-process fallback enabled, and verifies those arguments
-from `/proc/<pid>/cmdline` before readiness. `codex features list` on the exact
-packaged i386 binary confirms the resulting feature states. This does not
-implement Code Mode or weaken the no-credential image contract.
-
-[XWAH-6](https://github.com/dynamite-bud/v86/issues/6), a child of XWAH-3,
-tracks a real i686 Code Mode host and bounded MCP pagination diagnosis.
-Preserve visible diagnostics until their underlying components are
-implemented.
+This does not implement Code Mode, package V8, or weaken the no-credential
+image contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6)
+retains the bounded MCP pagination diagnosis.
 
 ## Troubleshooting
 
@@ -360,10 +358,11 @@ implemented.
 - **Black square around the pointer:** cursor conversion forced X-format alpha
   opaque. Preserve the cursor resource's fourth byte; do not change the
   scanout X-format rule.
-- **Codex says Code Mode is unavailable or cannot run commands:** inspect
-  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require
-  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`. Do not add a fake
-  `codex-code-mode-host`.
+- **Codex cannot run commands:** inspect
+  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require both
+  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS` and
+  `V86_APPLIANCE_NO_CODE_MODE_HOST=PASS`. Do not add a fake or V8-backed
+  `codex-code-mode-host`; this fixture uses direct tools.
 
 ## Cage Sibling Handoff
 

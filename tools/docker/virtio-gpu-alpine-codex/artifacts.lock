@@ -1,6 +1,6 @@
 GHOSTTY_TAG=v1.3.1-i386.1
 GHOSTTY_URL=https://github.com/dynamite-bud/ghostty/releases/download/v1.3.1-i386.1/ghostty-v1.3.1-i386-alpine-3.24.tar.gz
 GHOSTTY_SHA256=73391e2ea610e76d419b85634943877e98dcf1e0d412c03d2f0fc5662556114e
-CODEX_TAG=rust-v0.147.0-i386.1
-CODEX_URL=https://github.com/dynamite-bud/codex/releases/download/rust-v0.147.0-i386.1/codex-rust-v0.147.0-i386-alpine-3.24.tar.gz
-CODEX_SHA256=e26bae168d40474d976eb272c48ef86b8acd86bfb3028e9e83060d8f18855438
+CODEX_TAG=rust-v0.147.0-i386.2
+CODEX_URL=https://github.com/dynamite-bud/codex/releases/download/rust-v0.147.0-i386.2/codex-rust-v0.147.0-i386-alpine-3.24.tar.gz
+CODEX_SHA256=c3584dea46b478981740c4b416d3bb824492a63433b41cd330c91479e97f2f7b
