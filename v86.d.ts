@@ -463,24 +463,48 @@ export interface V86Options {
     guest_memory_shared?: "auto" | boolean;
 
     /**
-     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). Requests worker
-     * execution (docs/smp-phase4-design.md §8/§9): the whole machine's
-     * vCPUs run inside one dedicated worker over the shared imported guest
-     * memory while the main thread serves devices. Forces
-     * `guest_memory_backend: "imported"` with a shared memory. `true` is a
-     * hard requirement — the constructor throws synchronously naming the
-     * missing capability (multi-memory, SharedArrayBuffer/COI, Worker) or
-     * unsupported option combination (`initial_state`, `multiboot`,
-     * `wasm_fn`); `"auto"` degrades down the ladder (workers → time-sliced
-     * over imported memory → time-sliced) with a debug log. The resolved
-     * mode is reported through the `"smp-mode"` event and the `smp_mode`
-     * property. Under worker execution, `save_state`/`restore_state` throw
-     * (state assembly across workers lands with a later stage) and
-     * `get_instruction_counter` reads a stale main-thread counter. See
-     * docs/multicore.md.
+     * NOTE: Experimental (XWAH-9 Phase 4). Requests worker execution
+     * (docs/smp-phase4-design.md §8/§9): guest vCPUs run in dedicated
+     * workers over the shared imported guest memory while the main thread
+     * serves devices — one worker per vCPU for `cpus > 1` (real host
+     * parallelism), the whole machine in one worker otherwise; see
+     * `smp_worker_topology`. Forces `guest_memory_backend: "imported"`
+     * with a shared memory. `true` is a hard requirement — the
+     * constructor throws synchronously naming the missing capability
+     * (multi-memory, SharedArrayBuffer/COI, Worker) or unsupported option
+     * combination (`multiboot`, `wasm_fn`), and spawn failures surface as
+     * `"emulator-error"`; `"auto"` degrades down the ladder (workers →
+     * time-sliced over imported memory → time-sliced) with a debug log.
+     * The resolved mode is reported through the `"smp-mode"` event and
+     * the `smp_mode` property. Worker failures after boot are fail-stop:
+     * remaining workers park, `"emulator-error"` fires, the machine
+     * stops. See docs/multicore.md.
      * @default false
      */
     smp_workers?: boolean | "auto";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W3). Worker-execution
+     * topology: `"auto"` resolves to one worker per vCPU (`"percpu"`) for
+     * `cpus > 1` and the whole machine in one worker (`"machine"`) for
+     * `cpus == 1`; the explicit values force a topology.
+     * @default "auto"
+     */
+    smp_worker_topology?: "auto" | "percpu" | "machine";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W5). Memory-ordering
+     * posture for worker execution (docs/smp-phase4-design.md §5).
+     * `"relaxed"` (default): plain guest accesses stay plain wasm
+     * accesses — on weakly ordered hosts (ARM) racing plain guest
+     * accesses can observe x86-forbidden orderings at ppm rates (locked
+     * ops are always sequentially consistent). `"fenced"`: every JIT
+     * guest-RAM fast-path access carries a seq-cst fence, restoring
+     * x86-TSO at a substantial per-access cost (interpreter and slow-path
+     * accesses stay unfenced — see docs/multicore.md known limitations).
+     * @default "relaxed"
+     */
+    smp_memory_model?: "relaxed" | "fenced";
 
     /**
      * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). URL (or Node path/URL)
@@ -786,14 +810,17 @@ export class V86 {
     constructor(options: V86Options);
 
     /**
-     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). The resolved SMP
-     * execution mode, set at init-complete (also delivered as the
-     * `"smp-mode"` bus event): where guest code executes, the effective
-     * vCPU count after option clamping, and the guest-memory backing.
-     * `null` until initialization completes.
+     * NOTE: Experimental (XWAH-9 Phase 4). The resolved SMP execution
+     * mode, set at init-complete (also delivered as the `"smp-mode"` bus
+     * event): where guest code executes, the worker topology and memory
+     * model (both `null` off workers), the effective vCPU count after
+     * option clamping, and the guest-memory backing. `null` until
+     * initialization completes.
      */
     smp_mode: {
         execution: "workers" | "time-sliced",
+        topology: "percpu" | "machine" | null,
+        memory_model: "relaxed" | "fenced" | null,
         cpus_effective: number,
         guest_memory: { backend: "linear" | "imported", shared: boolean },
     } | null;
