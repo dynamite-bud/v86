@@ -10,6 +10,7 @@ fail()
     [ ! -f /tmp/v86-openbox.log ] || tail -n 50 /tmp/v86-openbox.log >&3
     [ ! -f /tmp/v86-xrandr.log ] || tail -n 50 /tmp/v86-xrandr.log >&3
     [ ! -f /tmp/v86-ghostty.log ] || tail -n 200 /tmp/v86-ghostty.log >&3
+    [ ! -f /tmp/v86-codex-direct-shell.log ] || tail -n 50 /tmp/v86-codex-direct-shell.log >&3
     printf 'V86_APPLIANCE_FAILURE=%s\n' "$reason" >&3
     printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
     exit 1
@@ -51,6 +52,13 @@ printf 'V86_APPLIANCE_KERNEL=%s\n' "$(uname -r)" >&3
 ghostty_version=$(ghostty --version 2>/dev/null | head -n 1) || fail ghostty-version
 codex_version=$(codex --version 2>/dev/null) || fail codex-version
 [ ! -e /usr/local/bin/codex-code-mode-host ] || fail code-mode-host-present
+direct_shell_error=/tmp/v86-codex-direct-shell.log
+direct_shell_output=$(
+    cd "$HOME/workspace" &&
+    codex sandbox -- /bin/sh -c 'printf V86_DIRECT_SHELL_OK'
+) 2>"$direct_shell_error" || fail codex-direct-shell
+[ "$direct_shell_output" = V86_DIRECT_SHELL_OK ] || fail codex-direct-shell-output
+rm -f "$direct_shell_error"
 printf 'V86_APPLIANCE_GHOSTTY=%s\n' "$ghostty_version" >&3
 printf 'V86_APPLIANCE_CODEX=%s\n' "$codex_version" >&3
 
@@ -178,6 +186,7 @@ while [ "$attempt" -lt 900 ]; do
             printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
             printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
             printf 'V86_APPLIANCE_NO_CODE_MODE_HOST=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS\n' >&3
         fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"
