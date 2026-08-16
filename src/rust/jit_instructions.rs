@@ -2832,7 +2832,7 @@ define_instruction_read32!(gen_test32, instr32_85_mem_jit, instr32_85_reg_jit);
 
 pub fn instr_86_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     codegen::gen_modrm_resolve_with_local(ctx, modrm_byte, &|ctx, addr| {
-        codegen::gen_safe_read_write(ctx, BitSize::BYTE, &addr, &|ref mut ctx| {
+        crate::jit_locked_xchg_read_write!(ctx, BitSize::BYTE, &addr, &|ref mut ctx| {
             codegen::gen_get_reg8(ctx, r);
             let tmp = ctx.builder.set_new_local();
             codegen::gen_set_reg8(ctx, r);
@@ -2852,7 +2852,7 @@ pub fn instr_86_reg_jit(ctx: &mut JitContext, r1: u32, r2: u32) {
 }
 pub fn instr16_87_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     codegen::gen_modrm_resolve_with_local(ctx, modrm_byte, &|ctx, addr| {
-        codegen::gen_safe_read_write(ctx, BitSize::WORD, &addr, &|ref mut ctx| {
+        crate::jit_locked_xchg_read_write!(ctx, BitSize::WORD, &addr, &|ref mut ctx| {
             codegen::gen_get_reg16(ctx, r);
             let tmp = ctx.builder.set_new_local();
             codegen::gen_set_reg16(ctx, r);
@@ -2863,7 +2863,7 @@ pub fn instr16_87_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
 }
 pub fn instr32_87_mem_jit(ctx: &mut JitContext, modrm_byte: ModrmByte, r: u32) {
     codegen::gen_modrm_resolve_with_local(ctx, modrm_byte, &|ctx, addr| {
-        codegen::gen_safe_read_write(ctx, BitSize::DWORD, &addr, &|ref mut ctx| {
+        crate::jit_locked_xchg_read_write!(ctx, BitSize::DWORD, &addr, &|ref mut ctx| {
             codegen::gen_get_reg32(ctx, r);
             let tmp = ctx.builder.set_new_local();
             codegen::gen_set_reg32(ctx, r);

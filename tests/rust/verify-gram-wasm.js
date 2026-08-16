@@ -5,6 +5,7 @@ import path from "node:path";
 import url from "node:url";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
@@ -180,6 +181,33 @@ for(const [name, module_bytes, shared] of [
     assert.throws(() => gram.gram_atomic_rmw_add_32(525, 1), WebAssembly.RuntimeError,
         `${name}: misaligned atomic traps`);
 
+    // Phase 4 Stage L1 additions: 64-bit CAS, seq-cst load/store, notify.
+    // All valid on both variants (notify simply has no waiters to wake on a
+    // non-shared memory and returns 0); wait32 is runtime-shared-only and
+    // is exercised from a worker further down.
+    view.setBigUint64(528, 0x1122334455667788n, true);
+    assert.equal(BigInt.asUintN(64, gram.gram_atomic_rmw_cmpxchg_64(528, 0n, 1n)),
+        0x1122334455667788n, `${name}: cmpxchg_64 fail returns old`);
+    assert.equal(view.getBigUint64(528, true), 0x1122334455667788n,
+        `${name}: cmpxchg_64 fail leaves value`);
+    assert.equal(BigInt.asUintN(64,
+        gram.gram_atomic_rmw_cmpxchg_64(528, 0x1122334455667788n, 0x8877665544332211n)),
+        0x1122334455667788n, `${name}: cmpxchg_64 ok returns old`);
+    assert.equal(view.getBigUint64(528, true), 0x8877665544332211n,
+        `${name}: cmpxchg_64 ok stores replacement`);
+    assert.throws(() => gram.gram_atomic_rmw_cmpxchg_64(532, 0n, 1n), WebAssembly.RuntimeError,
+        `${name}: misaligned cmpxchg_64 traps`);
+
+    view.setUint32(544, 0xdeadbeef, true);
+    assert.equal(gram.gram_atomic_load_32(544) >>> 0, 0xdeadbeef, `${name}: atomic_load_32`);
+    gram.gram_atomic_store_32(544, 0x0badf00d | 0);
+    assert.equal(view.getUint32(544, true), 0x0badf00d, `${name}: atomic_store_32`);
+    assert.throws(() => gram.gram_atomic_load_32(545), WebAssembly.RuntimeError,
+        `${name}: misaligned atomic_load_32 traps`);
+
+    assert.equal(gram.gram_notify(544, 1), 0, `${name}: notify with no waiters returns 0`);
+    assert.equal(typeof gram.gram_wait32, "function", `${name}: wait32 export exists`);
+
     gram.gram_fence();
 }
 
@@ -213,3 +241,61 @@ assert.throws(
     () => instantiate(nonshared_module, make_guest_memory(true, 1)),
     WebAssembly.LinkError,
     "non-shared import must not link against a shared memory");
+
+// gram_wait32 (runtime shared-only, from an agent that may block): a worker
+// instantiates gram-shared.wasm over the same shared memory and drives all
+// three wait32 outcomes; the main thread wakes it through gram_notify. The
+// non-shared variant only asserts the export's existence above — per the
+// threads spec the wait instruction validates on unshared memories but
+// traps at runtime there (it could never be woken).
+{
+    const guest_memory = make_guest_memory(true, 2);
+    const gram = instantiate(shared_module, guest_memory);
+    const i32 = new Int32Array(guest_memory.buffer);
+    const WAIT_ADDR = 640;
+    i32[WAIT_ADDR >> 2] = 7;
+
+    const worker = new Worker(
+        `
+        const { parentPort, workerData } = require("node:worker_threads");
+        const { module_bytes, guest_memory } = workerData;
+        const wm = new WebAssembly.Module(module_bytes);
+        const gram = new WebAssembly.Instance(wm, { "env": { guest_memory } }).exports;
+        const WAIT_ADDR = ${WAIT_ADDR};
+        const results = {
+            // value is 7, expected 8 -> immediate 1 ("not-equal"; the agent
+            // never enters the wait queue)
+            not_equal: gram.gram_wait32(WAIT_ADDR, 8, -1n),
+            // separate never-notified address (the main thread's notify loop
+            // must not be able to catch this wait): value matches -> blocks;
+            // 1 ms timeout -> 2 ("timed-out")
+            timed_out: gram.gram_wait32(WAIT_ADDR + 4, 0, 1_000_000n),
+            // value matches, infinite timeout -> woken by main -> 0 ("ok")
+            woken: gram.gram_wait32(WAIT_ADDR, 7, -1n),
+        };
+        parentPort.postMessage(results);
+        `,
+        { eval: true, workerData: { module_bytes: shared_module, guest_memory } });
+
+    const results = new Promise((resolve, reject) =>
+    {
+        worker.on("message", resolve);
+        worker.on("error", reject);
+    });
+    // wake the third wait; loop until the notify reports a woken agent, which
+    // also verifies notify's return value from a live waiter
+    let worker_failed = null;
+    worker.on("error", e => { worker_failed = e; });
+    const deadline = Date.now() + 30_000;
+    let woken = 0;
+    while(woken === 0)
+    {
+        if(worker_failed) throw worker_failed;
+        assert(Date.now() < deadline, "wait32 worker must reach the infinite wait");
+        woken = gram.gram_notify(WAIT_ADDR, 1);
+    }
+    assert.equal(woken, 1, "notify reports exactly one woken waiter");
+    assert.deepEqual(await results, { not_equal: 1, timed_out: 2, woken: 0 },
+        "wait32 returns not-equal/timed-out/ok from a worker on shared memory");
+    await worker.terminate();
+}

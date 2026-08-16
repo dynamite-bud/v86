@@ -904,7 +904,7 @@ fn jit_analyze_and_generate(
         pages.insert(Page::page_of(b.addr));
     }
 
-    let print = false;
+    let print = crate::jit_compile_protect_hook!(&pages);
 
     for b in basic_blocks.iter() {
         if !print {
@@ -2251,7 +2251,7 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         entry_points: _,
     }) = ctx.pages.remove(&page)
     {
-        profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
+        crate::jit_invalidate_page_hook!(page);
         did_have_code = true;
 
         free(ctx, wasm_table_index);
@@ -2353,12 +2353,12 @@ pub fn jit_dirty_cache(start_addr: u32, end_addr: u32) {
     let end_page = Page::page_of(end_addr - 1);
 
     for page in start_page.to_u32()..end_page.to_u32() + 1 {
-        jit_dirty_page_ctx(&mut get_jit_state(), Page::page_of(page << 12));
+        crate::jit_dirty_page_hook!(Page::page_of(page << 12));
     }
 }
 
 #[no_mangle]
-pub fn jit_dirty_page(page: Page) { jit_dirty_page_ctx(&mut get_jit_state(), page) }
+pub fn jit_dirty_page(page: Page) { crate::jit_dirty_page_hook!(page) }
 
 /// dirty pages in the range of start_addr and end_addr, which must span at most two pages
 pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
@@ -2368,13 +2368,13 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
     let end_page = Page::page_of(end_addr - 1);
 
     let mut ctx = get_jit_state();
-    jit_dirty_page_ctx(&mut ctx, start_page);
+    crate::jit_dirty_page_ctx_hook!(ctx, start_page);
 
     // Note: This can't happen when paging is enabled, as writes across
     //       boundaries are split up on two pages
     if start_page != end_page {
         dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
-        jit_dirty_page_ctx(&mut ctx, end_page);
+        crate::jit_dirty_page_ctx_hook!(ctx, end_page);
     }
 }
 
@@ -2524,4 +2524,225 @@ pub unsafe fn get_jit_config(index: u32) -> u32 {
         3 => MAX_EXTRA_BASIC_BLOCKS as u32,
         _ => 0,
     }
+}
+
+// ---- XWAH-9 Phase 4 Stage W3: cross-worker JIT shootdown seams ----
+//
+// Appended at the end of the file so the default build's panic-Location
+// line numbers above stay put; every in-body hook replaces exactly one
+// line at its call site (docs/smp-phase4-design.md §9 W3 note). In worker
+// roles, guest-visible writes that (may) invalidate code broadcast a
+// dirty event to every other worker's jit inbox, and compile starts mark
+// the pages in the shared code bitmap + broadcast protect events. The
+// inbox CONSUMER invalidates through jit_dirty_page_local below, which
+// deliberately does not re-post.
+
+/// The non-posting local invalidation used by the worker's inbox drain
+/// (cpu/worker.rs): identical to the historical jit_dirty_page body.
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_dirty_page_local(page: Page) { jit_dirty_page_ctx(&mut get_jit_state(), page) }
+
+/// jit_dirty_page/jit_dirty_cache body: invalidate locally, then (worker
+/// roles) broadcast the dirty event. `no_local_code` after the local
+/// invalidation lets the poster drop its TLB has-code bit so a write
+/// burst to the same page posts only once.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_page_hook {
+    ($page:expr) => {
+        jit_dirty_page_ctx(&mut get_jit_state(), $page)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_page_hook {
+    ($page:expr) => {{
+        let page = $page;
+        let mut ctx = get_jit_state();
+        jit_dirty_page_ctx(&mut ctx, page);
+        let no_local_code = !jit_page_has_code_ctx(&mut ctx, page);
+        drop(ctx);
+        $crate::cpu::worker::post_dirty_page_with(no_local_code, page);
+    }};
+}
+
+/// jit_dirty_cache_small's body (the ctx borrow is already held).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_page_ctx_hook {
+    ($ctx:expr, $page:expr) => {
+        jit_dirty_page_ctx(&mut $ctx, $page)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_page_ctx_hook {
+    ($ctx:expr, $page:expr) => {{
+        jit_dirty_page_ctx(&mut $ctx, $page);
+        let no_local_code = !jit_page_has_code_ctx(&mut $ctx, $page);
+        $crate::cpu::worker::post_dirty_page_with(no_local_code, $page);
+    }};
+}
+
+/// jit_dirty_page_ctx's installed-code branch: a worker retires its code
+/// bitmap bit for the page (the INVALIDATE_PAGE_HAD_CODE stat stays).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_invalidate_page_hook {
+    ($page:expr) => {
+        profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_invalidate_page_hook {
+    ($page:expr) => {
+        profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
+        $crate::cpu::worker::page_invalidated($page);
+    };
+}
+
+/// jit_analyze_and_generate, once the compile's page set is known and
+/// before codegen re-reads the guest bytes: mark + broadcast protection
+/// (expands to the historical `false` of the debug-print flag).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_compile_protect_hook {
+    ($pages:expr) => {
+        false
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_compile_protect_hook {
+    ($pages:expr) => {{
+        $crate::cpu::worker::protect_pages($pages);
+        false
+    }};
+}
+
+/// Whether this instance has installed code, pending entry points, or an
+/// in-flight compile touching `page` — the condition under which its
+/// shared code-bitmap bit (smpctl.rs) must stay set. Used by the worker's
+/// inbox drain (cpu/worker.rs) to SELF-HEAL stale bits: bits are set at
+/// compile start (jit_compile_protect_hook above), but not every removal
+/// path fires jit_invalidate_page_hook — a sibling page removed through
+/// free()'s retain() sweep, or the page set of a compile discarded as
+/// CompilingWritten, keeps its bit with no code behind it. A stale bit
+/// makes every OTHER worker's write to the page take the dirty-notify
+/// slow path (one slow write + posts per TLB refill, forever); clearing
+/// it on the first incoming dirty event bounds the waste at one round.
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_page_has_code_or_compiling(page: Page) -> bool {
+    let ctx = get_jit_state();
+    if ctx.pages.contains_key(&page) || ctx.entry_points.contains_key(&page) {
+        return true;
+    }
+    match &ctx.compiling {
+        Some((_, CompilingPageState::Compiling { pages })) => pages.contains_key(&page),
+        _ => false,
+    }
+}
+
+// ---- store-before-probe ordering for the cross-worker dirty post ----
+//
+// smpctl.rs's code_bitmap_check_rmw requires the guest store to be
+// globally visible BEFORE the probe that publishes its invalidation, but
+// every write site is naturally written "invalidate, then store". The
+// pair below splits the two halves so the LOCAL invalidation keeps its
+// historical position while the cross-worker probe+post moves after the
+// store (rationale in full: cpu/worker.rs defer_dirty_post).
+//
+// Both macros are 1-for-1 single-line swaps whose default arms expand to
+// exactly the tokens they replaced, so the default artifact keeps its
+// byte identity (panic-Location records included: the page/store
+// expressions stay macro ARGUMENTS and therefore keep their call-site
+// spans).
+
+/// jit_dirty_page, minus the cross-worker post, which is queued for the
+/// next flush_dirty_posts instead.
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_dirty_page_deferred(page: Page) {
+    let mut ctx = get_jit_state();
+    jit_dirty_page_ctx(&mut ctx, page);
+    let no_local_code = !jit_page_has_code_ctx(&mut ctx, page);
+    drop(ctx);
+    crate::cpu::worker::defer_dirty_post(no_local_code, page);
+}
+
+/// jit_dirty_cache_small's deferred twin (same two-page span rule).
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_dirty_cache_small_deferred(start_addr: u32, end_addr: u32) {
+    dbg_assert!(start_addr < end_addr);
+    let start_page = Page::page_of(start_addr);
+    let end_page = Page::page_of(end_addr - 1);
+    jit_dirty_page_deferred(start_page);
+    if start_page != end_page {
+        dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
+        jit_dirty_page_deferred(end_page);
+    }
+}
+
+/// The invalidate half of a guest-RAM write site.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_page_for_store {
+    ($page:expr) => {
+        jit::jit_dirty_page($page)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_page_for_store {
+    ($page:expr) => {
+        jit::jit_dirty_page_deferred($page)
+    };
+}
+
+/// The invalidate half of a (possibly page-crossing) guest-RAM write site.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_cache_small_for_store {
+    ($start:expr, $end:expr) => {
+        jit::jit_dirty_cache_small($start, $end)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_cache_small_for_store {
+    ($start:expr, $end:expr) => {
+        jit::jit_dirty_cache_small_deferred($start, $end)
+    };
+}
+
+/// The store half: perform the store, THEN publish the queued posts.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! store_then_flush {
+    ($store:expr) => {
+        $store
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! store_then_flush {
+    ($store:expr) => {{
+        $store;
+        $crate::cpu::worker::flush_dirty_posts();
+    }};
+}
+
+/// A flush with no store of its own, for sites whose stores span a loop
+/// (string.rs's rep fast path). Expands to nothing by default.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! flush_dirty_posts_now {
+    () => {};
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! flush_dirty_posts_now {
+    () => {
+        $crate::cpu::worker::flush_dirty_posts()
+    };
 }

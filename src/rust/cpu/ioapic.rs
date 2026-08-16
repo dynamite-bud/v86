@@ -140,7 +140,7 @@ fn check_irq(ioapic: &mut Ioapic, apics: &mut [apic::Apic], irq: u8) {
         let delivered = if delivery_mode == IOAPIC_DELIVERY_FIXED
             || delivery_mode == IOAPIC_DELIVERY_LOWEST_PRIORITY
         {
-            apic::route(
+            crate::apic_route_hook!(
                 apics,
                 vector,
                 delivery_mode,

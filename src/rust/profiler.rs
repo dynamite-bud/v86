@@ -118,6 +118,15 @@ pub enum stat {
     SEG_OFFSET_NOT_OPTIMISED_FS,
     SEG_OFFSET_NOT_OPTIMISED_GS,
     SEG_OFFSET_NOT_OPTIMISED_NOT_FLAT,
+
+    // XWAH-9 Phase 4 Stage W4 (docs/smp-phase4-design.md §5): the two
+    // locked-fallback serialization paths. CELL = the interim bus-lock
+    // cell (time-sliced, topology (c), single-worker (b)); EXCLUSIVE =
+    // exclusive execution (all other vCPU workers parked for the RMW,
+    // multi-worker topology (b)). Only incremented from the feature-gated
+    // cpu/lock.rs paths, so the default artifact never references them.
+    SAFE_READ_WRITE_LOCKED_BUSLOCK_CELL,
+    SAFE_READ_WRITE_LOCKED_EXCLUSIVE,
 }
 
 #[allow(non_upper_case_globals)]

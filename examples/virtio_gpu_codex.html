@@ -131,6 +131,8 @@ const relay_url = params.get("relay");
 // Experimental (XWAH-9): the SMP topology is visible to the guest through
 // cpuid only; the guest still boots and runs on a single CPU
 const cpus = Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
+const smp_workers = params.get("workers") === "1";
+const smp_memory_model = params.get("mm") === "fenced" ? "fenced" : "relaxed";
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -165,10 +167,15 @@ const relay_state = relay_url ? "configured" : "unconfigured";
 const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}`;
 
 const emulator = new V86({
-    wasm_path: "../build/v86.wasm",
+    wasm_path: smp_workers ? "../build/v86-multimem.wasm" : "../build/v86.wasm",
     memory_size,
     vga_memory_size,
     cpus,
+    ...(smp_workers ? {
+        smp_workers: true,
+        smp_worker_url: "../src/browser/vcpu_worker.js",
+        smp_memory_model,
+    } : {}),
     // cpus > 1 requires acpi (the LAPIC MMIO window is gated on it);
     // keep the appliance's historical acpi-less setup for one CPU
     acpi: cpus > 1,

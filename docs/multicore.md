@@ -63,13 +63,13 @@ switch (an estimated 2–10 % overhead at 2 vCPUs — see
 multi-threaded guest workload is scheduled correctly but runs no faster
 than on one CPU; a single-threaded workload runs marginally slower.
 
-Host parallelism is future work, staged as follows (issue XWAH-9):
+Host parallelism has landed behind `smp_workers` (issue XWAH-9):
 
 | Phase | Content | Status |
 | --- | --- | --- |
 | 0–2 | Groundwork, SMP platform correctness, time-sliced SMP | Landed (this is `cpus: N`) |
 | 3 | Sharable guest RAM (`v86-multimem.wasm` + gram accessor modules) | Landed (this is `guest_memory_backend: "imported"`) |
-| 4 | Worker-per-vCPU execution, LOCK-prefix atomics, IPI doorbells | Not started |
+| 4 | Worker-per-vCPU execution, LOCK-prefix atomics, IPI doorbells | Landed (`smp_workers`: one worker per vCPU for `cpus > 1`, real host parallelism — see the benchmark report — plus the machine-in-a-worker topology; W1–W5 notes in [smp-phase4-design.md](smp-phase4-design.md) §9) |
 | 5 | Integration: docs, API audit, CI | In progress |
 
 ## The imported guest memory backend
@@ -257,12 +257,12 @@ APIs are flagged accordingly.
 
 | API | cpus > 1 today (verified) | Phase 4 outlook |
 | --- | --- | --- |
-| `run` / `stop` / `destroy` | Work; already `Promise`-returning | Signatures survive; stop/destroy must additionally quiesce/terminate workers |
+| `run` / `stop` / `destroy` | Work; already `Promise`-returning | **Current** (Stage W4): signatures unchanged; under `smp_workers`, run/stop drive the command-word protocol (RUN / PARK_REQ, acked at slice boundaries) and destroy quiesces then TERMINATEs every worker |
 | `read_memory` / `write_memory` | Work; `read_memory` returns a copy under SAB backing | Can stay synchronous — guest RAM is a SAB the main thread keeps a view of — but reads/writes race running vCPUs: snapshot/torn semantics unless the embedder stops the emulator first. **Semantics-change candidate** (not signature) |
 | `get_instruction_counter` | Works; counts all vCPUs combined | Per-worker counters need aggregation; a synchronous exact read is impossible. **Sync-becomes-approximate/async candidate** |
 | `get_instruction_stats` | Works (single-thread counters) | Same aggregation caveat as the counter. **Async candidate** |
-| `save_state` / `restore_state` | Work; v7 images, fail-fast validation (see above) | Already async; Phase 4 adds worker quiescing before capture. Signatures survive; latency grows. A v8 format may follow for per-worker state |
-| `restart` | Works (`reset_cpu` resets every vCPU, APs back to wait-for-SIPI) | Becomes a cross-worker operation; signature (void, fire-and-forget) survives |
+| `save_state` / `restore_state` | Work; v7 images, fail-fast validation (see above) | **Current** (Stage W4): signatures unchanged, still async, **same v7 bytes** — images cross freely between time-sliced and worker execution in both directions. Under `smp_workers`, save quiesces the workers ([smp-phase4-design.md](smp-phase4-design.md) §7: PARK_REQ → PARKED_ACK at a slice boundary, mailbox idle), drains every in-flight control-region interrupt into the architectural structures (an undelivered vector must not be dropped from the image — it would dead-lock its level line after restore), pulls each worker's vCPU block + LAPIC struct (topology (c): the whole chipset) into the main instance via postMessage, and runs today's `get_state` unchanged, synchronously after a final drain; restore validates and restores the main instance exactly as today (fail-fast intact — a rejected image leaves the quiesced machine unharmed and resumed), then distributes the regions back to the workers, which reload their live blocks and re-enter their roles. `initial_state` follows the same path at boot. No v8 format was needed |
+| `restart` | Works (`reset_cpu` resets every vCPU, APs back to wait-for-SIPI) | **Current** (Stage W4): signature (void, fire-and-forget) unchanged; under `smp_workers` it is the quiesced reboot — park + ack all workers (a guest-triggered reset completes its own port RPC first), reset the main-side chipset/devices, then per-worker reset commands (each worker resets its instance, APs return to WaitForSipi, and acks by parking; the machine is released together once every worker has reset). Gated by `tests/threads/worker-reboot.js`; note that rebooting after a large Linux guest is broken in every mode (upstream copy/v86#636) |
 | Keyboard/mouse input (`keyboard_send_scancodes`, `keyboard_send_keys`, `keyboard_send_text`, `mouse_set_enabled`, adapters) | Work. Input events synchronously reach the PS/2 device and can synchronously interrupt the *current* vCPU; the 8259 leg is gated to the BSP (`cpu.rs` `handle_irqs`) | Device models stay on one thread; `device_raise_irq` becomes a doorbell post instead of a synchronous call into CPU state (this also removes today's reentrancy hazard). Embedder-facing signatures unchanged; delivery becomes asynchronous — indistinguishable from the guest's perspective |
 | Serial (`serial0_send`, `serial_send_bytes`, `serial_set_*`, adapters) | Work; same synchronous-IRQ path as input, same BSP gating | Same doorbell outlook as input; signatures unchanged |
 | Screen adapters (`screen_*` methods, `ScreenAdapter`/`DummyScreenAdapter`) | Work; screen state is device-side, fed by bus events; the VGA framebuffer lives in the main module's memory | Devices (including VGA) stay on the device thread; unaffected. Legacy VGA MMIO from a non-BSP vCPU becomes a cross-thread RPC (perf, not correctness) |
@@ -287,8 +287,76 @@ execution.
 | JIT `cs_offset` approximation | Compile-time `cs_offset` embedding for 16-bit wrap-around is keyed only by physical page + state flags (pre-existing; real-mode code essentially never reaches the JIT threshold) | [smp-phase2-design.md](smp-phase2-design.md) §Context-switch mechanism; `jit.rs` |
 | vCPU switch overhead | Estimated 2–10 % at 2 vCPUs from the unconditional TLB flush per slice | [smp-phase2-design.md](smp-phase2-design.md) §TLB on switch |
 | Interpreter cost on the imported backend | ~1.66× with the JIT disabled (every interpreter guest-RAM access is a cross-instance call). Steady state is ~1.1 % interpreted, so JIT-on workloads see ~1× (non-shared) to ~1.12× (shared) | [smp-phase3-design.md](smp-phase3-design.md) §4 Stage 6; `docs/jit-profile-2026-08.md` (branch `feature/XWAH-11/jit-profiling-baseline`) |
-| Safari multi-memory pending | The multi-memory validation matrix passes on V8 (Node 24) and Chrome 151; Firefox is untested and Safari is the open go/no-go for the imported backend beyond Chromium/Gecko. The probe fails cleanly on unsupported engines | [smp-phase3-design.md](smp-phase3-design.md) §1 S1, §5 |
-| No host parallelism | All vCPUs share one host thread until Phase 4 | issue XWAH-9 |
+| Safari multi-memory pending | The multi-memory validation matrix passes on V8 (Node 24) and Chrome 151; Firefox is untested and Safari is the open go/no-go for the imported backend beyond Chromium/Gecko — and therefore transitively for worker execution, which ships Chrome-first behind the `"auto"` ladder. The Stage 0 probe page gained the W5 `memory.atomic.wait32`/`notify` cells; Firefox/Safari columns remain pending | [smp-phase3-design.md](smp-phase3-design.md) §1 S1, §5; [smp-phase4-design.md](smp-phase4-design.md) §8 |
+| Relaxed memory ordering on ARM hosts (worker mode) | Under per-vCPU workers, racing PLAIN guest accesses can observe x86-forbidden orderings on weakly ordered hosts at ppm rates (measured: 7–27 per 1e6 racing trials, Apple M4); locked/fenced guest code is unaffected (all LOCK ops are seq-cst). Opt-out: `smp_memory_model: "fenced"` (JIT fast paths fenced, TSO restored — measured 0/1e6; interpreter/slow paths stay unfenced) | [smp-phase4-design.md](smp-phase4-design.md) §5 W5 verdict; `tests/threads/tso-litmus.js` |
+| Exclusive-execution bus-lock cost (worker mode) | Misaligned/page-crossing LOCKed accesses park every other worker for the RMW; acquisition can wait out a busy peer's current execution slice, so split-lock throughput under load is slice-latency-bounded (~ms). Pathological guests only; aligned locked ops take the CAS fast path | [smp-phase4-design.md](smp-phase4-design.md) §5, §9 W4 note |
+| SIPI entry in the default artifact | The default (non-multimem) artifact's time-sliced SIPI consume enters at linear 0 instead of the architectural vector<<12 (masked on first boot by the low-memory sled; multimem builds enter architecturally since W5). One-line fix deferred to the first phase allowed to change the default artifact's bytes | [smp-phase4-design.md](smp-phase4-design.md) §9 W5 note; `vcpu.rs` `sipi_entry_linear_ip!` |
+
+## Worker execution (experimental)
+
+`smp_workers: true | "auto"` (XWAH-9 Phase 4,
+[smp-phase4-design.md](smp-phase4-design.md) §9) moves guest execution off
+the main thread. For `cpus > 1` the default topology is **one worker per
+vCPU** (`smp_worker_topology: "percpu"`, topology (b)) — real host
+parallelism: each vCPU is its own `src/browser/vcpu_worker.js` instance
+over the ONE shared imported guest memory, interrupts travel a shared
+control region (pending-vector bitmaps, INIT/SIPI latches, doorbells), and
+LOCK-prefixed guest instructions execute as real wasm atomics (CAS loops;
+misaligned/page-crossing locked accesses run under exclusive execution).
+On the benchmark fixture a CPU-bound 2-process workload runs 1.74× faster
+than time-sliced `cpus: 2` (a mixed 2-process pipeline load 1.93×; see
+[smp-benchmark-report.md](smp-benchmark-report.md)). For `cpus == 1` (or
+`smp_worker_topology: "machine"`), the whole machine runs time-sliced
+inside ONE worker (topology (c)) — main-thread responsiveness without
+parallelism. Either way the main thread is the device host: devices,
+io.js, and the UI stay on main; blocking port-I/O/MMIO RPCs are serviced
+over a SharedArrayBuffer mailbox; PIT/RTC/ACPI tick on main while workers
+keep their own LAPIC timer deadlines.
+
+Requirements (probed; `true` throws, `"auto"` degrades with a debug log):
+WebAssembly multi-memory, `SharedArrayBuffer` (cross-origin isolation in
+browsers), `Worker`, the built-in wasm loader (no `wasm_fn`), and the
+worker entry point reachable at `smp_worker_url` (it is deliberately not
+part of the bundled library). The resolved mode is observable via the
+`"smp-mode"` event / `emulator.smp_mode` property (fields: `execution`,
+`topology`, `memory_model`, `cpus_effective`, `guest_memory`).
+
+Memory ordering (`smp_memory_model`, Stage W5): plain guest accesses stay
+plain wasm accesses by default (`"relaxed"`). On x86 hosts the host's TSO
+carries over; on weakly ordered hosts (ARM), the TSO litmus detector
+(`tests/threads/tso-litmus.js`) observes the x86-forbidden message-passing
+outcome at ppm rates (7–27 per million racing trials on an Apple M4) —
+real but confined to guest code that races PLAIN accesses with no locked
+edge between them, a pattern correct kernels avoid (all locked ops are
+seq-cst here). `smp_memory_model: "fenced"` closes it: every JIT
+guest-RAM fast-path access carries a seq-cst fence (measured: restores
+TSO exactly — 0/1e6 forbidden outcomes with the TSO-allowed
+store-buffering relaxation still visible) at a substantial per-access
+cost; interpreter and slow-path accesses stay unfenced (documented
+residual — see the §5 verdict in the phase design).
+
+Failure modes (§8, gated by `tests/threads/worker-failure.js`): a worker
+dying mid-run is fail-stop — remaining workers park, `"emulator-error"`
+fires with a descriptive `Error`, and the machine stops; spawn failures
+under `"auto"` degrade down the ladder pre-boot (clean, no error event),
+under `true` they surface loudly; capability conflicts under `true` throw
+synchronously from the constructor.
+
+Since Stage W4, `save_state`/`restore_state`/`initial_state`/`restart` work
+in worker mode (quiesce + state assembly, see the API table above); images
+are the same v7 bytes as time-sliced ones and cross between the modes in
+both directions (`tests/threads/worker-save-restore.js`). Current
+limitations in worker mode: `multiboot` is unsupported,
+`get_instruction_counter` under topology (c) reads a stale main-thread
+counter (topology (b) sums the published per-worker cells), and the three
+semantic shifts flagged in the API table above (racy `read_memory`,
+approximate counters, decoupled event timing) are now real. Chrome/V8 (incl. Node worker_threads) is the verified
+engine; the Firefox/Safari cells follow the Phase 3 probe matrix. Tested by
+`tests/threads/machine-in-worker.js` (boots Linux with `cpus: 1` and the
+Alpine SMP fixture with `cpus: 2` fully inside the worker, plus
+mailbox-under-load and hlt/wake-race stress) and
+`tests/threads/machine-in-worker-boottime.js` (the ≤ 1.25× boot-time gate
+vs time-sliced execution over the same memory backend).
 
 ## Testing
 
@@ -299,7 +367,13 @@ execution.
   (`emulator-error`).
 * `make multimem-tests` — the imported backend (shared and non-shared),
   including SMP over shared memory.
-* `make threads-test` — the cross-thread primitives
-  ([smp-thread-test-plan.md](smp-thread-test-plan.md) Layer A/B).
+* `make threads-test` — the cross-thread primitives and the worker-vCPU
+  Layer C suite ([smp-thread-test-plan.md](smp-thread-test-plan.md)):
+  LOCK exactness, SMP boot, save/restore, reboot, the TSO litmus
+  (`tso-litmus.js`), the guest-driven INVLPG/IPI shootdown storm
+  (`invlpg-storm.js`), and the failure-mode contracts
+  (`worker-failure.js`).
+* `tests/benchmark/smp-workers.js` — the Phase 4 acceptance benchmark
+  (results: [smp-benchmark-report.md](smp-benchmark-report.md)).
 * `tests/kvm-unit-tests/` — bare-metal APIC/SMP tests; the runner takes a
   `CPUS=n` variable.

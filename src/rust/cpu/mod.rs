@@ -7,11 +7,17 @@ pub mod global_pointers;
 pub mod instructions;
 pub mod instructions_0f;
 pub mod ioapic;
+#[cfg(feature = "guest-ram-import")]
+pub mod lock;
 pub mod memory;
 pub mod misc_instr;
 pub mod modrm;
 pub mod pic;
+#[cfg(any(feature = "guest-ram-import", test))]
+pub mod smpctl;
 pub mod sse_instr;
 pub mod string;
 pub mod vcpu;
 pub mod vga;
+#[cfg(feature = "guest-ram-import")]
+pub mod worker;

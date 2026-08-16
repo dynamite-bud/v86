@@ -13,7 +13,9 @@ import { spawnSync } from "node:child_process";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
-const NOT_TESTS = new Set(["run-all.js", "helpers.js"]);
+// machine-in-worker-boottime.js is the explicit W2 boot-regression gate
+// harness (six sequential guest boots) — run it directly, not in the sweep
+const NOT_TESTS = new Set(["run-all.js", "helpers.js", "machine-in-worker-boottime.js"]);
 const test_files = fs.readdirSync(__dirname)
     .filter(name => name.endsWith(".js") && !NOT_TESTS.has(name))
     .sort();

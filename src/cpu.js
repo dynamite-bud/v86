@@ -1284,13 +1284,16 @@ CPU.prototype.create_memory = function(size, minimum_size)
         // starter.js created the memory one wasm page larger than the
         // (identically normalised) memory size: the JIT slow-path scratch
         // pages live at [size, size + 0x2000) (memory.rs
-        // gram_jit_scratch_base)
+        // gram_jit_scratch_base). Under smp_workers the shared control
+        // region follows (src/browser/smpctl.js ctl_pages; the page count
+        // is plumbed through wm alongside guest_memory itself).
         if(size + 0x2000 > buffer.byteLength)
         {
             throw new Error("Imported guest memory too small: memory_size=" + size +
                 " + jit scratch does not fit in " + buffer.byteLength + " bytes");
         }
-        dbg_assert(size + 0x10000 === buffer.byteLength,
+        const ctl_bytes = (this.wm.guest_memory_ctl_pages || 0) * 0x10000;
+        dbg_assert(size + 0x10000 + ctl_bytes === buffer.byteLength,
             "starter.js and create_memory disagree about the guest memory size");
 
         // direct views, not the view() proxy: the guest memory is created
@@ -2102,6 +2105,91 @@ CPU.prototype.load_bios = function()
             addr &= 0xFFFFF;
             this.mem8[addr] = value;
         }.bind(this));
+};
+
+/**
+ * XWAH-9 Phase 4 Stage W2 (docs/smp-phase4-design.md §9): put this CPU
+ * object into device-host mode — the guest executes inside the machine
+ * worker (src/browser/vcpu_worker.js), so the calls that would touch guest
+ * execution state on THIS instance are rerouted to the host:
+ *
+ * - device_raise_irq/device_lower_irq (every JS device model calls these
+ *   through the cpu object) become ordered device-IRQ ring posts; the
+ *   main instance's wasm device_raise_irq must NOT run its handle_irqs —
+ *   there is no guest on the main thread;
+ * - jit_dirty_cache (write_blob during DMA/IDE transfers) posts the dirty
+ *   pages to the worker, whose JIT cache is the live one;
+ * - main_loop becomes the host's device tick (PIT/RTC/ACPI timers live
+ *   here; the worker keeps its own LAPIC deadline);
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park the worker, reset the main-side chipset/devices, then the
+ *   worker's reset command. Fire-and-forget — reboot_internal may run
+ *   inside a mailbox dispatch (guest reset port), where awaiting the
+ *   quiesce would deadlock the triggering worker's pending RPC.
+ *
+ * Everything else (io.js tables, device models, mmap handlers, save Rust
+ * chipset state) stays as constructed — the mailbox server dispatches onto
+ * it.
+ *
+ * @param {!Object} host an SMPWorkerHost (src/browser/smp_worker_host.js)
+ */
+CPU.prototype.attach_smp_worker_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.device_raise_irq = irq => host.post_irq(irq, true);
+    this.device_lower_irq = irq => host.post_irq(irq, false);
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
+    };
+};
+
+/**
+ * XWAH-9 Phase 4 Stage W3 (docs/smp-phase4-design.md §9 W3): put this CPU
+ * object into topology-(b) device-host mode — every vCPU executes in its
+ * own worker (src/browser/vcpu_worker.js per-vCPU mode). Unlike the (c)
+ * attach above, device_raise_irq/device_lower_irq KEEP their default wasm
+ * exports: this instance's Rust PIC/IOAPIC are the authoritative chipset,
+ * and apic::route's shared leg (set_worker_host) posts matched vectors to
+ * the right worker. Only the guest-execution-adjacent calls reroute:
+ *
+ * - jit_dirty_cache (write_blob during DMA/IDE) broadcasts dirty events
+ *   into every worker's jit inbox — the live JIT caches are theirs;
+ * - main_loop becomes the host's device tick;
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park all workers, reset the main-side chipset/devices, then
+ *   per-worker reset commands (APs return to WaitForSipi). Fire-and-forget
+ *   for the same mailbox-dispatch reason as the (c) attach above.
+ *
+ * @param {!Object} host an SMPVcpuHost (src/browser/smp_vcpu_host.js)
+ */
+CPU.prototype.attach_smp_vcpu_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
+    };
 };
 
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)

@@ -243,11 +243,11 @@ pub fn clear_pending(i: usize) {
 /// (read *global_pointers::in_hlt instead).
 pub fn saved_in_hlt(i: usize) -> bool { VCPUS.try_lock().unwrap()[i].save_area[IN_HLT_OFFSET] != 0 }
 
-/// Apply a Startup IPI to vCPU i's save area: real-mode entry at
-/// vector<<12 with CS selector vector<<8 and IP 0; everything else keeps
-/// the power-on image the preceding INIT reset left behind. The cached
-/// state_flags in that image stay valid: still real mode, cpl 0 and
-/// non-flat segmentation (SS base 0x300 from reset) whatever the vector.
+/// Apply a Startup IPI to vCPU i's save area: CS selector vector<<8, CS
+/// base vector<<12, linear IP per sipi_entry_linear_ip! (end of file);
+/// everything else keeps the power-on image the preceding INIT reset left
+/// behind. The cached state_flags in that image stay valid: still real
+/// mode, cpl 0, non-flat segmentation (SS base 0x300) whatever the vector.
 pub fn apply_sipi(i: usize, vector: u8) {
     dbg_assert!(i != current());
     let mut vcpus = VCPUS.try_lock().unwrap();
@@ -257,7 +257,7 @@ pub fn apply_sipi(i: usize, vector: u8) {
     save_area[SEGMENT_OFFSETS_CS_OFFSET..SEGMENT_OFFSETS_CS_OFFSET + 4]
         .copy_from_slice(&((vector as i32) << 12).to_le_bytes());
     save_area[INSTRUCTION_POINTER_OFFSET..INSTRUCTION_POINTER_OFFSET + 4]
-        .copy_from_slice(&0i32.to_le_bytes());
+        .copy_from_slice(&crate::sipi_entry_linear_ip!(vector).to_le_bytes());
 }
 
 pub fn current() -> usize { unsafe { CURRENT } }
@@ -498,9 +498,16 @@ mod tests {
             save_area[SEGMENT_OFFSETS_CS_OFFSET..SEGMENT_OFFSETS_CS_OFFSET + 4],
             0x9A000i32.to_le_bytes()
         );
+        // multimem builds enter architecturally at linear vector<<12; the
+        // default artifact keeps the historical (masked-buggy) linear-0
+        // entry for byte identity — see sipi_entry_linear_ip! below
+        #[cfg(feature = "guest-ram-import")]
+        let expected_ip = 0x9A000i32;
+        #[cfg(not(feature = "guest-ram-import"))]
+        let expected_ip = 0i32;
         assert_eq!(
             save_area[INSTRUCTION_POINTER_OFFSET..INSTRUCTION_POINTER_OFFSET + 4],
-            0i32.to_le_bytes()
+            expected_ip.to_le_bytes()
         );
         // every byte outside the three patched fields is untouched
         for offset in 0..BLOCK_SIZE {
@@ -516,4 +523,31 @@ mod tests {
             }
         }
     }
+}
+
+/// The linear instruction_pointer a Startup IPI writes (apply_sipi above).
+/// v86's instruction_pointer is a LINEAR address (CS base included), so the
+/// architectural real-mode entry CS:IP = (vector<<8):0000 is linear
+/// vector<<12 — which multimem builds write, matching the W4 worker-mode
+/// consume (cpu/worker.rs consume_ipi_special). The DEFAULT artifact keeps
+/// the HISTORICAL literal 0: entry at linear 0, an accident masked on first
+/// boot by sledding through pristine low memory (Phase 2's SeaBIOS AP
+/// bring-up rode it) and broken on any reboot where low RAM holds guest
+/// leftovers — found empirically by the W4 reboot gate and resolved by the
+/// W5 note (§9). It stays because the default artifact's byte identity is
+/// load-bearing on this branch; the one-line fix (0i32 -> (vector as i32)
+/// << 12) is specified for the first phase allowed to change it.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! sipi_entry_linear_ip {
+    ($vector:expr) => {
+        0i32
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! sipi_entry_linear_ip {
+    ($vector:expr) => {
+        (($vector as i32) << 12)
+    };
 }

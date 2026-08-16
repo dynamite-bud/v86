@@ -3971,7 +3971,7 @@ pub unsafe fn instr16_0FC7_1_reg(_r: i32) { trigger_ud(); }
 pub unsafe fn instr32_0FC7_1_reg(_r: i32) { trigger_ud(); }
 pub unsafe fn instr16_0FC7_1_mem(addr: i32) {
     // cmpxchg8b
-    return_on_pagefault!(writable_or_pagefault(addr, 8));
+    crate::cmpxchg8b_prologue!(addr);
     let m64 = safe_read64s(addr).unwrap();
     let m64_low = m64 as i32;
     let m64_high = (m64 >> 32) as i32;
@@ -5297,3 +5297,12 @@ pub unsafe fn instr_0FFF() {
     dbg_log!("#ud: 0F FF");
     trigger_ud();
 }
+
+// Stage L1 (XWAH-9 Phase 4): under the multimem build the LOCK-aware
+// safe_read_write twins in cpu::lock shadow the plain cpu::cpu versions
+// for every caller in this file (CMPXCHG 0FB0/0FB1, XADD 0FC0/0FC1; an
+// explicit import takes precedence over the `cpu::cpu::*` glob above).
+// Lives at the end of the file so the default build's panic-Location line
+// numbers stay byte-identical.
+#[cfg(feature = "guest-ram-import")]
+use crate::cpu::lock::{safe_read_write16, safe_read_write32, safe_read_write8};

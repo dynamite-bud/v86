@@ -1370,6 +1370,39 @@ static mut GUEST_MEMORY_SHARED: bool = false;
 #[no_mangle]
 pub unsafe fn set_guest_memory_shared(shared: u32) { GUEST_MEMORY_SHARED = shared != 0 }
 
+/// Memory-ordering posture for worker execution (design §5,
+/// `smp_memory_model`). When fenced, the jit_gram_* macro arms below wrap
+/// every JIT guest-RAM fast-path access with a seq-cst `atomic.fence` —
+/// AFTER loads, BEFORE stores: the ld;fence / fence;st mapping that
+/// restores x86-TSO (load-load, store-store, load-after-store order) over
+/// a weakly ordered host while store-load reordering stays allowed,
+/// exactly TSO. Consulted at block-compile time; the worker runtime sets
+/// it via set_memory_model_fenced before the first compilation. NOT
+/// fenced (documented residual, §9 W5 note + docs/multicore.md): the
+/// interpreter's gram accessors (cold code), the safe_*_slow_jit slow
+/// paths (page-crossing/mmio), and main-thread device writes (write_blob/
+/// DMA — ordered by their IRQ doorbell per §6).
+#[cfg(feature = "guest-ram-import")]
+static mut GUEST_MEMORY_FENCED: bool = false;
+
+#[cfg(feature = "guest-ram-import")]
+#[no_mangle]
+pub unsafe fn set_memory_model_fenced(fenced: u32) { GUEST_MEMORY_FENCED = fenced != 0 }
+
+#[cfg(feature = "guest-ram-import")]
+impl WasmBuilder {
+    pub fn guest_load_fence(&mut self) {
+        if unsafe { GUEST_MEMORY_FENCED } {
+            self.atomic_fence();
+        }
+    }
+    pub fn guest_store_fence(&mut self) {
+        if unsafe { GUEST_MEMORY_FENCED } {
+            self.atomic_fence();
+        }
+    }
+}
+
 // Guest-RAM access emitters for codegen.rs' gen_safe_read/gen_safe_write/
 // gen_safe_read_write fast paths. Macros rather than methods or cfg'd
 // statements at the call sites: the macro invocation replaces the historical
@@ -1388,9 +1421,10 @@ macro_rules! jit_gram_load8 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_load8 {
-    ($builder:expr, $offset:expr) => {
-        $builder.load_u8_from_guest($offset)
-    };
+    ($builder:expr, $offset:expr) => {{
+        $builder.load_u8_from_guest($offset);
+        $builder.guest_load_fence()
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1403,9 +1437,10 @@ macro_rules! jit_gram_load16 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_load16 {
-    ($builder:expr, $offset:expr) => {
-        $builder.load_unaligned_u16_from_guest($offset)
-    };
+    ($builder:expr, $offset:expr) => {{
+        $builder.load_unaligned_u16_from_guest($offset);
+        $builder.guest_load_fence()
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1418,9 +1453,10 @@ macro_rules! jit_gram_load32 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_load32 {
-    ($builder:expr, $offset:expr) => {
-        $builder.load_unaligned_i32_from_guest($offset)
-    };
+    ($builder:expr, $offset:expr) => {{
+        $builder.load_unaligned_i32_from_guest($offset);
+        $builder.guest_load_fence()
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1433,9 +1469,10 @@ macro_rules! jit_gram_load64 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_load64 {
-    ($builder:expr, $offset:expr) => {
-        $builder.load_unaligned_i64_from_guest($offset)
-    };
+    ($builder:expr, $offset:expr) => {{
+        $builder.load_unaligned_i64_from_guest($offset);
+        $builder.guest_load_fence()
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1448,9 +1485,10 @@ macro_rules! jit_gram_store8 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_store8 {
-    ($builder:expr, $offset:expr) => {
+    ($builder:expr, $offset:expr) => {{
+        $builder.guest_store_fence();
         $builder.store_u8_to_guest($offset)
-    };
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1463,9 +1501,10 @@ macro_rules! jit_gram_store16 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_store16 {
-    ($builder:expr, $offset:expr) => {
+    ($builder:expr, $offset:expr) => {{
+        $builder.guest_store_fence();
         $builder.store_unaligned_u16_to_guest($offset)
-    };
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1478,9 +1517,10 @@ macro_rules! jit_gram_store32 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_store32 {
-    ($builder:expr, $offset:expr) => {
+    ($builder:expr, $offset:expr) => {{
+        $builder.guest_store_fence();
         $builder.store_unaligned_i32_to_guest($offset)
-    };
+    }};
 }
 
 #[cfg(not(feature = "guest-ram-import"))]
@@ -1493,9 +1533,10 @@ macro_rules! jit_gram_store64 {
 #[cfg(feature = "guest-ram-import")]
 #[macro_export]
 macro_rules! jit_gram_store64 {
-    ($builder:expr, $offset:expr) => {
+    ($builder:expr, $offset:expr) => {{
+        $builder.guest_store_fence();
         $builder.store_unaligned_i64_to_guest($offset)
-    };
+    }};
 }
 
 #[cfg(test)]
@@ -1630,6 +1671,7 @@ mod tests {
             (WasmBuilder::atomic_rmw_cmpxchg_i32, 0x48, 2),
             (WasmBuilder::atomic_rmw_cmpxchg_u16, 0x4b, 1),
             (WasmBuilder::atomic_rmw_cmpxchg_u8, 0x4a, 0),
+            (WasmBuilder::atomic_rmw_cmpxchg_i64, 0x49, 3),
         ];
         for &(emit, subopcode, align) in cases {
             // on the guest memory: flags align|0x40, then memidx, then offset
@@ -1821,6 +1863,16 @@ mod tests {
             m.atomic_rmw_cmpxchg_u8(GUEST_MEMORY_INDEX, 0);
             m.drop_();
 
+            // 64-bit cmpxchg (Stage L2: locked CMPXCHG8B); final value 42
+            m.const_i32(224);
+            m.const_i64(7);
+            m.store_unaligned_i64_to_guest(0);
+            m.const_i32(224);
+            m.const_i64(7);
+            m.const_i64(42);
+            m.atomic_rmw_cmpxchg_i64(GUEST_MEMORY_INDEX, 0);
+            m.drop_();
+
             m.atomic_fence();
 
             m.finish();
@@ -1828,5 +1880,32 @@ mod tests {
             let mut f = File::create(path).expect(path);
             f.write_all(&m.output).expect(path);
         }
+    }
+}
+
+// Stage L2 (LOCK-prefix JIT lowering) emitter additions, in a second impl
+// block at the end of the file so the default build's panic-Location line
+// numbers above stay put (same discipline as the other feature seams).
+// cfg'd out of the non-test default build entirely — the dev profile does
+// not strip dead code, so merely-unused additions would perturb the debug
+// artifact's byte identity.
+#[cfg(any(feature = "guest-ram-import", test))]
+impl WasmBuilder {
+    /// i64.atomic.rmw.cmpxchg — the locked CMPXCHG8B fast path.
+    pub fn atomic_rmw_cmpxchg_i64(&mut self, memidx: u8, byte_offset: u32) {
+        self.atomic_op(
+            op::OP_I64ATOMICRMWCMPXCHG,
+            op::MEM_ALIGN64,
+            memidx,
+            byte_offset,
+        );
+    }
+
+    /// local.set of an existing i64 local (the i64 twin of `set_local`;
+    /// needed by the locked CAS loop's retry path).
+    #[allow(dead_code)]
+    pub fn set_local_i64(&mut self, local: &WasmLocalI64) {
+        self.instruction_body.push(op::OP_SETLOCAL);
+        self.instruction_body.push(local.idx());
     }
 }

@@ -1980,7 +1980,7 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
         return Ok(phys_addr);
     }
     let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
-    jit::jit_dirty_page(page);
+    crate::jit_dirty_page_for_store!(page);
     if !is_smc {
         return Ok(phys_addr);
     }
@@ -2127,7 +2127,7 @@ pub unsafe fn do_page_walk(
                 | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
 
             if side_effects && page_dir_entry != new_page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
+                crate::write_pte_ad!(page_dir_addr, new_page_dir_entry);
             }
 
             high = if pae {
@@ -2179,13 +2179,13 @@ pub unsafe fn do_page_walk(
             // Note: dirty bit is only set on the page table entry
             let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
             if side_effects && new_page_dir_entry != page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
+                crate::write_pte_ad!(page_dir_addr, new_page_dir_entry);
             }
             let new_page_table_entry = page_table_entry
                 | PAGE_TABLE_ACCESSED_MASK
                 | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
             if side_effects && page_table_entry != new_page_table_entry {
-                memory::write8(page_table_addr, new_page_table_entry);
+                crate::write_pte_ad!(page_table_addr, new_page_table_entry);
             }
 
             high = page_table_entry as u32 & 0xFFFFF000;
@@ -2223,7 +2223,7 @@ pub unsafe fn do_page_walk(
 
     let is_in_mapped_range = memory::in_mapped_range(high);
     let has_code = if side_effects {
-        !is_in_mapped_range && jit::jit_page_has_code(Page::page_of(high))
+        !is_in_mapped_range && crate::page_has_code_hook!(high)
     }
     else {
         // If side_effects is false, don't call into jit::jit_page_has_code. This value is not used
@@ -3272,7 +3272,7 @@ pub unsafe fn segment_prefix_op(seg: i32) {
 
 #[no_mangle]
 pub unsafe fn main_loop() -> f64 {
-    profiler::stat_increment(stat::MAIN_LOOP);
+    crate::main_loop_stat_or_worker!();
 
     if vcpu::count() > 1 {
         return main_loop_smp();
@@ -4005,12 +4005,12 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4026,12 +4026,12 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4050,12 +4050,12 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4073,12 +4073,12 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write64_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write64_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -4097,12 +4097,12 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write128_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write128_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -4120,12 +4120,12 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     }
 }
 
@@ -4147,12 +4147,12 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }
@@ -4175,12 +4175,12 @@ pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }
@@ -4635,7 +4635,7 @@ pub unsafe fn handle_irqs() {
         // the 8259's ExtINT line wires to the BSP (vCPU 0) only; the APIC
         // leg acknowledges from the current vCPU's LAPIC context
         if vcpu::current() == 0 {
-            if let Some(irq) = pic::pic_acknowledge_irq() {
+            if let Some(irq) = crate::pic_acknowledge_hook!() {
                 pic_call_irq(irq);
                 return;
             }
@@ -4666,7 +4666,7 @@ unsafe fn pic_call_irq(interrupt_nr: u8) {
 // flushes per masked device IRQ for nothing; spurious wakes are harmless,
 // missed wakes hang the guest.
 unsafe fn wake_bsp_if_pic_requested() {
-    if vcpu::count() > 1 && pic::has_requested_irq() {
+    if crate::wake_bsp_hook!() {
         vcpu::note_interrupt(0);
         if vcpu_in_hlt(0) {
             js::stop_idling();
@@ -4695,7 +4695,7 @@ unsafe fn device_lower_irq(i: u8) {
 
 pub fn io_port_read8(port: i32) -> i32 {
     unsafe {
-        match port {
+        match crate::pic_port_forward_read8!(port) {
             0x20 => pic::port20_read() as i32,
             0x21 => pic::port21_read() as i32,
             0xA0 => pic::portA0_read() as i32,
@@ -4711,7 +4711,7 @@ pub fn io_port_read32(port: i32) -> i32 { unsafe { js::io_port_read32(port) } }
 
 pub fn io_port_write8(port: i32, value: i32) {
     unsafe {
-        match port {
+        match crate::pic_port_forward_write8!(port, value) {
             0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1 => {
                 match port {
                     0x20 => pic::port20_write(value as u8),
@@ -4809,7 +4809,7 @@ pub unsafe fn reset_cpu() {
 /// to power-on values with the real-mode entry point at F000:FFF0.
 /// Machine-global state (APIC/IOAPIC, TSC, JIT cache) is reset once by
 /// reset_cpu, not here.
-unsafe fn reset_vcpu_block() {
+pub unsafe fn reset_vcpu_block() {
     for i in 0..8 {
         *segment_is_null.offset(i) = false;
         *segment_limits.offset(i) = 0;
@@ -5112,4 +5112,151 @@ pub unsafe fn safe_write_slow_jit(
     else {
         (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
+}
+
+// ---- XWAH-9 Phase 4 Stage W3: worker-topology seams ----
+//
+// Appended at the end of the file so the default build's panic-Location
+// line numbers above stay put; every in-body hook replaces exactly one
+// line at its call site (the write_pte_ad!/cmpxchg8b_prologue! pattern).
+// The default arms expand to the historical code; the feature arms route
+// into cpu::worker (src/rust/cpu/worker.rs).
+
+/// main_loop's first statement: the MAIN_LOOP profiler stat, plus — in a
+/// per-vCPU worker (topology (b)) — the dispatch into the worker loop
+/// (design §3): worker_vcpu set -> main_loop_worker; else the smp/fast
+/// paths below run unchanged.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! main_loop_stat_or_worker {
+    () => {
+        profiler::stat_increment(stat::MAIN_LOOP)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! main_loop_stat_or_worker {
+    () => {
+        profiler::stat_increment(stat::MAIN_LOOP);
+        if let Some(i) = $crate::cpu::worker::vcpu_index() {
+            return $crate::cpu::worker::main_loop_worker(i);
+        }
+    };
+}
+
+/// TLB fill's has-code test: in a per-vCPU worker a page is treated as
+/// containing code when ANY worker's code bitmap says so, so writes to it
+/// take the dirty-notify slow path (design §9 W3 note).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! page_has_code_hook {
+    ($high:expr) => {
+        jit::jit_page_has_code(Page::page_of($high))
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! page_has_code_hook {
+    ($high:expr) => {
+        (jit::jit_page_has_code(Page::page_of($high))
+            || $crate::cpu::worker::remote_page_has_code($high))
+    };
+}
+
+/// handle_irqs' 8259 acknowledge: the BSP worker services the PIC flag
+/// through the pic_acknowledge mailbox RPC; the device host never
+/// acknowledges (design §4).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_acknowledge_hook {
+    () => {
+        pic::pic_acknowledge_irq()
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_acknowledge_hook {
+    () => {
+        $crate::cpu::worker::pic_acknowledge()
+    };
+}
+
+/// wake_bsp_if_pic_requested's condition: on the (b) device host an
+/// asserting 8259 posts the PIC flag + doorbell[0] instead of the local
+/// note_interrupt/stop_idling wake.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! wake_bsp_hook {
+    () => {
+        vcpu::count() > 1 && pic::has_requested_irq()
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! wake_bsp_hook {
+    () => {
+        $crate::cpu::worker::wake_bsp_filter()
+    };
+}
+
+/// io_port_read8's scrutinee: a per-vCPU worker forwards the 8259/ELCR
+/// ports to the device host (whose host_io_port_read8 export reaches the
+/// authoritative PIC through this same intercept on the main instance).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_port_forward_read8 {
+    ($port:expr) => {
+        $port
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_port_forward_read8 {
+    ($port:expr) => {{
+        if $crate::cpu::worker::in_vcpu_worker()
+            && matches!($port, 0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1)
+        {
+            return js::io_port_read8($port);
+        }
+        $port
+    }};
+}
+
+/// io_port_write8's scrutinee: the write twin of pic_port_forward_read8.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_port_forward_write8 {
+    ($port:expr, $value:expr) => {
+        $port
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_port_forward_write8 {
+    ($port:expr, $value:expr) => {{
+        if $crate::cpu::worker::in_vcpu_worker()
+            && matches!($port, 0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1)
+        {
+            return js::io_port_write8($port, $value);
+        }
+        $port
+    }};
+}
+
+/// instr_F4's park leg (hlt with IF=0 under SMP): a per-vCPU worker
+/// additionally publishes the parked state to the control region.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! vcpu_park_hook {
+    () => {
+        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! vcpu_park_hook {
+    () => {
+        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked);
+        $crate::cpu::worker::publish_parked();
+    };
 }
