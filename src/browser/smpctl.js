@@ -8,7 +8,7 @@
 //   CTL_BASE = memory_size + CTL_BASE_GAP
 // (the next wasm-page boundary after the JIT scratch page). JS reaches it as
 // an Int32Array view over the guest memory's SharedArrayBuffer; all
-// cross-thread cells are u32s at 4-byte-aligned offsets, so `byte >> 2` maps
+// cross-thread cells are u32s at 4-byte-aligned offsets, so `byte >>> 2` maps
 // a layout offset to a view index.
 //
 // The mailbox client/server below are the Layer A protocol of
@@ -151,7 +151,7 @@ export function ctl_size(n)
  */
 export function ctl_code_bitmap_stride(memory_size)
 {
-    return (memory_size >> 15) + CTL_CACHE_LINE - 1 & ~(CTL_CACHE_LINE - 1);
+    return (memory_size >>> 15) + CTL_CACHE_LINE - 1 & ~(CTL_CACHE_LINE - 1);
 }
 
 /**
@@ -254,7 +254,7 @@ export function ctl_probe_offset(field, i, n)
  */
 export function doorbell_post(i32, ctl_base, i)
 {
-    const w = ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >> 2;
+    const w = ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >>> 2;
     const old = Atomics.add(i32, w, 1);
     Atomics.notify(i32, w);
     return old;
@@ -269,7 +269,7 @@ export function doorbell_post(i32, ctl_base, i)
  */
 export function doorbell_read(i32, ctl_base, i)
 {
-    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >> 2);
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >>> 2);
 }
 
 /**
@@ -284,7 +284,7 @@ export function doorbell_read(i32, ctl_base, i)
  */
 export function doorbell_wait(i32, ctl_base, i, seen, timeout_ms)
 {
-    return Atomics.wait(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >> 2, seen, timeout_ms);
+    return Atomics.wait(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_DOORBELL >>> 2, seen, timeout_ms);
 }
 
 /**
@@ -295,7 +295,7 @@ export function doorbell_wait(i32, ctl_base, i, seen, timeout_ms)
  */
 export function run_state_publish(i32, ctl_base, i, state)
 {
-    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_RUN_STATE_PUB >> 2, state);
+    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_RUN_STATE_PUB >>> 2, state);
 }
 
 /**
@@ -305,7 +305,7 @@ export function run_state_publish(i32, ctl_base, i, state)
  */
 export function run_state_read(i32, ctl_base, i)
 {
-    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_RUN_STATE_PUB >> 2);
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_RUN_STATE_PUB >>> 2);
 }
 
 /**
@@ -316,7 +316,7 @@ export function run_state_read(i32, ctl_base, i)
  */
 export function heartbeat_publish(i32, ctl_base, i)
 {
-    return Atomics.add(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_HEARTBEAT >> 2, 1);
+    return Atomics.add(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_HEARTBEAT >>> 2, 1);
 }
 
 /**
@@ -326,7 +326,7 @@ export function heartbeat_publish(i32, ctl_base, i)
  */
 export function heartbeat_read(i32, ctl_base, i)
 {
-    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_HEARTBEAT >> 2);
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_HEARTBEAT >>> 2);
 }
 
 /**
@@ -336,7 +336,7 @@ export function heartbeat_read(i32, ctl_base, i)
  */
 export function command_read(i32, ctl_base, i)
 {
-    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >> 2);
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >>> 2);
 }
 
 /**
@@ -347,7 +347,7 @@ export function command_read(i32, ctl_base, i)
  */
 export function command_write(i32, ctl_base, i, command)
 {
-    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >> 2, command);
+    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >>> 2, command);
 }
 
 /**
@@ -361,7 +361,7 @@ export function command_write(i32, ctl_base, i, command)
  */
 export function command_ack(i32, ctl_base, i, expected, ack)
 {
-    const w = ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >> 2;
+    const w = ctl_base + i * CTL_VCPU_STRIDE + CTL_COMMAND >>> 2;
     return Atomics.compareExchange(i32, w, expected, ack) === expected;
 }
 
@@ -381,14 +381,14 @@ export function command_ack(i32, ctl_base, i, expected, ack)
  */
 export function ring_push(i32, ring, cap, value)
 {
-    const head = Atomics.load(i32, ring + CTL_RING_HEAD >> 2) >>> 0;
-    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >> 2) >>> 0;
+    const head = Atomics.load(i32, ring + CTL_RING_HEAD >>> 2) >>> 0;
+    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >>> 2) >>> 0;
     if(((head - tail) >>> 0) >= cap)
     {
         return false;
     }
-    i32[ring + CTL_RING_SLOTS + 4 * (head % cap) >> 2] = value;
-    Atomics.store(i32, ring + CTL_RING_HEAD >> 2, head + 1 | 0);
+    i32[ring + CTL_RING_SLOTS + 4 * (head % cap) >>> 2] = value;
+    Atomics.store(i32, ring + CTL_RING_HEAD >>> 2, head + 1 | 0);
     return true;
 }
 
@@ -400,14 +400,14 @@ export function ring_push(i32, ring, cap, value)
  */
 export function ring_pop(i32, ring, cap)
 {
-    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >> 2) >>> 0;
-    const head = Atomics.load(i32, ring + CTL_RING_HEAD >> 2) >>> 0;
+    const tail = Atomics.load(i32, ring + CTL_RING_TAIL >>> 2) >>> 0;
+    const head = Atomics.load(i32, ring + CTL_RING_HEAD >>> 2) >>> 0;
     if(head === tail)
     {
         return undefined;
     }
-    const value = i32[ring + CTL_RING_SLOTS + 4 * (tail % cap) >> 2];
-    Atomics.store(i32, ring + CTL_RING_TAIL >> 2, tail + 1 | 0);
+    const value = i32[ring + CTL_RING_SLOTS + 4 * (tail % cap) >>> 2];
+    Atomics.store(i32, ring + CTL_RING_TAIL >>> 2, tail + 1 | 0);
     return value;
 }
 
@@ -429,21 +429,21 @@ export function ring_pop(i32, ring, cap)
 export function jit_inbox_push(i32, ctl_base, i, event)
 {
     const inbox = ctl_base + i * CTL_VCPU_STRIDE + CTL_JIT_INBOX;
-    while(Atomics.compareExchange(i32, inbox + CTL_JIT_INBOX_LOCK >> 2, 0, 1) !== 0)
+    while(Atomics.compareExchange(i32, inbox + CTL_JIT_INBOX_LOCK >>> 2, 0, 1) !== 0)
     {
     }
-    const head = Atomics.load(i32, inbox + CTL_JIT_INBOX_HEAD >> 2) >>> 0;
-    const tail = Atomics.load(i32, inbox + CTL_JIT_INBOX_TAIL >> 2) >>> 0;
+    const head = Atomics.load(i32, inbox + CTL_JIT_INBOX_HEAD >>> 2) >>> 0;
+    const tail = Atomics.load(i32, inbox + CTL_JIT_INBOX_TAIL >>> 2) >>> 0;
     if(((head - tail) >>> 0) >= CTL_JIT_INBOX_CAP)
     {
-        Atomics.store(i32, inbox + CTL_JIT_INBOX_OVERFLOW >> 2, 1);
+        Atomics.store(i32, inbox + CTL_JIT_INBOX_OVERFLOW >>> 2, 1);
     }
     else
     {
-        i32[inbox + CTL_JIT_INBOX_SLOTS + 4 * (head % CTL_JIT_INBOX_CAP) >> 2] = event;
-        Atomics.store(i32, inbox + CTL_JIT_INBOX_HEAD >> 2, head + 1 | 0);
+        i32[inbox + CTL_JIT_INBOX_SLOTS + 4 * (head % CTL_JIT_INBOX_CAP) >>> 2] = event;
+        Atomics.store(i32, inbox + CTL_JIT_INBOX_HEAD >>> 2, head + 1 | 0);
     }
-    Atomics.store(i32, inbox + CTL_JIT_INBOX_LOCK >> 2, 0);
+    Atomics.store(i32, inbox + CTL_JIT_INBOX_LOCK >>> 2, 0);
 }
 
 // ---- W3 host-side helpers (device host of topology (b)) ----
@@ -457,7 +457,7 @@ export function jit_inbox_push(i32, ctl_base, i, event)
  */
 export function pic_pending_set(i32, ctl_base, i)
 {
-    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_PIC_PENDING >> 2, 1);
+    Atomics.store(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_PIC_PENDING >>> 2, 1);
 }
 
 /**
@@ -469,7 +469,7 @@ export function pic_pending_set(i32, ctl_base, i)
  */
 export function insn_read(i32, ctl_base, i)
 {
-    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_INSN_PUB >> 2);
+    return Atomics.load(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_INSN_PUB >>> 2);
 }
 
 /**
@@ -480,7 +480,7 @@ export function insn_read(i32, ctl_base, i)
  */
 export function host_doorbell_word(ctl_base, n)
 {
-    return ctl_base + ctl_machine_offset(n) + CTL_MACHINE_HOST_DOORBELL >> 2;
+    return ctl_base + ctl_machine_offset(n) + CTL_MACHINE_HOST_DOORBELL >>> 2;
 }
 
 // ---- mailbox (Layer A RPC protocol, tests/threads/mailbox-protocol.js) ----
@@ -530,7 +530,7 @@ export const MAILBOX_OP_PIC_ACK = 7;
  */
 export function mailbox_record_word(ctl_base, i)
 {
-    return ctl_base + i * CTL_VCPU_STRIDE + CTL_MAILBOX >> 2;
+    return ctl_base + i * CTL_VCPU_STRIDE + CTL_MAILBOX >>> 2;
 }
 
 /**
@@ -582,9 +582,17 @@ export function mailbox_request(ctl, record, op, addr, size, value, timeout_ms,
  * Device-host side: service one pending request, if any. The seq-cst STATE
  * load acquires the requester's plain field writes; `handler(op, addr, size,
  * value_lo, value_hi, seq, value_2, value_3)` returns the response value for
- * reads and undefined for writes (the record's VALUE_LO is only written when
- * a value is returned, preserving the Layer A byte behavior). Returns true
- * when a request was serviced.
+ * reads and undefined for writes. Returns true when a request was serviced.
+ *
+ * VALUE_LO is written UNCONDITIONALLY (undefined becomes 0). It used to be
+ * written only when the handler returned a value, which left the field
+ * holding the REQUESTER'S OWN request word — so any handler path that
+ * forgot to return a number made the client read its own argument back as
+ * the answer. That is not hypothetical: the rep-I/O ops carry the element
+ * count in VALUE_LO both ways, and a dispatch whose catch leg returned
+ * undefined therefore reported "all N elements transferred" for a batch
+ * that had thrown. Answering 0 makes a missing return value a loud zero
+ * instead of a silent success, for every op present and future.
  * @param {!Int32Array} ctl
  * @param {number} record
  * @param {function(number, number, number, number, number, number, number, number): (number|undefined)} handler
@@ -604,10 +612,7 @@ export function mailbox_service(ctl, record, handler)
         ctl[record + MAILBOX_SEQ],
         ctl[record + MAILBOX_VALUE_2],
         ctl[record + MAILBOX_VALUE_3]);
-    if(result !== undefined)
-    {
-        ctl[record + MAILBOX_VALUE_LO] = result | 0;
-    }
+    ctl[record + MAILBOX_VALUE_LO] = result === undefined ? 0 : result | 0;
     Atomics.store(ctl, record + MAILBOX_STATE, MAILBOX_RESPONSE);
     Atomics.notify(ctl, record + MAILBOX_STATE);
     return true;

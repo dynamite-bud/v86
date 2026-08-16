@@ -183,18 +183,35 @@ pub unsafe fn safe_read_write8_locked(addr: i32, instruction: &dyn Fn(i32) -> i3
     safe_read_write8_impl(addr, instruction, true)
 }
 
+/// The dirty notification for a guest-RAM write, factored out so every
+/// arm below can only ever call it in ONE position: AFTER the store.
+///
+/// smpctl.rs's code_bitmap_check_rmw requires exactly that — the probe's
+/// seq-cst RMW is what orders the store ahead of a racing compiler's
+/// bitmap bit-set, so that a compile this probe fails to notice is
+/// guaranteed to read the fresh bytes. Every arm here used to dirty
+/// first (the historical cpu.rs shape), which inverted that order and
+/// left a lost-invalidation window that no slice boundary closes: the
+/// peer compiles stale bytes and is never told to throw them away.
+///
+/// `can_skip_dirty_page` is the TLB's "this page has no code" answer, so
+/// the else arm is the same debug-only cross-check cpu.rs carries.
+#[inline(always)]
+unsafe fn dirty_after_store(phys_addr: u32, can_skip_dirty_page: bool) {
+    if !can_skip_dirty_page {
+        jit::jit_dirty_page(Page::page_of(phys_addr));
+    }
+    else {
+        dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
+    }
+}
+
 #[inline(always)]
 unsafe fn safe_read_write8_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, locked: bool) {
     let (phys_addr, can_skip_dirty_page) =
         return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
     if locked && !memory::in_mapped_range(phys_addr) {
         // a single byte is always naturally aligned and never page-crossing
-        if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
-        }
-        else {
-            dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-        }
         let snapshot = LockRetrySnapshot::take();
         let mut x = memory::read8(phys_addr);
         loop {
@@ -207,6 +224,7 @@ unsafe fn safe_read_write8_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, loc
             x = prev;
             snapshot.restore();
         }
+        dirty_after_store(phys_addr, can_skip_dirty_page);
         return;
     }
     if locked {
@@ -222,13 +240,8 @@ unsafe fn safe_read_write8_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, loc
         memory::mmap_write8(phys_addr, value);
     }
     else {
-        if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
-        }
-        else {
-            dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-        }
         memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        dirty_after_store(phys_addr, can_skip_dirty_page);
     }
     if locked {
         bus_lock_release();
@@ -264,12 +277,6 @@ unsafe fn safe_read_write16_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
         }
     }
     else if locked && phys_addr & 1 == 0 && !memory::in_mapped_range(phys_addr) {
-        if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
-        }
-        else {
-            dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-        }
         let snapshot = LockRetrySnapshot::take();
         let mut x = memory::read16(phys_addr);
         loop {
@@ -282,6 +289,7 @@ unsafe fn safe_read_write16_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
             x = prev;
             snapshot.restore();
         }
+        dirty_after_store(phys_addr, can_skip_dirty_page);
     }
     else {
         if locked {
@@ -295,13 +303,8 @@ unsafe fn safe_read_write16_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
             memory::mmap_write16(phys_addr, value);
         }
         else {
-            if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
-            }
-            else {
-                dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-            }
             memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+            dirty_after_store(phys_addr, can_skip_dirty_page);
         };
         if locked {
             bus_lock_release();
@@ -337,12 +340,6 @@ unsafe fn safe_read_write32_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
         }
     }
     else if locked && phys_addr & 3 == 0 && !memory::in_mapped_range(phys_addr) {
-        if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
-        }
-        else {
-            dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-        }
         let snapshot = LockRetrySnapshot::take();
         let mut x = memory::gram_atomic_load_32(phys_addr);
         loop {
@@ -354,6 +351,7 @@ unsafe fn safe_read_write32_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
             x = prev;
             snapshot.restore();
         }
+        dirty_after_store(phys_addr, can_skip_dirty_page);
     }
     else {
         if locked {
@@ -366,13 +364,8 @@ unsafe fn safe_read_write32_impl(addr: i32, instruction: &dyn Fn(i32) -> i32, lo
             memory::mmap_write32(phys_addr, value);
         }
         else {
-            if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
-            }
-            else {
-                dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
-            }
             memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+            dirty_after_store(phys_addr, can_skip_dirty_page);
         };
         if locked {
             bus_lock_release();
@@ -754,25 +747,40 @@ pub unsafe fn ins_rep_batched(is_asize_32: bool, size_bytes: i32) -> bool {
     if n < 2 {
         return false;
     }
-    if !skip_dirty_page {
-        jit::jit_dirty_page(Page::page_of(phys_dst));
-    }
     // topology (c) uses record 0 (one machine worker); a per-vCPU worker
     // (b) uses its own record
-    let done = smpctl::mailbox_rpc(
-        crate::cpu::worker::mailbox_record_index(),
-        smpctl::MAILBOX_OP_IN_REP,
-        port,
-        size_bytes,
-        n as i32,
-        phys_dst as i32,
-    ) as u32;
-    dbg_assert!(done == n);
-    write_reg32(EDI, dst + (n as i32) * size_bytes);
-    write_reg32(ECX, (count - n) as i32);
-    if count != n {
-        // this batch only covered one page: re-enter the instruction for
-        // the rest (the string_instruction fast-path contract)
+    let done = u32::min(
+        smpctl::mailbox_rpc(
+            crate::cpu::worker::mailbox_record_index(),
+            smpctl::MAILBOX_OP_IN_REP,
+            port,
+            size_bytes,
+            n as i32,
+            phys_dst as i32,
+        ) as u32,
+        n,
+    );
+    // AFTER the RPC, not before: the device host's element writes are the
+    // guest store here, and the cross-worker dirty probe inside
+    // jit_dirty_page (worker::post_dirty_page_with -> the seq-cst
+    // code_bitmap_check_rmw) is only sound once the bytes it is
+    // publishing have landed (smpctl.rs code_bitmap_check_rmw's contract).
+    // Probing first would let a peer compile the page between our probe
+    // and the host's writes and never be told to invalidate.
+    if !skip_dirty_page && done != 0 {
+        jit::jit_dirty_page(Page::page_of(phys_dst));
+    }
+    // advance by what the host actually transferred, NOT by the requested
+    // n: a dispatch that threw is answered with 0 (the hosts' catch
+    // legs), and treating a failed batch as fully transferred would skip
+    // `n` elements of guest data and leave ECX/EDI describing a transfer
+    // that never happened. done < n simply re-enters the instruction.
+    write_reg32(EDI, dst + (done as i32) * size_bytes);
+    write_reg32(ECX, (count - done) as i32);
+    if count != done {
+        // this batch only covered one page (or was cut short): re-enter
+        // the instruction for the rest (the string_instruction fast-path
+        // contract)
         *instruction_pointer = *previous_ip;
     }
     true
@@ -810,18 +818,23 @@ pub unsafe fn outs_rep_batched(is_asize_32: bool, seg: i32, size_bytes: i32) -> 
     if n < 2 {
         return false;
     }
-    let done = smpctl::mailbox_rpc(
-        crate::cpu::worker::mailbox_record_index(),
-        smpctl::MAILBOX_OP_OUT_REP,
-        port,
-        size_bytes,
-        n as i32,
-        phys_src as i32,
-    ) as u32;
-    dbg_assert!(done == n);
-    write_reg32(ESI, src + (n as i32) * size_bytes);
-    write_reg32(ECX, (count - n) as i32);
-    if count != n {
+    let done = u32::min(
+        smpctl::mailbox_rpc(
+            crate::cpu::worker::mailbox_record_index(),
+            smpctl::MAILBOX_OP_OUT_REP,
+            port,
+            size_bytes,
+            n as i32,
+            phys_src as i32,
+        ) as u32,
+        n,
+    );
+    // advance by what the host actually transferred (see ins_rep_batched):
+    // a dispatch that threw answers 0, and treating that as a completed
+    // batch would skip `n` elements the device never received
+    write_reg32(ESI, src + (done as i32) * size_bytes);
+    write_reg32(ECX, (count - done) as i32);
+    if count != done {
         *instruction_pointer = *previous_ip;
     }
     true

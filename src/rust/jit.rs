@@ -2643,3 +2643,106 @@ pub fn jit_page_has_code_or_compiling(page: Page) -> bool {
         _ => false,
     }
 }
+
+// ---- store-before-probe ordering for the cross-worker dirty post ----
+//
+// smpctl.rs's code_bitmap_check_rmw requires the guest store to be
+// globally visible BEFORE the probe that publishes its invalidation, but
+// every write site is naturally written "invalidate, then store". The
+// pair below splits the two halves so the LOCAL invalidation keeps its
+// historical position while the cross-worker probe+post moves after the
+// store (rationale in full: cpu/worker.rs defer_dirty_post).
+//
+// Both macros are 1-for-1 single-line swaps whose default arms expand to
+// exactly the tokens they replaced, so the default artifact keeps its
+// byte identity (panic-Location records included: the page/store
+// expressions stay macro ARGUMENTS and therefore keep their call-site
+// spans).
+
+/// jit_dirty_page, minus the cross-worker post, which is queued for the
+/// next flush_dirty_posts instead.
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_dirty_page_deferred(page: Page) {
+    let mut ctx = get_jit_state();
+    jit_dirty_page_ctx(&mut ctx, page);
+    let no_local_code = !jit_page_has_code_ctx(&mut ctx, page);
+    drop(ctx);
+    crate::cpu::worker::defer_dirty_post(no_local_code, page);
+}
+
+/// jit_dirty_cache_small's deferred twin (same two-page span rule).
+#[cfg(feature = "guest-ram-import")]
+pub fn jit_dirty_cache_small_deferred(start_addr: u32, end_addr: u32) {
+    dbg_assert!(start_addr < end_addr);
+    let start_page = Page::page_of(start_addr);
+    let end_page = Page::page_of(end_addr - 1);
+    jit_dirty_page_deferred(start_page);
+    if start_page != end_page {
+        dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
+        jit_dirty_page_deferred(end_page);
+    }
+}
+
+/// The invalidate half of a guest-RAM write site.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_page_for_store {
+    ($page:expr) => {
+        jit::jit_dirty_page($page)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_page_for_store {
+    ($page:expr) => {
+        jit::jit_dirty_page_deferred($page)
+    };
+}
+
+/// The invalidate half of a (possibly page-crossing) guest-RAM write site.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_dirty_cache_small_for_store {
+    ($start:expr, $end:expr) => {
+        jit::jit_dirty_cache_small($start, $end)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_dirty_cache_small_for_store {
+    ($start:expr, $end:expr) => {
+        jit::jit_dirty_cache_small_deferred($start, $end)
+    };
+}
+
+/// The store half: perform the store, THEN publish the queued posts.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! store_then_flush {
+    ($store:expr) => {
+        $store
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! store_then_flush {
+    ($store:expr) => {{
+        $store;
+        $crate::cpu::worker::flush_dirty_posts();
+    }};
+}
+
+/// A flush with no store of its own, for sites whose stores span a loop
+/// (string.rs's rep fast path). Expands to nothing by default.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! flush_dirty_posts_now {
+    () => {};
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! flush_dirty_posts_now {
+    () => {
+        $crate::cpu::worker::flush_dirty_posts()
+    };
+}

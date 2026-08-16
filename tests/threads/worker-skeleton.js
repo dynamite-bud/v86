@@ -44,6 +44,8 @@ import {
     mailbox_request, mailbox_service, mailbox_wait_for_request,
     mailbox_record_word,
     ctl_base_for, ctl_total_size, ctl_pages,
+    ctl_machine_offset, ctl_code_bitmap_offset, host_doorbell_word,
+    CTL_VCPU_STRIDE, CTL_MAILBOX, CTL_MACHINE_HOST_DOORBELL,
     doorbell_post, heartbeat_read, run_state_read,
     command_write, CTL_COMMAND_TERMINATE,
     CTL_RUN_STATE_PARKED, CTL_RUN_STATE_HALTED,
@@ -154,10 +156,54 @@ async function measure_baseline()
     return latency_stats_us(latencies_ns);
 }
 
+// ---- pure-arithmetic regression: ctl addresses above 2^31 ----
+//
+// Every control-region helper turns a BYTE offset into an Int32Array word
+// index. With a signed `>>`, a byte offset at or above 2^31 comes back
+// NEGATIVE and every Atomics call on it throws RangeError — the whole
+// worker wire dies. That is reachable in production: the guest-RAM clamp
+// allows 2 GB and the control region sits ABOVE guest RAM
+// (ctl_base = memory_size + 64K), so even vCPU 0's mailbox is past 2^31
+// there, and with a smaller clamp a high-index vCPU's block crosses it.
+// No artifact needed, so this runs even when the multimem build is absent.
+function check_high_ctl_base()
+{
+    const memory_size = 2 * 1024 * 1024 * 1024;   // the 2 GB clamp
+    const n = 16;
+    const ctl_base = ctl_base_for(memory_size);
+    assert(ctl_base > 2 ** 31, "the 2 GB clamp puts CTL_BASE above 2^31");
+
+    const cases = [
+        ["mailbox_record_word[0]", mailbox_record_word(ctl_base, 0),
+            ctl_base + CTL_MAILBOX],
+        ["mailbox_record_word[n-1]", mailbox_record_word(ctl_base, n - 1),
+            ctl_base + (n - 1) * CTL_VCPU_STRIDE + CTL_MAILBOX],
+        ["host_doorbell_word", host_doorbell_word(ctl_base, n),
+            ctl_base + ctl_machine_offset(n) + CTL_MACHINE_HOST_DOORBELL],
+    ];
+    for(const [name, word, byte] of cases)
+    {
+        // the historical signed shift is the bug being regression-tested
+        assert(byte >> 2 < 0, "precondition: signed >> goes negative for " + name);
+        assert(word > 0, name + " must stay a positive word index, got " + word);
+        assert.equal(word, byte / 4, name + " must equal the true word index");
+    }
+
+    // code bitmaps are memory-size-scaled and land furthest out
+    const bitmap = ctl_base + ctl_code_bitmap_offset(n, n - 1, memory_size);
+    assert(bitmap >>> 2 > 0 && (bitmap >>> 2) === bitmap / 4,
+        "code-bitmap word index stays exact above 2^31");
+
+    console.log("ctl-base >2^31 (2 GB clamp, cpus=" + n + "): all word indices " +
+        "positive and exact (mailbox " + mailbox_record_word(ctl_base, n - 1) + ")");
+}
+
 // ---- the real thing: vcpu_worker.js over shared guest memory ----
 
 async function main()
 {
+    check_high_ctl_base();
+
     const multimem_wasm = ROOT + "/build/v86-multimem-debug.wasm";
     if(!fs.existsSync(multimem_wasm))
     {

@@ -266,7 +266,7 @@ function sb_p1()
 
 function post_ipi_special(i32, ctl_base, i, bits)
 {
-    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >> 2, bits);
+    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >>> 2, bits);
     doorbell_post(i32, ctl_base, i);
 }
 
@@ -312,7 +312,7 @@ function read_histogram(i32, base)
 {
     // outcome index r1*2 + r2; read after both vCPUs published Parked
     // (their seq-cst run-state stores order the plain guest bytes)
-    return [0, 1, 2, 3].map(idx => Atomics.load(i32, base + 4 * idx >> 2) >>> 0);
+    return [0, 1, 2, 3].map(idx => Atomics.load(i32, base + 4 * idx >>> 2) >>> 0);
 }
 
 function report(label, hist, names)
@@ -414,12 +414,12 @@ async function run_litmus(memory_model)
     }, 60_000);
 
     const mp_start = performance.now();
-    Atomics.store(i32, MP.go >> 2, 1);
+    Atomics.store(i32, MP.go >>> 2, 1);
     await wait_for("MP loops done", () =>
     {
         check_errors();
-        return Atomics.load(i32, MP.done >> 2) === 1 &&
-            Atomics.load(i32, MP.done + 4 >> 2) === 1;
+        return Atomics.load(i32, MP.done >>> 2) === 1 &&
+            Atomics.load(i32, MP.done + 4 >>> 2) === 1;
     }, 480_000);
     await wait_for("both parked after MP", () =>
         state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);
@@ -442,12 +442,12 @@ async function run_litmus(memory_model)
         return state(0) === CTL_RUN_STATE_RUNNABLE && state(1) === CTL_RUN_STATE_RUNNABLE;
     }, 60_000);
     const sb_start = performance.now();
-    Atomics.store(i32, SB.go >> 2, 1);
+    Atomics.store(i32, SB.go >>> 2, 1);
     await wait_for("SB loops done", () =>
     {
         check_errors();
-        return Atomics.load(i32, SB.done >> 2) === 1 &&
-            Atomics.load(i32, SB.done + 4 >> 2) === 1;
+        return Atomics.load(i32, SB.done >>> 2) === 1 &&
+            Atomics.load(i32, SB.done + 4 >>> 2) === 1;
     }, 480_000);
     await wait_for("both parked after SB", () =>
         state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);

@@ -2143,7 +2143,14 @@ CPU.prototype.attach_smp_worker_host = function(host)
     const reboot = CPU.prototype.reboot_internal.bind(this);
     this.reboot_internal = () =>
     {
-        host.reboot(reboot);
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
     };
 };
 
@@ -2174,7 +2181,14 @@ CPU.prototype.attach_smp_vcpu_host = function(host)
     const reboot = CPU.prototype.reboot_internal.bind(this);
     this.reboot_internal = () =>
     {
-        host.reboot(reboot);
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
     };
 };
 

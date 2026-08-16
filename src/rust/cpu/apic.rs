@@ -1100,6 +1100,14 @@ pub fn deliver_shared(apics: &mut [Apic], target: usize, vector: u8, mode: u8, i
         deliver(&mut apics[target], target, vector, mode, is_level);
         return;
     }
+    // Everything below posts to ANOTHER worker. Publish any deferred
+    // jit-dirty post first (worker::defer_dirty_post): the cross-modifying
+    // code contract main_loop_worker's step ordering rests on is that a
+    // writer's dirt is posted strictly BEFORE its IPI, so that an IPI the
+    // target observes in step (1) has its dirt visible to the drain in
+    // step (3). A queued post from a JIT-emitted store must not slip past
+    // the IPI that announces it.
+    worker::flush_dirty_posts();
     if mode == IOAPIC_DELIVERY_INIT {
         if target == 0 {
             dbg_log!("APIC (shared): INIT to BSP ignored (warm reset not implemented)");

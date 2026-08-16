@@ -187,8 +187,8 @@ pub unsafe fn write8(addr: u32, value: i32) {
         mmap_write8(addr, value & 0xFF);
     }
     else {
-        jit::jit_dirty_page(Page::page_of(addr));
-        write8_no_mmap_or_dirty_check(addr, value);
+        crate::jit_dirty_page_for_store!(Page::page_of(addr));
+        crate::store_then_flush!(write8_no_mmap_or_dirty_check(addr, value));
     };
 }
 
@@ -200,8 +200,8 @@ pub unsafe fn write16(addr: u32, value: i32) {
         mmap_write16(addr, value & 0xFFFF);
     }
     else {
-        jit::jit_dirty_cache_small(addr, addr + 2);
-        write16_no_mmap_or_dirty_check(addr, value);
+        crate::jit_dirty_cache_small_for_store!(addr, addr + 2);
+        crate::store_then_flush!(write16_no_mmap_or_dirty_check(addr, value));
     };
 }
 pub unsafe fn write16_no_mmap_or_dirty_check(addr: u32, value: i32) { gram_write16(addr, value) }
@@ -212,8 +212,8 @@ pub unsafe fn write32(addr: u32, value: i32) {
         mmap_write32(addr, value);
     }
     else {
-        jit::jit_dirty_cache_small(addr, addr + 4);
-        write32_no_mmap_or_dirty_check(addr, value);
+        crate::jit_dirty_cache_small_for_store!(addr, addr + 4);
+        crate::store_then_flush!(write32_no_mmap_or_dirty_check(addr, value));
     }
 }
 

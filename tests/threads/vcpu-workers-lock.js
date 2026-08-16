@@ -131,13 +131,13 @@ function program_bytes({ counter, k, go_flag, done_addr, sp, sti })
 
 function post_ipi_special(i32, ctl_base, i, bits)
 {
-    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >> 2, bits);
+    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >>> 2, bits);
     doorbell_post(i32, ctl_base, i);
 }
 
 function post_fixed_vector(i32, ctl_base, i, vector)
 {
-    const word = ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_IRR + 4 * (vector >> 5) >> 2;
+    const word = ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_IRR + 4 * (vector >> 5) >>> 2;
     Atomics.or(i32, word, 1 << (vector & 31));
     doorbell_post(i32, ctl_base, i);
 }
@@ -279,7 +279,7 @@ async function main()
         }
     };
 
-    const counter_word = COUNTER >> 2;
+    const counter_word = COUNTER >>> 2;
     const state = i => run_state_read(i32, ctl_base, i);
 
     // BSP spins on the go flag (Runnable/Halted published per slice); the
@@ -306,12 +306,12 @@ async function main()
     }, 60_000);
     assert.equal(Atomics.load(i32, counter_word), 0, "no increments before the release");
 
-    Atomics.store(i32, GO_FLAG >> 2, 1);
+    Atomics.store(i32, GO_FLAG >>> 2, 1);
     // storm fixed vectors into both workers while the loops run (item 2's
     // cross-worker interrupt-storm slice: delivery races the locked RMWs)
     let storm_posts = 0;
-    while(Atomics.load(i32, DONE_BASE >> 2) === 0 ||
-        Atomics.load(i32, DONE_BASE + 4 >> 2) === 0)
+    while(Atomics.load(i32, DONE_BASE >>> 2) === 0 ||
+        Atomics.load(i32, DONE_BASE + 4 >>> 2) === 0)
     {
         check_errors();
         for(let i = 0; i < TOTAL_CPUS; i++)
@@ -326,7 +326,7 @@ async function main()
             // and a wandered guest (state Runnable, counter frozen)
             console.log("storm stall: counter=%d done=[%d,%d] states=[%d,%d] heartbeats=[%d,%d]",
                 Atomics.load(i32, counter_word),
-                Atomics.load(i32, DONE_BASE >> 2), Atomics.load(i32, DONE_BASE + 4 >> 2),
+                Atomics.load(i32, DONE_BASE >>> 2), Atomics.load(i32, DONE_BASE + 4 >>> 2),
                 state(0), state(1),
                 heartbeat_read(i32, ctl_base, 0), heartbeat_read(i32, ctl_base, 1));
             assert(false, "loops must finish under the storm");
@@ -369,7 +369,7 @@ async function main()
     await wait_for("AP reran after INIT/SIPI restart", () =>
     {
         check_errors();
-        return Atomics.load(i32, DONE_BASE + 4 >> 2) === 2;
+        return Atomics.load(i32, DONE_BASE + 4 >>> 2) === 2;
     }, 120_000);
     await wait_for("AP parked after round 2", () => state(1) === CTL_RUN_STATE_PARKED, 60_000);
     assert.equal(Atomics.load(i32, counter_word), 3 * K,
@@ -391,18 +391,18 @@ async function main()
         return state(0) === CTL_RUN_STATE_RUNNABLE && state(1) === CTL_RUN_STATE_RUNNABLE;
     }, 60_000);
     assert.equal(dview.getUint32(MIS_COUNTER, true), 0, "no early misaligned increments");
-    Atomics.store(i32, GO2_FLAG >> 2, 1);
+    Atomics.store(i32, GO2_FLAG >>> 2, 1);
     await wait_for("phase 4 loops done", () =>
     {
         check_errors();
-        return Atomics.load(i32, DONE2_BASE >> 2) === 1 &&
-            Atomics.load(i32, DONE2_BASE + 4 >> 2) === 1;
+        return Atomics.load(i32, DONE2_BASE >>> 2) === 1 &&
+            Atomics.load(i32, DONE2_BASE + 4 >>> 2) === 1;
     }, 240_000);
     await wait_for("both parked after phase 4", () =>
         state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);
     assert.equal(dview.getUint32(MIS_COUNTER, true), K_MIS,
         "misaligned page-crossing lock incs must be exact under exclusive execution");
-    assert.equal(Atomics.load(i32, ALIGNED_COUNTER >> 2), K_ALIGNED,
+    assert.equal(Atomics.load(i32, ALIGNED_COUNTER >>> 2), K_ALIGNED,
         "concurrent aligned lock incs must stay exact");
     console.log(`phase 4: ${K_MIS} misaligned page-crossing lock incs exact against ` +
         `${K_ALIGNED} concurrent aligned lock incs (exclusive execution)`);
@@ -418,12 +418,12 @@ async function main()
         check_errors();
         return state(0) === CTL_RUN_STATE_RUNNABLE && state(1) === CTL_RUN_STATE_RUNNABLE;
     }, 60_000);
-    Atomics.store(i32, GO3_FLAG >> 2, 1);
+    Atomics.store(i32, GO3_FLAG >>> 2, 1);
     await wait_for("phase 5 loops done", () =>
     {
         check_errors();
-        return Atomics.load(i32, DONE3_BASE >> 2) === 1 &&
-            Atomics.load(i32, DONE3_BASE + 4 >> 2) === 1;
+        return Atomics.load(i32, DONE3_BASE >>> 2) === 1 &&
+            Atomics.load(i32, DONE3_BASE + 4 >>> 2) === 1;
     }, 240_000);
     await wait_for("both parked after phase 5", () =>
         state(0) === CTL_RUN_STATE_PARKED && state(1) === CTL_RUN_STATE_PARKED, 60_000);

@@ -97,7 +97,8 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
 	      print_stats.js filestorage.js modem.js virtio_gpu_backend.js virtio_gpu_wgpu_backend.js \
-	      virtio_gpu_webgpu_backend.js smpctl.js gram_env.js smp_worker_host.js smp_vcpu_host.js
+	      virtio_gpu_webgpu_backend.js smpctl.js gram_env.js smp_host_core.js \
+	      smp_worker_host.js smp_vcpu_host.js
 # NOTE: src/browser/vcpu_worker.js (XWAH-9 Phase 4) is deliberately NOT in
 # BROWSER_FILES: it is a standalone worker entry point (loaded as its own
 # module worker / worker_thread), not part of the bundled library.

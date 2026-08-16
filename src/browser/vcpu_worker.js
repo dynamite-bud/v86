@@ -42,7 +42,7 @@
 
 import { WASM_TABLE_SIZE, WASM_TABLE_OFFSET } from "../const.js";
 import { get_rand_int } from "../lib.js";
-import { build_gram_env } from "./gram_env.js";
+import { build_gram_env, instantiate_module_or_bytes } from "./gram_env.js";
 import {
     ctl_base_for, ctl_total_size, ctl_probe_offset, SMPCTL_PROBE_FIELD_COUNT,
     ctl_machine_offset, ctl_code_bitmap_offset,
@@ -319,11 +319,32 @@ async function run_worker(payload)
     };
 
     // gram over the shared guest memory + env merge: the same shape the
-    // main thread builds (src/browser/gram_env.js)
-    const env = await build_gram_env(env_funcs, payload.gram_bytes, guest_memory,
+    // main thread builds (src/browser/gram_env.js).
+    //
+    // Prefer the COMPILED modules the host posts (spawn_payload's
+    // wasm_module/gram_module): structured clone hands every worker the
+    // host's already-compiled code instead of making each of N workers
+    // compile the same multi-MB artifact from scratch. The byte fallbacks
+    // keep the test harnesses (which post their own payloads) working.
+    const env = await build_gram_env(env_funcs,
+        payload.gram_module || payload.gram_bytes, guest_memory,
         () => exports.memory.buffer);
-    const { instance } = await WebAssembly.instantiate(payload.wasm_source, env);
+    const instance = await instantiate_module_or_bytes(
+        payload.wasm_module || payload.wasm_source, env);
     exports = instance.exports;
+
+    // The park loop below is a long-lived closure over `payload`, so
+    // anything still referenced here stays resident for the life of the
+    // worker. The module sources are needed exactly once — a reboot
+    // (CTL_COMMAND_RESET) only calls reset_cpu() on the live instance and
+    // never re-instantiates — so drop them and let the multi-MB buffers
+    // go. Nulling the compiled Modules too: they are small handles, but
+    // holding them would pin the compiled code independently of the
+    // instance.
+    payload.wasm_source = null;
+    payload.gram_bytes = null;
+    payload.wasm_module = null;
+    payload.gram_module = null;
 
     exports["rust_init"]();
     exports["set_guest_memory_shared"](1);

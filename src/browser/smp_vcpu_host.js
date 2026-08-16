@@ -5,13 +5,13 @@
 // wasm instance) but never executes guest code. Its instance is the
 // AUTHORITATIVE chipset: 8259 PIC and IOAPIC. It:
 //
-// - services every worker's blocking io_port_*/mmap_* mailbox RPCs on
-//   per-record Atomics.waitAsync loops. Port I/O dispatches through the
-//   main instance's host_io_port_* exports so the Rust 8259 port
-//   intercepts hit the real PIC (io.js has no handlers for those ports);
-//   mmap dispatches onto cpu.read*/write* as in (c), keeping the Rust
-//   SVGA-LFB leg and the IOAPIC MMIO intercept on THIS instance
-//   (per-vCPU workers forward the 0xFEC00000 window here);
+// - services every worker's blocking io_port_*/mmap_* mailbox RPCs.
+//   Port I/O dispatches through the main instance's host_io_port_*
+//   exports so the Rust 8259 port intercepts hit the real PIC (io.js has
+//   no handlers for those ports); mmap dispatches onto cpu.read*/write*
+//   as in (c), keeping the Rust SVGA-LFB leg and the IOAPIC MMIO
+//   intercept on THIS instance (per-vCPU workers forward the 0xFEC00000
+//   window here);
 // - keeps cpu.device_raise_irq/device_lower_irq at their DEFAULT wasm
 //   exports: pic::set_irq/ioapic::set_irq mutate the authoritative
 //   chipset, apic::route's shared leg posts matched fixed vectors to the
@@ -24,50 +24,32 @@
 //   ioapic::remote_eoi and reevaluates held lines after routing-snapshot
 //   changes;
 // - forwards JS-side guest-RAM invalidations (cpu.write_blob during
-//   DMA/IDE) as dirty events into EVERY worker's jit inbox (overflow is
-//   recovered by the worker's clear-all, so no backlog is needed);
+//   DMA/IDE, and the rep-in mailbox leg) as dirty events into EVERY
+//   worker's jit inbox (overflow is recovered by the worker's clear-all,
+//   so no backlog is needed);
 // - runs the device tick (PIT/RTC/ACPI) and aggregates the machine-dead
 //   condition from the published run states;
 // - drives the §8 command protocol (RUN/PARK/RESET/TERMINATE) for all N
 //   workers.
+//
+// Everything this host has in common with the topology-(c) host — the
+// mailbox dispatch, spawn/ready plumbing, timeouts, service loops, and
+// the §7/§8 command protocol — lives in smp_host_core.js. Only the (b)
+// specifics are below.
 
-import { LOG_CPU } from "../const.js";
-import { dbg_log } from "../log.js";
-import { spawn_worker } from "./smp_worker_host.js";
 import {
     ctl_base_for, ctl_code_bitmap_offset,
     CTL_VCPU_STRIDE, CTL_EOI_RING, CTL_EOI_RING_CAP,
     CTL_PENDING_IRR, CTL_PENDING_TMR,
     CTL_RUN_STATE_PARKED, CTL_RUN_STATE_WAIT_FOR_SIPI,
-    CTL_COMMAND_RUN, CTL_COMMAND_PARK_REQ, CTL_COMMAND_PARKED_ACK,
-    CTL_COMMAND_TERMINATE, CTL_COMMAND_RESET, CTL_COMMAND_SAVE, CTL_COMMAND_RESTORE,
-    ring_pop, doorbell_post, command_write, command_read, run_state_read, insn_read,
+    CTL_COMMAND_SAVE, CTL_COMMAND_RESTORE,
+    ring_pop, doorbell_post, command_write, run_state_read, insn_read,
     jit_inbox_push, pic_pending_set, host_doorbell_word,
-    mailbox_record_word, mailbox_service, mailbox_wait_for_request,
-    MAILBOX_STATE, MAILBOX_REQUEST, MAILBOX_IDLE,
-    MAILBOX_OP_OUT, MAILBOX_OP_IN, MAILBOX_OP_MMAP_READ, MAILBOX_OP_MMAP_WRITE,
-    MAILBOX_OP_IN_REP, MAILBOX_OP_OUT_REP, MAILBOX_OP_PIC_ACK,
 } from "./smpctl.js";
-
-// re-arm timeout of the service loops; short enough that stop() takes
-// effect promptly, long enough to stay off the hot path
-const SERVICE_REARM_MS = 250;
-// worker spawn + instantiate deadline before the ladder gives up
-const SPAWN_TIMEOUT_MS = 60000;
-// deadline for the workers to acknowledge TERMINATE before a hard terminate
-const TERMINATE_TIMEOUT_MS = 2000;
-// deadline for quiesce acks and state-assembly round trips (design §7):
-// a worker parks within one slice (ms-scale); anything near this bound is
-// a dead worker, which is fail-stop
-const STATE_TIMEOUT_MS = 60000;
-// struct sizes mirrored from the Rust layouts, as in cpu.js get_state_*
-const APIC_STRUCT_SIZE = 4 * 46;
-// current_tsc global (global_pointers.rs): lives inside the per-vCPU state
-// block, so a loaded save area carries the saved TSC
-const CURRENT_TSC_ADDR = 960;
-// synchronous post-service polls before re-arming Atomics.waitAsync
-// (the smp_worker_host.js burst rationale)
-const SERVICE_SPIN = 4000;
+import {
+    install_smp_host_core,
+    SERVICE_REARM_MS, STATE_TIMEOUT_MS, APIC_STRUCT_SIZE, CURRENT_TSC_ADDR,
+} from "./smp_host_core.js";
 
 /**
  * @constructor
@@ -78,240 +60,118 @@ const SERVICE_SPIN = 4000;
  */
 export function SMPVcpuHost(cpu, emulator_bus, guest_memory, total)
 {
-    this.cpu = cpu;
-    this.emulator_bus = emulator_bus;
-    this.total = total;
-    this.i32 = new Int32Array(guest_memory.buffer);
+    // topology (b): one worker per vCPU
+    this.init_core(cpu, emulator_bus, guest_memory, total, total);
     this.ctl_base = ctl_base_for(cpu.memory_size[0]);
     this.host_doorbell = host_doorbell_word(this.ctl_base, total);
-    this.channels = [];
-    // pre-boot spawn errors reject start() and take the §8 ladder; only
-    // errors after every worker is ready are fail-stop
-    this.ready = false;
-    this.stopped = false;
-    this.terminating = false;
-    this.terminated_count = 0;
-    this.fatal_error = null;
-    // §8 fail-stop: the starter points this at V86.stop so a fatal worker
-    // error also halts the main thread's device tick loop
-    this.on_fatal = null;
-    this.service_done = [];
     this.host_doorbell_done = null;
-    this.commanded_running = false;
-    this.halt_event_sent = false;
-    this.cpu_exception_hook = function(n) {};
-    // per-worker resolvers of in-flight COMMAND_SAVE / COMMAND_RESTORE
-    // round trips (design §7), keyed by vCPU index
-    this.save_waiters = [];
-    this.restore_waiters = [];
-    this.rebooting = false;
+    // port I/O goes through the main instance's host_io_port_* exports so
+    // the Rust 8259 intercepts hit the AUTHORITATIVE PIC (io.js has no
+    // handlers for those ports)
+    const exports = cpu.wm.exports;
+    this.io = {
+        read8: addr => exports["host_io_port_read8"](addr),
+        read16: addr => exports["host_io_port_read16"](addr),
+        read32: addr => exports["host_io_port_read32"](addr),
+        write8: (addr, v) => exports["host_io_port_write8"](addr, v),
+        write16: (addr, v) => exports["host_io_port_write16"](addr, v),
+        write32: (addr, v) => exports["host_io_port_write32"](addr, v),
+    };
 }
 
-/**
- * Spawn all N per-vCPU workers, send each its payload, and resolve when
- * every worker reports vcpu-ready (instantiated, layout-checked, reset,
- * role set, parked on the pre-written PARK_REQ). Rejects on any worker
- * error or timeout — the caller decides between fail-stop
- * (`smp_workers: true`) and ladder degradation (`"auto"`).
- * @param {{
- *     worker_url: string,
- *     wasm_source: !ArrayBuffer,
- *     gram_bytes: !ArrayBuffer,
- *     guest_memory: !WebAssembly.Memory,
- *     acpi: boolean,
- *     disable_jit: boolean,
- *     cpuid_level: (number|undefined),
- *     memory_model: (string|undefined),
- * }} config
- * @return {!Promise}
- */
-SMPVcpuHost.prototype.start = function(config)
-{
-    // park every worker until run() — honored by each worker's very first
-    // loop iteration
-    for(let i = 0; i < this.total; i++)
-    {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_PARK_REQ);
-    }
+install_smp_host_core(SMPVcpuHost.prototype);
 
-    // the main instance becomes the (b) device host BEFORE any worker can
-    // run: from here on, device IRQs raised on this instance route into
-    // the shared pending bitmaps instead of the local (guestless) vCPU
+SMPVcpuHost.prototype.ready_message = "vcpu-ready";
+
+/**
+ * @param {!Object} cpu
+ */
+SMPVcpuHost.prototype.attach_to = function(cpu)
+{
+    cpu.attach_smp_vcpu_host(this);
+};
+
+/**
+ * Leave the main instance out of host mode again (ladder step-down back to
+ * time-sliced execution on this thread).
+ */
+SMPVcpuHost.prototype.on_spawn_teardown = function()
+{
+    this.cpu.wm.exports["set_worker_host"](0);
+};
+
+/**
+ * The main instance becomes the (b) device host BEFORE any worker can
+ * run: from here on, device IRQs raised on this instance route into the
+ * shared pending bitmaps instead of the local (guestless) vCPU.
+ */
+SMPVcpuHost.prototype.before_spawn = function()
+{
     this.cpu.wm.exports["set_worker_host"](1);
+};
 
-    const readies = [];
-    for(let index = 0; index < this.total; index++)
-    {
-        const channel = spawn_worker(config.worker_url);
-        this.channels.push(channel);
-        readies.push(new Promise((resolve, reject) =>
-        {
-            const timeout = setTimeout(
-                () => reject(new Error("vcpu worker " + index + " spawn timed out")),
-                SPAWN_TIMEOUT_MS);
-            if(timeout["unref"])
-            {
-                timeout["unref"]();
-            }
-            channel.on_message(m => this.handle_message(m, () =>
-            {
-                clearTimeout(timeout);
-                resolve();
-            }));
-            channel.on_error(e =>
-            {
-                if(this.terminating)
-                {
-                    return;
-                }
-                clearTimeout(timeout);
-                reject(e);
-                if(this.ready)
-                {
-                    this.fail(e);
-                }
-            });
-        }));
-        channel.post({
-            "wasm_source": config.wasm_source,
-            "gram_bytes": config.gram_bytes,
-            "guest_memory": config.guest_memory,
-            "index": index,
-            "total": this.total,
-            "main_time_origin": performance.timeOrigin,
-            "memory_size": this.cpu.memory_size[0],
-            "vcpu": {
-                "acpi": !!config.acpi,
-                "disable_jit": !!config.disable_jit,
-                "cpuid_level": config.cpuid_level || 0,
-                "memory_model": config.memory_model || "relaxed",
-            },
-        });
-    }
-
-    for(let i = 0; i < this.total; i++)
-    {
-        this.start_service_loop(i);
-    }
+SMPVcpuHost.prototype.before_ready = function()
+{
     this.start_host_doorbell_loop();
-    return Promise.all(readies).then(() =>
-    {
-        this.ready = true;
-    });
 };
 
 /**
- * @param {*} m worker message
- * @param {function()} on_ready
+ * @param {number} index
+ * @param {!Object} config
  */
-SMPVcpuHost.prototype.handle_message = function(m, on_ready)
+SMPVcpuHost.prototype.spawn_payload = function(index, config)
 {
-    if(!m)
-    {
-        return;
-    }
-    switch(m["type"])
-    {
-        case "vcpu-ready":
-            on_ready();
-            break;
-        case "terminated":
-            this.terminated_count++;
-            break;
-        case "save-state":
-        {
-            const resolve = this.save_waiters[m["index"]];
-            this.save_waiters[m["index"]] = null;
-            resolve && resolve(m);
-            break;
-        }
-        case "restore-done":
-        {
-            const resolve = this.restore_waiters[m["index"]];
-            this.restore_waiters[m["index"]] = null;
-            resolve && resolve(m);
-            break;
-        }
-        case "log":
-            dbg_log("vcpu" + m["index"] + ": " + m["message"], LOG_CPU);
-            break;
-        case "console-log":
-            console.error(m["message"]);
-            break;
-        case "cpu-exception":
-            this.cpu_exception_hook(m["n"]);
-            break;
-        case "cpu-event-halt":
-            this.emulator_bus.send("cpu-event-halt");
-            break;
-        case "abort":
-        case "error":
-            this.fail(new Error("vcpu worker " + m["type"] + ": " +
-                (m["message"] || "") + "\n" + (m["stack"] || "")));
-            break;
-        // "init-done", "dbg-trace": informational
-    }
+    return {
+        "wasm_module": config.wasm_module,
+        "wasm_source": config.wasm_source,
+        "gram_module": config.gram_module,
+        "gram_bytes": config.gram_bytes,
+        "guest_memory": config.guest_memory,
+        "index": index,
+        "total": this.total,
+        "main_time_origin": performance.timeOrigin,
+        "memory_size": this.cpu.memory_size[0],
+        "vcpu": {
+            "acpi": !!config.acpi,
+            "disable_jit": !!config.disable_jit,
+            "cpuid_level": config.cpuid_level || 0,
+            "memory_model": config.memory_model || "relaxed",
+        },
+    };
 };
 
 /**
- * Fail-stop (design §8): a worker error after boot cannot be recovered —
- * a guest does not survive losing a CPU. Surface the error, park the
- * remaining workers, and stop servicing.
- * @param {!Error} error
+ * Acknowledge from the authoritative 8259; while INTR stays asserted
+ * (more pending requests), re-post the PIC flag so the BSP worker comes
+ * back for the next vector.
+ * @return {number}
  */
-SMPVcpuHost.prototype.fail = function(error)
+SMPVcpuHost.prototype.on_pic_ack = function()
 {
-    if(this.fatal_error)
+    const exports = this.cpu.wm.exports;
+    const vector = exports["host_pic_acknowledge"]();
+    if(exports["host_pic_has_requested"]())
     {
-        return;
+        pic_pending_set(this.i32, this.ctl_base, 0);
+        doorbell_post(this.i32, this.ctl_base, 0);
     }
-    this.fatal_error = error;
-    console.error("smp vcpu worker failed:", error);
-    for(let i = 0; i < this.total; i++)
-    {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_PARK_REQ);
-        doorbell_post(this.i32, this.ctl_base, i);
-    }
-    this.emulator_bus.send("emulator-error", error);
-    this.stop_service_loops();
-    // stop the machine (§8): without this the device tick keeps running
-    // against a dead guest
-    this.on_fatal && this.on_fatal();
+    return vector | 0;
 };
 
-// ---- mailbox service (device-host side of the §6 RPC protocol) ----
-
-SMPVcpuHost.prototype.start_service_loop = function(index)
+SMPVcpuHost.prototype.on_stop_service = function()
 {
-    const i32 = this.i32;
-    const record = mailbox_record_word(this.ctl_base, index);
-    const dispatch = this.dispatch.bind(this);
-    this.service_done.push((async () =>
-    {
-        while(!this.stopped)
-        {
-            if(mailbox_service(i32, record, dispatch))
-            {
-                let spin = SERVICE_SPIN;
-                while(spin-- > 0 &&
-                    Atomics.load(i32, record + MAILBOX_STATE) !== MAILBOX_REQUEST)
-                {
-                }
-                continue;
-            }
-            await mailbox_wait_for_request(i32, record, SERVICE_REARM_MS);
-        }
-    })());
-};
-
-SMPVcpuHost.prototype.stop_service_loops = function()
-{
-    this.stopped = true;
-    for(let i = 0; i < this.total; i++)
-    {
-        Atomics.notify(this.i32, mailbox_record_word(this.ctl_base, i) + MAILBOX_STATE);
-    }
     Atomics.notify(this.i32, this.host_doorbell);
+};
+
+SMPVcpuHost.prototype.on_terminated_wait = async function()
+{
+    await this.host_doorbell_done;
+};
+
+/** Drain the level-EOI rings so the authoritative IOAPIC is current. */
+SMPVcpuHost.prototype.after_quiesce = function()
+{
+    this.drain_notifications();
 };
 
 /**
@@ -358,183 +218,20 @@ SMPVcpuHost.prototype.drain_notifications = function()
     return any;
 };
 
-/**
- * One RPC (per-record; op surface = (c) + MAILBOX_OP_PIC_ACK). Port I/O
- * goes through the host_io_port_* exports (Rust PIC intercept on the
- * authoritative chipset); mmap through cpu.read8/write8 and friends as in
- * (c). A throwing device handler is answered so the worker never
- * deadlocks, then surfaced as emulator-error.
- * @param {number} op
- * @param {number} addr
- * @param {number} size
- * @param {number} value_lo
- * @param {number} value_hi
- * @param {number} seq
- * @param {number} value_2
- * @param {number} value_3
- * @return {number|undefined}
- */
-SMPVcpuHost.prototype.dispatch = function(op, addr, size, value_lo, value_hi, seq, value_2, value_3)
-{
-    const cpu = this.cpu;
-    const exports = cpu.wm.exports;
-    try
-    {
-        switch(op)
-        {
-            case MAILBOX_OP_IN:
-                return size === 1 ? exports["host_io_port_read8"](addr) :
-                    size === 2 ? exports["host_io_port_read16"](addr) :
-                    exports["host_io_port_read32"](addr);
-            case MAILBOX_OP_OUT:
-                if(size === 1)
-                {
-                    exports["host_io_port_write8"](addr, value_lo);
-                }
-                else if(size === 2)
-                {
-                    exports["host_io_port_write16"](addr, value_lo);
-                }
-                else
-                {
-                    exports["host_io_port_write32"](addr, value_lo);
-                }
-                return undefined;
-            case MAILBOX_OP_PIC_ACK:
-            {
-                // acknowledge from the authoritative 8259; while INTR
-                // stays asserted (more pending requests), re-post the PIC
-                // flag so the BSP worker comes back for the next vector
-                const vector = exports["host_pic_acknowledge"]();
-                if(exports["host_pic_has_requested"]())
-                {
-                    pic_pending_set(this.i32, this.ctl_base, 0);
-                    doorbell_post(this.i32, this.ctl_base, 0);
-                }
-                return vector | 0;
-            }
-            case MAILBOX_OP_MMAP_READ:
-                return size === 1 ? cpu.read8(addr) :
-                    size === 2 ? cpu.read16(addr) :
-                    cpu.read32s(addr);
-            case MAILBOX_OP_IN_REP:
-            {
-                const count = value_lo >>> 0;
-                const mem8 = cpu.mem8;
-                let phys = value_hi >>> 0;
-                if(size === 1)
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        mem8[phys++] = exports["host_io_port_read8"](addr);
-                    }
-                }
-                else if(size === 2)
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        const v = exports["host_io_port_read16"](addr);
-                        mem8[phys++] = v & 0xFF;
-                        mem8[phys++] = v >> 8 & 0xFF;
-                    }
-                }
-                else
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        const v = exports["host_io_port_read32"](addr);
-                        mem8[phys++] = v & 0xFF;
-                        mem8[phys++] = v >> 8 & 0xFF;
-                        mem8[phys++] = v >> 16 & 0xFF;
-                        mem8[phys++] = v >>> 24;
-                    }
-                }
-                return count | 0;
-            }
-            case MAILBOX_OP_OUT_REP:
-            {
-                const count = value_lo >>> 0;
-                const mem8 = cpu.mem8;
-                let phys = value_hi >>> 0;
-                if(size === 1)
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        exports["host_io_port_write8"](addr, mem8[phys++]);
-                    }
-                }
-                else if(size === 2)
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        exports["host_io_port_write16"](addr, mem8[phys] | mem8[phys + 1] << 8);
-                        phys += 2;
-                    }
-                }
-                else
-                {
-                    for(let i = 0; i < count; i++)
-                    {
-                        exports["host_io_port_write32"](addr,
-                            mem8[phys] | mem8[phys + 1] << 8 |
-                            mem8[phys + 2] << 16 | mem8[phys + 3] << 24);
-                        phys += 4;
-                    }
-                }
-                return count | 0;
-            }
-            case MAILBOX_OP_MMAP_WRITE:
-                if(size === 1)
-                {
-                    cpu.write8(addr, value_lo);
-                }
-                else if(size === 2)
-                {
-                    cpu.write16(addr, value_lo);
-                }
-                else if(size === 4)
-                {
-                    cpu.write32(addr, value_lo);
-                }
-                else if(size === 8)
-                {
-                    cpu.write32(addr, value_lo);
-                    cpu.write32(addr + 4 | 0, value_hi);
-                }
-                else
-                {
-                    cpu.write32(addr, value_lo);
-                    cpu.write32(addr + 4 | 0, value_hi);
-                    cpu.write32(addr + 8 | 0, value_2);
-                    cpu.write32(addr + 12 | 0, value_3);
-                }
-                return undefined;
-            default:
-                dbg_log("unknown mailbox op " + op, LOG_CPU);
-                return 0;
-        }
-    }
-    catch(e)
-    {
-        this.fail(e instanceof Error ? e : new Error(String(e)));
-        return op === MAILBOX_OP_OUT || op === MAILBOX_OP_MMAP_WRITE ? undefined : 0;
-    }
-};
-
 // ---- cross-worker jit-dirty producer (design §9 W3 note) ----
 
 /**
  * The worker-mode leg of cpu.jit_dirty_cache: main-thread JS wrote guest
- * RAM (DMA/IDE/write_blob), so every worker WITH CODE in those pages must
- * invalidate it. The shared code bitmap gates the post (the Rust
- * post_dirty_page_with twin): a worker without the page's bit has no
- * installed code and no in-flight compile there — bits are set before
- * the compiler reads the page's bytes — so it has nothing to invalidate.
- * The probe is Atomics.or(..., 0), a seq-cst RMW whose release leg
- * publishes the DMA bytes written above; a compiler whose bit-set lands
- * after the probe therefore reads the fresh bytes. Overflow needs no
- * backlog: the flag makes the worker recover with jit_clear_all +
- * full_clear_tlb.
+ * RAM (DMA/IDE/write_blob, or the rep-in mailbox leg), so every worker
+ * WITH CODE in those pages must invalidate it. The shared code bitmap
+ * gates the post (the Rust post_dirty_page_with twin): a worker without
+ * the page's bit has no installed code and no in-flight compile there —
+ * bits are set before the compiler reads the page's bytes — so it has
+ * nothing to invalidate. The probe is Atomics.or(..., 0), a seq-cst RMW
+ * whose release leg publishes the bytes written above; a compiler whose
+ * bit-set lands after the probe therefore reads the fresh bytes. Overflow
+ * needs no backlog: the flag makes the worker recover with jit_clear_all
+ * + full_clear_tlb.
  * @param {number} start_addr
  * @param {number} end_addr exclusive
  */
@@ -554,7 +251,7 @@ SMPVcpuHost.prototype.post_jit_dirty = function(start_addr, end_addr)
         {
             // >>> — the bitmap region can cross the 2^31 byte boundary
             // at maximum guest-RAM size, where signed >> corrupts the index
-            const word = bitmap + 4 * (page >> 5) >>> 2;
+            const word = bitmap + 4 * (page >>> 5) >>> 2;
             if(Atomics.or(this.i32, word, 0) & 1 << (page & 31))
             {
                 jit_inbox_push(this.i32, this.ctl_base, i, page);
@@ -633,93 +330,7 @@ SMPVcpuHost.prototype.sum_instruction_counters = function()
     return sum >>> 0;
 };
 
-// ---- command protocol (design §8) ----
-
-SMPVcpuHost.prototype.run = function()
-{
-    this.commanded_running = true;
-    this.halt_event_sent = false;
-    for(let i = 0; i < this.total; i++)
-    {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_RUN);
-        doorbell_post(this.i32, this.ctl_base, i);
-    }
-};
-
-SMPVcpuHost.prototype.park = function()
-{
-    this.commanded_running = false;
-    for(let i = 0; i < this.total; i++)
-    {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_PARK_REQ);
-        doorbell_post(this.i32, this.ctl_base, i);
-    }
-};
-
-// ---- Stage W4: quiesce, save/restore assembly, quiesced reboot ----
-// (docs/smp-phase4-design.md §7/§8)
-
-/**
- * Await `predicate` with a deadline; the service loops keep running (they
- * are independent async loops), so a worker mid-RPC completes the RPC and
- * parks at its next slice boundary — no deadlock.
- * @param {string} label
- * @param {function(): boolean} predicate
- * @return {!Promise}
- */
-SMPVcpuHost.prototype.wait_for = async function(label, predicate)
-{
-    const deadline = Date.now() + STATE_TIMEOUT_MS;
-    while(!predicate())
-    {
-        if(this.fatal_error)
-        {
-            throw this.fatal_error;
-        }
-        if(Date.now() >= deadline)
-        {
-            throw new Error("smp quiesce: timeout waiting for " + label);
-        }
-        await new Promise(resolve => setTimeout(resolve, 2));
-    }
-};
-
-/**
- * The §7 quiesce: PARK_REQ + doorbell to every worker, then wait until
- * each has acked PARKED_ACK at its slice boundary and its mailbox is IDLE
- * (parked = not in do_many_cycles, mailbox idle, doorbell-waited). Finally
- * drain the level-EOI rings so the authoritative IOAPIC state is current.
- * @return {!Promise<boolean>} whether the machine was commanded running
- *     (the caller passes it back to resume())
- */
-SMPVcpuHost.prototype.quiesce = async function()
-{
-    const was_running = this.commanded_running;
-    this.park();
-    for(let i = 0; i < this.total; i++)
-    {
-        await this.wait_for("worker " + i + " park ack", () =>
-            command_read(this.i32, this.ctl_base, i) === CTL_COMMAND_PARKED_ACK);
-        await this.wait_for("worker " + i + " mailbox idle", () =>
-            Atomics.load(this.i32,
-                mailbox_record_word(this.ctl_base, i) + MAILBOX_STATE) === MAILBOX_IDLE);
-    }
-    this.drain_notifications();
-    return was_running;
-};
-
-/**
- * Undo a quiesce: resume the workers when the machine was running before,
- * leave them parked otherwise.
- * @param {boolean} was_running
- */
-SMPVcpuHost.prototype.resume = function(was_running)
-{
-    if(was_running)
-    {
-        this.run();
-    }
-};
+// ---- Stage W4: save/restore assembly (design §7) ----
 
 /**
  * The §7 save-state assembly, on quiesced workers: each worker drains its
@@ -790,9 +401,9 @@ SMPVcpuHost.prototype.assemble_save = async function(capture)
         for(let word = 0; word < 8; word++)
         {
             const irr = Atomics.exchange(this.i32,
-                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_IRR + 4 * word >> 2, 0);
+                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_IRR + 4 * word >>> 2, 0);
             const tmr = Atomics.exchange(this.i32,
-                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_TMR + 4 * word >> 2, 0);
+                this.ctl_base + i * CTL_VCPU_STRIDE + CTL_PENDING_TMR + 4 * word >>> 2, 0);
             apic[16 + word] |= irr;
             apic[32 + word] |= tmr;
         }
@@ -862,79 +473,4 @@ SMPVcpuHost.prototype.distribute_restore = async function()
         doorbell_post(this.i32, this.ctl_base, 0);
     }
     this.halt_event_sent = false;
-};
-
-/**
- * Machine reboot (guest reset port / V86.restart), design §8: quiesce,
- * main-side chipset reset, per-worker reset commands (each worker resets
- * its instance, re-enters its per-vCPU role — APs return to WaitForSipi —
- * and acks by PARKING), then release the whole machine at once. The
- * all-acked barrier before RUN is load-bearing: a released BSP runs
- * SeaBIOS, whose one-shot INIT+SIPI broadcast must not race a sibling's
- * pending reset — set_worker_vcpu clears that vCPU's ipi_special latch,
- * which would silently swallow the AP's startup IPI. Fire-and-forget from
- * reboot_internal, which may run inside a mailbox dispatch: the quiesce
- * must not be awaited there, or the triggering worker's pending RPC would
- * deadlock it.
- * @param {function()} reset_main main-side chipset/device reset
- * @return {!Promise}
- */
-SMPVcpuHost.prototype.reboot = async function(reset_main)
-{
-    if(this.rebooting || this.fatal_error)
-    {
-        return;
-    }
-    this.rebooting = true;
-    try
-    {
-        const was_running = await this.quiesce();
-        reset_main();
-        this.halt_event_sent = false;
-        for(let i = 0; i < this.total; i++)
-        {
-            command_write(this.i32, this.ctl_base, i, CTL_COMMAND_RESET);
-            doorbell_post(this.i32, this.ctl_base, i);
-        }
-        for(let i = 0; i < this.total; i++)
-        {
-            await this.wait_for("worker " + i + " reset ack", () =>
-                command_read(this.i32, this.ctl_base, i) === CTL_COMMAND_PARKED_ACK);
-        }
-        if(was_running)
-        {
-            this.run();
-        }
-    }
-    finally
-    {
-        this.rebooting = false;
-    }
-};
-
-/**
- * Quiesce and tear down: TERMINATE + doorbell to every worker, wait
- * briefly for the acks, then hard-terminate and stop the service loops.
- * @return {!Promise}
- */
-SMPVcpuHost.prototype.terminate = async function()
-{
-    this.terminating = true;
-    for(let i = 0; i < this.total; i++)
-    {
-        command_write(this.i32, this.ctl_base, i, CTL_COMMAND_TERMINATE);
-        doorbell_post(this.i32, this.ctl_base, i);
-    }
-    const deadline = Date.now() + TERMINATE_TIMEOUT_MS;
-    while(this.terminated_count < this.total && Date.now() < deadline)
-    {
-        await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    this.stop_service_loops();
-    await Promise.all(this.service_done);
-    await this.host_doorbell_done;
-    for(const channel of this.channels)
-    {
-        channel.terminate();
-    }
 };

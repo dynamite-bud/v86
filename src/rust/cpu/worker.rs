@@ -129,6 +129,11 @@ pub unsafe fn main_loop_worker(index: u32) -> f64 {
         let t = js::run_hardware_timers(*acpi_enabled, now);
         cpu::handle_irqs();
         excl_slice_end(index);
+        // slice-boundary backstop for the deferred dirty posts (see
+        // defer_dirty_post): nothing queued by JIT-emitted stores may
+        // survive across a park, where this vCPU could sit for a long
+        // time while a peer executes bytes we invalidated
+        flush_dirty_posts();
         smpctl::insn_publish(index, *instruction_counter as i32);
         if vcpu::run_state(index as usize) != vcpu::RunState::Runnable {
             // hlt with IF=0 parked this vCPU mid-slice
@@ -190,6 +195,26 @@ unsafe fn consume_ipi_special(index: u32) {
         // per the SDM, INIT returns the LAPIC to power-up state except
         // the APIC ID
         apic::reset_one(index as usize);
+        // ...and the vectors that senders posted to the SHARED bitmaps
+        // before the INIT die with it. reset_one only wipes the local
+        // Apic struct; without this drain the very next step of the loop
+        // (merge_pending_interrupts, which runs immediately after this
+        // function) would re-materialize the pre-INIT irr/tmr into the
+        // freshly reset LAPIC, and the AP would take an interrupt from
+        // its previous life before executing a single SIPI instruction.
+        // The time-sliced INIT (cpu.rs process_pending_init_sipi) gets
+        // this for free: there is no control region, so apic::reset_one
+        // IS the complete drop of pending vectors. Level EOIs queued by
+        // the pre-INIT incarnation go with them.
+        for word in 0..smpctl::PENDING_WORDS {
+            smpctl::pending_irr_drain(index, word);
+            smpctl::pending_tmr_drain(index, word);
+        }
+        while smpctl::eoi_ring_pop(index).is_some() {}
+        // an 8259 INTR flag raised for the pre-INIT BSP likewise refers
+        // to a vector the authoritative PIC will re-assert if still
+        // pending (the host re-posts while INTR stays asserted)
+        smpctl::pic_pending_take(index);
         vcpu::set_run_state(index as usize, vcpu::RunState::WaitForSipi);
         publish_run_state(index);
         apic::publish_current_routing();
@@ -549,6 +574,83 @@ pub fn post_dirty_page_with(no_local_code: bool, page: Page) {
         }
         if own >= 0 && no_local_code {
             cpu::tlb_set_has_code(page, false);
+        }
+    }
+}
+
+// ---- deferred dirty posts: the store-before-probe ordering rule ----
+//
+// code_bitmap_check_rmw's contract (smpctl.rs) is that the guest store
+// whose invalidation is being published must be GLOBALLY VISIBLE BEFORE
+// the probe runs — the probe's seq-cst RMW is precisely what orders it
+// ahead of a racing compiler's bit-set, so that a compiler we fail to
+// notice reads the fresh bytes. Every guest-RAM write site, however,
+// naturally reads "invalidate, then store": the local invalidation has
+// to happen first (it is what makes the page writable again), and the
+// cross-worker post used to ride along with it — i.e. BEFORE the store,
+// exactly inverting the required order. The window is not bounded by a
+// slice: the peer can compile stale bytes and never be told.
+//
+// The split below fixes that without reordering the LOCAL invalidation
+// (which stays where it always was, so nothing about JIT-cache
+// semantics moves): `jit_dirty_page_deferred` (jit.rs) invalidates
+// locally and QUEUES the probe+post, and `flush_dirty_posts` publishes
+// the queue. Call sites run the flush immediately after their store, so
+// for them the queue is one entry deep and the post happens microseconds
+// later than before, now correctly ordered. The one site whose store is
+// emitted by the JIT rather than performed in Rust
+// (translate_address_write_jit: it hands a physical address back to
+// generated code, which then stores) has no such adjacent flush point;
+// its post is published by the two backstops that bound how long a
+// queued invalidation may stay invisible to a peer:
+//
+//   - before any shared IPI send (apic.rs write_icr0_shared /
+//     deliver_shared), preserving the "a cross-modifying writer posts
+//     its dirt strictly before its IPI" contract that main_loop_worker's
+//     step ordering relies on — this is what makes the architectural
+//     cross-modifying-code handshake sound;
+//   - at the slice boundary in main_loop_worker, so nothing is queued
+//     across a park.
+//
+// Both backstops are exactly the points at which the design's already
+// documented sub-slice residual window closes, so a queued post is never
+// weaker than the residual the phase already accepts.
+const DEFERRED_DIRTY_CAP: usize = 8;
+static mut DEFERRED_DIRTY: [(u32, bool); DEFERRED_DIRTY_CAP] = [(0, false); DEFERRED_DIRTY_CAP];
+static mut DEFERRED_DIRTY_LEN: usize = 0;
+
+/// Queue a probe+post for `page` (see above). Cheap no-op outside worker
+/// roles, matching post_dirty_page_with's Role::None early return.
+pub fn defer_dirty_post(no_local_code: bool, page: Page) {
+    unsafe {
+        if !role_active() {
+            return;
+        }
+        if DEFERRED_DIRTY_LEN >= DEFERRED_DIRTY_CAP {
+            // cannot happen with the current call sites (each flushes
+            // right after its store, so the queue holds at most the two
+            // pages of one page-crossing access); publishing immediately
+            // is the historical behavior, never worse than dropping
+            post_dirty_page_with(no_local_code, page);
+            return;
+        }
+        DEFERRED_DIRTY[DEFERRED_DIRTY_LEN] = (page.to_u32(), no_local_code);
+        DEFERRED_DIRTY_LEN += 1;
+    }
+}
+
+/// Publish everything `defer_dirty_post` queued. Must be called AFTER the
+/// store the queued entries describe.
+pub fn flush_dirty_posts() {
+    unsafe {
+        if DEFERRED_DIRTY_LEN == 0 {
+            return;
+        }
+        let len = DEFERRED_DIRTY_LEN;
+        DEFERRED_DIRTY_LEN = 0;
+        for k in 0..len {
+            let (page_number, no_local_code) = DEFERRED_DIRTY[k];
+            post_dirty_page_with(no_local_code, Page::page_of(page_number << 12));
         }
     }
 }

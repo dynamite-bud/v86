@@ -197,7 +197,7 @@ await wait_for("AP WaitForSipi", () =>
     check_errors();
     return state(1) === CTL_RUN_STATE_WAIT_FOR_SIPI;
 }, 60_000);
-Atomics.or(i32, ctl_base + 1 * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >> 2,
+Atomics.or(i32, ctl_base + 1 * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >>> 2,
     IPI_INIT_BIT | IPI_SIPI_BIT | AP_VECTOR << 8);
 doorbell_post(i32, ctl_base, 1);
 await wait_for("AP running after SIPI", () =>
@@ -207,12 +207,12 @@ await wait_for("AP running after SIPI", () =>
 }, 60_000);
 
 // both loops publishing fresh rdtsc values
-const first = [Atomics.load(i32, SLOT0 >> 2), Atomics.load(i32, SLOT1 >> 2)];
+const first = [Atomics.load(i32, SLOT0 >>> 2), Atomics.load(i32, SLOT1 >>> 2)];
 await wait_for("both rdtsc loops advancing", () =>
 {
     check_errors();
-    return Atomics.load(i32, SLOT0 >> 2) !== first[0] &&
-        Atomics.load(i32, SLOT1 >> 2) !== first[1];
+    return Atomics.load(i32, SLOT0 >>> 2) !== first[0] &&
+        Atomics.load(i32, SLOT1 >>> 2) !== first[1];
 }, 60_000);
 
 // Skew sampling: both slots read twice, interleaved (a0 b0 a1 b1). A
@@ -228,10 +228,10 @@ let min_skew = 0;
 let accepted = 0;
 for(let round = 0; round < SAMPLE_ROUNDS; round++)
 {
-    const a0 = Atomics.load(i32, SLOT0 >> 2) >>> 0;
-    const b0 = Atomics.load(i32, SLOT1 >> 2) >>> 0;
-    const a1 = Atomics.load(i32, SLOT0 >> 2) >>> 0;
-    const b1 = Atomics.load(i32, SLOT1 >> 2) >>> 0;
+    const a0 = Atomics.load(i32, SLOT0 >>> 2) >>> 0;
+    const b0 = Atomics.load(i32, SLOT1 >>> 2) >>> 0;
+    const a1 = Atomics.load(i32, SLOT0 >>> 2) >>> 0;
+    const b1 = Atomics.load(i32, SLOT1 >>> 2) >>> 0;
     const bracket_a = (a1 - a0) >>> 0;
     const bracket_b = (b1 - b0) >>> 0;
     if(round % 20 === 0)

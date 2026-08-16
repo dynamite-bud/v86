@@ -1062,8 +1062,8 @@ pub unsafe fn btc_mem(virt_addr: i32, mut bit_offset: i32) {
     bit_offset &= 7;
     if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
         if !memory::in_mapped_range(phys_addr) {
-            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             let bit_base = memory::gram_atomic_rmw_xor_8(phys_addr, 1 << bit_offset);
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             *flags = *flags & !1 | bit_base >> bit_offset & 1;
             *flags_changed &= !1;
             return;
@@ -1084,8 +1084,8 @@ pub unsafe fn btr_mem(virt_addr: i32, mut bit_offset: i32) {
     bit_offset &= 7;
     if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
         if !memory::in_mapped_range(phys_addr) {
-            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             let bit_base = memory::gram_atomic_rmw_and_8(phys_addr, !(1 << bit_offset) & 0xFF);
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             *flags = *flags & !1 | bit_base >> bit_offset & 1;
             *flags_changed &= !1;
             return;
@@ -1106,8 +1106,8 @@ pub unsafe fn bts_mem(virt_addr: i32, mut bit_offset: i32) {
     bit_offset &= 7;
     if *prefixes & crate::prefix::PREFIX_LOCK != 0 {
         if !memory::in_mapped_range(phys_addr) {
-            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             let bit_base = memory::gram_atomic_rmw_or_8(phys_addr, 1 << bit_offset);
+            crate::jit::jit_dirty_page(crate::page::Page::page_of(phys_addr));
             *flags = *flags & !1 | bit_base >> bit_offset & 1;
             *flags_changed &= !1;
             return;

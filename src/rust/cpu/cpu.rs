@@ -1980,7 +1980,7 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
         return Ok(phys_addr);
     }
     let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
-    jit::jit_dirty_page(page);
+    crate::jit_dirty_page_for_store!(page);
     if !is_smc {
         return Ok(phys_addr);
     }
@@ -4005,12 +4005,12 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4026,12 +4026,12 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4050,12 +4050,12 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -4073,12 +4073,12 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write64_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write64_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -4097,12 +4097,12 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write128_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write128_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -4120,12 +4120,12 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     }
 }
 
@@ -4147,12 +4147,12 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }
@@ -4175,12 +4175,12 @@ pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }

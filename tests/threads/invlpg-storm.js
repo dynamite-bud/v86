@@ -279,7 +279,7 @@ function build_tables(mem8, dview)
 
 function post_ipi_special(i32, ctl_base, i, bits)
 {
-    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >> 2, bits);
+    Atomics.or(i32, ctl_base + i * CTL_VCPU_STRIDE + CTL_IPI_SPECIAL >>> 2, bits);
     doorbell_post(i32, ctl_base, i);
 }
 
@@ -405,17 +405,17 @@ async function main()
     await wait_for("storm finished", () =>
     {
         check_errors();
-        if(Atomics.load(i32, FAIL_FLAG >> 2) !== 0)
+        if(Atomics.load(i32, FAIL_FLAG >>> 2) !== 0)
         {
             assert.fail("STALE TRANSLATION: round " +
-                (Atomics.load(i32, BAD_ROUND >> 2) >>> 0) + " acked 0x" +
-                (Atomics.load(i32, BAD_VAL >> 2) >>> 0).toString(16) +
-                " (ack count " + (Atomics.load(i32, ACK_COUNT >> 2) >>> 0) + ")");
+                (Atomics.load(i32, BAD_ROUND >>> 2) >>> 0) + " acked 0x" +
+                (Atomics.load(i32, BAD_VAL >>> 2) >>> 0).toString(16) +
+                " (ack count " + (Atomics.load(i32, ACK_COUNT >>> 2) >>> 0) + ")");
         }
-        return Atomics.load(i32, BSP_DONE >> 2) === 1;
+        return Atomics.load(i32, BSP_DONE >>> 2) === 1;
     }, 480_000);
     const secs = (performance.now() - start) / 1000;
-    assert.equal(Atomics.load(i32, ACK_COUNT >> 2), ROUNDS, "every round acked exactly once");
+    assert.equal(Atomics.load(i32, ACK_COUNT >>> 2), ROUNDS, "every round acked exactly once");
     await wait_for("BSP parked", () => state(0) === CTL_RUN_STATE_PARKED, 60_000);
     console.log(`${ROUNDS} guest-driven remap+INVLPG+IPI rounds, zero stale ` +
         `translations, every IPI delivered exactly once (${secs.toFixed(1)} s, ` +

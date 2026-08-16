@@ -245,7 +245,7 @@ unsafe fn string_instruction(
         dbg_assert!(count_until_end_of_page > 0);
 
         if !skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_dst));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_dst));
         }
 
         let mut rep_cmp_finished = false;
@@ -374,7 +374,7 @@ unsafe fn string_instruction(
             }
         }
 
-        dbg_assert!(i <= count);
+        crate::store_then_flush!(dbg_assert!(i <= count));
         count -= i;
 
         if !rep_cmp_finished && count != 0 {
