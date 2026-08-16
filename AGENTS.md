@@ -97,9 +97,33 @@ Integration images are external and ignored. Use the image download command in `
   fourth guest byte as the cursor mask. A shared conversion rule creates an
   opaque 64x64 pointer square.
 - The i386 Codex appliance has no Code Mode host. Its launcher disables
-  `code_mode`, `code_mode_only`, and `code_mode_host`, enables `shell_tool` and
-  `unified_exec`, and keeps direct fallback enabled. Preserve the live
-  `/proc/<pid>/cmdline` readiness check and never add a fake host executable.
+  `code_mode`, `code_mode_only`, `code_mode_host`, and host-owned Codex Apps;
+  enables `shell_tool` and `unified_exec`; and keeps direct fallback enabled.
+  Preserve the live `/proc/<pid>/cmdline` readiness check and never add a fake
+  host executable.
+
+## XWAH-5/XWAH-6 Appliance Operations
+
+- XWAH-5 owns explicit Ghostty acceleration: `renderer=wgpu` selects the
+  browser-side Rust/Wasm backend and `accelerated=1` selects guest Mesa
+  `webgpuvirt`. The standard 2D scanout remains the presentation path.
+- XWAH-6 disables only the host-owned `codex_apps` catalog. A supplied relay
+  enables the separate Context7 Streamable HTTP server after a guest-side MCP
+  initialization and `tools/list` preflight; no relay means both network and
+  Context7 report `UNCONFIGURED`.
+- The canonical integrated URL is
+  `http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F`.
+  A successful run must report `webgpuvirt (v86 WebGPU)`,
+  `MCP_CONTEXT7=PASS`, `CODEX_APPS=DISABLED`, and final readiness.
+- The Codex browser harness owns port 8082. Stop a manual server before tests;
+  restart one afterward only when an interactive link is required.
+- A runnable local base worktree needs all four ignored outputs together under
+  `/Volumes/Xorcist-SSD/PersonalProjects/v86/images/`: rootfs tar, filesystem
+  JSON, flat-file directory, and image contract. Copy or rebuild the whole
+  generation and verify the documented hashes; never commit these artifacts.
+- The base worktree also needs browser artifacts rebuilt from the same `main`
+  revision: `make build/libv86.mjs build/v86.wasm virtio-gpu-wgpu`. A stale
+  bundle can boot the copied image but lacks current 3D/MCP acceptance state.
 
 ## Important Files
 
@@ -131,7 +155,7 @@ Integration images are external and ignored. Use the image download command in `
 - Use GNU Make as the task runner and Node.js as the JavaScript runtime; do not substitute Bun. CI pins Node `24.17.0`; the README identifies recent Node (`24.16` known working). The repository has no JS dependency lockfile or pinned package manager.
 - Rust stable with `wasm32-unknown-unknown`, Cargo, Clang, and `tools/rust-lld-wrapper` builds the core. The optional `tools/virtio-gpu-wgpu/` renderer also requires `wasm-bindgen`; keep it outside the root crate. Java is required for optimized Closure builds; Python 3 serves files and powers utilities.
 - Full QA additionally needs NASM, GDB, QEMU, 32-bit GCC/libc, rustfmt, and downloaded guest images. The dev container provides an amd64 Linux toolchain.
-- The virtio-gpu Linux fixture additionally needs Docker with `linux/386` emulation and Python `zstandard`. Generated files under `images/` remain ignored; commit only reviewed fixture inputs and `image-contract.json`.
+- The virtio-gpu Linux fixture additionally needs Docker with `linux/386` emulation and Python `zstandard`. Generated files under `images/` remain ignored; commit only reviewed fixture inputs and documented contract hashes.
 - `build/`, `images/`, generated Rust dispatch files, Wasm, maps, objects, and the root `Cargo.lock` are ignored. `tools/virtio-gpu-wgpu/Cargo.lock` is intentionally committed for deterministic renderer builds. Do not commit generated artifacts unless a release workflow explicitly requires them.
 
 ## Testing & QA

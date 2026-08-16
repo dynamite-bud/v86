@@ -1,6 +1,6 @@
 # Openbox, Ghostty, and Codex Appliance
 
-Status: **IMPLEMENTED**
+Status: **IMPLEMENTED — XWAH-5 and XWAH-6 consolidated**
 
 [XWAH-3](https://github.com/dynamite-bud/v86/issues/3) originally required Ghostty and OMP. Gate 0 proved that the original chain cannot run in v86: v86 has no x86-64 guest support, OMP and Bun publish no i386 runtime, and Alpine publishes Ghostty only for x86_64 and aarch64. The approved scope replaces OMP with a pinned downstream i386 Codex port. This does not add x86-64 support or claim upstream i386 support for either application.
 
@@ -11,11 +11,11 @@ The appliance remains Alpine Linux 3.24.1 on `linux/386`, matching v86's support
 |Application|Pinned release|Archive size|Archive SHA-256|Installed executable size|Installed executable SHA-256|
 |---|---:|---:|---|---:|---|
 |Ghostty|[`v1.3.1-i386.1`](https://github.com/dynamite-bud/ghostty/releases/tag/v1.3.1-i386.1)|16,930,924 bytes|`73391e2ea610e76d419b85634943877e98dcf1e0d412c03d2f0fc5662556114e`|22,209,904 bytes|`99930b1e0f6c13d318d13ed2e29bb8045cd440264d5e2b34900a2fe8d6dafa8a`|
-|Codex|[`rust-v0.147.0-i386.1`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.1)|33,010,567 bytes|`e26bae168d40474d976eb272c48ef86b8acd86bfb3028e9e83060d8f18855438`|70,069,640 bytes|`ddcf34dba92dcd4c6549325011ccb2b7e1832a98c91467e822034eed2120f9e4`|
+|Codex|[`rust-v0.147.0-i386.3`](https://github.com/dynamite-bud/codex/releases/tag/rust-v0.147.0-i386.3)|33,010,114 bytes|`592c7b39a9910d3fc7d84879ff7355cb268c007f0454d050e72bf7fa8183a5b1`|70,069,640 bytes|`497bce02b22458cbfddf9e182245c72ea46ffc57cbac70e69077a0dc07f6a19c`|
 
 Ghostty was cross-compiled for `x86-linux-musl` against an Alpine x86 sysroot. The release workflow and complete patch stack are on the Ghostty fork's `i386` branch. Its release artifact starts under Alpine `linux/386` and reports Ghostty 1.3.1.
 
-Codex was cross-compiled from upstream `rust-v0.147.0` for `i686-unknown-linux-musl`. The fork's `i386` branch contains the complete patch stack, pinned Rust 1.95.0 and Zig 0.15.2 workflow, reproducible packaging, and a recurring upstream-update path. Validation run [31605548346](https://github.com/dynamite-bud/codex/actions/runs/31605548346) compiled the exact release commit and smoke-tested the artifact in Alpine `linux/386`.
+Codex was cross-compiled from upstream `rust-v0.147.0` for `i686-unknown-linux-musl`. The fork's `i386` branch contains the complete patch stack, pinned Rust 1.95.0 and Zig 0.15.2 workflow, reproducible packaging, recurring upstream updates, and the i386 sandbox correction. Validation run [31892304999](https://github.com/dynamite-bud/codex/actions/runs/31892304999) compiled release commit `a5f4a008a657b497b7361db547bf86269aeba1bf` and smoke-tested the exact artifact in Alpine `linux/386`.
 
 Codex's standard Linux network seccomp filter is unavailable on i386 because its seccompiler dependency does not support 32-bit x86. The appliance selects Codex's `workspace-write` filesystem sandbox with no interactive approvals, but model-generated commands do not receive Codex's usual network seccomp isolation. Use the port only inside an external isolation boundary such as this disposable v86 guest. No model credential is included in the image.
 
@@ -58,6 +58,11 @@ Generated artifacts are ignored under `images/`:
 - `alpine-virtio-gpu-codex-rootfs-flat/`
 - `alpine-virtio-gpu-codex-image-contract.json`
 
+Treat these four outputs as one indivisible local contract. When moving a
+runnable appliance between worktrees, copy the tar, filesystem JSON,
+content-addressed flat-file directory, and image contract together; mixing
+generations can pair a filesystem index with missing or stale chunks.
+
 ## Implementation Method
 
 The work followed a gated, reproducible path rather than modifying the existing desktop fixture:
@@ -74,13 +79,23 @@ This structure keeps downloaded application artifacts, guest assembly, emulator 
 
 ## Networking
 
-The browser page does not hardcode a relay. Supply a WISP/wsproxy relay with the `relay` query parameter:
+The browser page does not hardcode a relay. The consolidated XWAH-5/XWAH-6
+mode uses the Rust/Wasm `wgpu` host renderer, explicit guest `webgpuvirt`
+acceleration, and a percent-encoded WISP/wsproxy relay:
 
 ```text
-http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=webgpu-js&relay=wss%3A%2F%2Frelay.example.test%2F
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F
 ```
 
-When supplied, v86 creates a VirtIO NIC and the privileged OpenRC boot service performs DHCP before the unprivileged graphical session starts. Readiness requires an IPv4 lease. Browser acceptance then verifies CA-validated HTTPS from the guest. When omitted, the guest emits `V86_APPLIANCE_NETWORK=UNCONFIGURED` and still starts the local Codex UI; it never reports network success.
+`renderer=wgpu` selects the browser-side Rust/Wasm backend;
+`accelerated=1` selects the checksum-locked Mesa `webgpuvirt` renderer inside
+the guest. When a relay is supplied, v86 creates a VirtIO NIC and the
+privileged OpenRC service obtains DHCP, performs the Context7 MCP 2025-06-18
+initialization handshake, and verifies `resolve-library-id` plus `query-docs`
+in `tools/list` before the unprivileged graphical session starts. The same
+Context7 URL is then added to Codex as an ordinary configured MCP server.
+Without a relay, the NIC and remote MCP entry are omitted; readiness reports
+both network and Context7 as `UNCONFIGURED` and still starts the local UI.
 
 For local verification, use port **8082**:
 
@@ -95,11 +110,12 @@ The tty1 session writes bounded evidence to `ttyS0`:
 - architecture, UID, deterministic hostname, and kernel;
 - Ghostty and Codex versions;
 - `/dev/dri/card0`;
-- `NETWORK=PASS` or `NETWORK=UNCONFIGURED`;
+- `NETWORK=PASS|UNCONFIGURED` and
+  `MCP_CONTEXT7=PASS|UNCONFIGURED`;
 - the selected Mesa renderer, `llvmpipe` by default or `webgpuvirt` when
   acceleration is explicit;
-- live Openbox, Ghostty, and Codex processes plus the checked direct-tool
-  launcher arguments;
+- live Openbox, Ghostty, and Codex processes, checked direct-tool and remote
+  MCP launcher arguments, `CODEX_APPS=DISABLED`, and a direct sandboxed shell;
 - final `V86_APPLIANCE_READY=PASS` or a precise failure reason.
 
 The page declares success only after the guest PASS marker and a visible WebGPU
@@ -124,17 +140,21 @@ The acceptance harness verifies:
 - exact application versions;
 - llvmpipe OpenGL plus visible 1024x768 scanout;
 - Xorg, Openbox, Ghostty, and Codex processes;
-- supplied-relay DHCP and CA-validated HTTPS, or an honest unconfigured state;
-- absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`, Tumbler, Garcon, and Exo;
+- supplied-relay DHCP, CA-validated HTTPS, and the Context7 MCP handshake/tool
+  list, or an honest unconfigured network/MCP state;
+- absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`,
+  Tumbler, Garcon, and Exo;
 - unconfigured Codex login with no baked home credential;
 - browser keyboard delivery and responsive narrow layout;
-- a writable workspace and pristine fresh-session reset on the direct JavaScript backend;
-- live Codex process arguments that disable Code Mode and its host, enable
-  direct shell/unified execution, and retain in-process fallback;
+- a writable workspace and pristine fresh-session reset on the direct
+  JavaScript backend;
+- live Codex process arguments that disable Code Mode, its absent host, and
+  host-owned Codex Apps; enable direct shell/unified execution; retain
+  in-process fallback; and configure Context7 only when a relay exists;
 - verified absence of the external Code Mode host and its V8 runtime;
 - a direct `/bin/sh` command executed through `codex sandbox --`, proving
-  Bubblewrap enforces the filesystem sandbox while the
-  unavailable i386 network seccomp backend is bypassed without aborting;
+  Bubblewrap enforces the filesystem sandbox while the unavailable i386
+  network seccomp backend is bypassed without aborting;
 - a uniform accelerated terminal background and a non-rectangular,
   alpha-masked hardware cursor.
 
@@ -213,36 +233,47 @@ canvas; every measured run must then report nonzero WebGPU presentations and
 presented bytes. The interactive accelerated scenario retains the stricter
 uniform-background pixel probe.
 
-## Observed Authenticated Run and Direct Tools
+## Consolidated XWAH-5/XWAH-6 Runtime
 
-An authenticated run through a configured relay reached `gpt-5.6-sol` and
-returned a normal Codex response from `/home/codex/workspace`. It also exposed
-two application-level limitations:
+XWAH-5 supplies the explicit accelerated graphics path: browser-side
+Rust/Wasm `wgpu`, guest-side Mesa `webgpuvirt`, standard VirtIO GPU 2D scanout,
+the measured Ghostty command subset, uniform full-window background handling,
+and alpha-preserving cursor conversion. It remains opt-in through
+`accelerated=1`; normal boots retain llvmpipe.
 
-- `codex_apps` MCP startup timed out during `tools/list` pagination after 30
-  seconds. The normal model response still completed.
-- The initial launcher requested Code Mode even though
-  `/usr/local/bin/codex-code-mode-host` is absent, so command dispatch failed
-  closed. The pinned release publishes only the main Codex archive and its
-  checksum.
+XWAH-6 classifies the host-owned `codex_apps` service as unsupported in this
+i386 appliance and disables it with `--disable apps`. This is not a global MCP
+disable. With a relay, Codex receives a separate
+`mcp_servers.context7.url="https://mcp.context7.com/mcp"` entry after the guest
+has completed a real MCP initialization and tool-list preflight. Without a
+relay, that entry is omitted so offline startup does not wait for an
+unreachable server.
 
-The corrected launcher explicitly disables `code_mode`, `code_mode_only`, and
+The launcher also disables `code_mode`, `code_mode_only`, and
 `code_mode_host`; enables `shell_tool` and `unified_exec`; and sets
-`code_mode.disable_in_process_fallback=false`. Readiness inspects the live
-process arguments and emits `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`. The exact
-i386 binary reports the three Code Mode features disabled and both direct-tool
-features enabled. This restores the supported direct command path; it does not
-fabricate or claim a Code Mode host.
+`code_mode.disable_in_process_fallback=false`. The pinned i386 binary reports
+Codex Apps and all three Code Mode features disabled, both direct-tool
+features enabled, and no external Code Mode host. Readiness verifies the live
+arguments and executes `/bin/sh` through `codex sandbox --`.
 
-The clean-image acceptance remains deliberately unauthenticated, so
-model-mediated command execution still requires user-supplied login after
-boot. No credential is persisted or baked into the image.
+The combined browser run on port 8082 has been observed with:
 
-These application warnings are not appliance readiness successes and are not
-hidden by the serial contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6),
-a child of XWAH-3, tracks a real i686 Code Mode host and bounded MCP pagination
-diagnosis. External MCP readiness needs its own bounded acceptance scenario
-rather than a longer appliance boot timeout.
+```text
+V86_APPLIANCE_NETWORK=PASS
+V86_APPLIANCE_MCP_CONTEXT7=PASS
+V86_APPLIANCE_RENDERER=webgpuvirt (v86 WebGPU)
+V86_APPLIANCE_OPENGL=4.3 (Compatibility Profile) Mesa 26.1.6 (git-ffa422e53d)
+V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
+V86_APPLIANCE_CODEX_APPS=DISABLED
+V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS
+V86_APPLIANCE_READY=PASS
+```
+
+This proves the guest DNS/TCP/TLS/HTTP path, MCP protocol initialization and
+tool discovery, graphics selection, and launcher contract. It does not claim
+that an authenticated model invoked a Context7 tool. Authentication remains
+user-provided and ephemeral; no credential or authenticated home directory is
+part of the image.
 
 ## Measured Follow-up Map
 

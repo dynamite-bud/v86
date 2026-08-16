@@ -127,6 +127,17 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=webgpu-js&relay=ws
 
 Change `renderer=webgpu-js` to `renderer=wgpu` for the Rust/Wasm renderer. The page preserves the relay parameter when switching renderers.
 
+The canonical consolidated XWAH-5/XWAH-6 launch uses browser-side Rust/Wasm
+`wgpu`, guest-side Mesa `webgpuvirt`, and the relay-backed Context7 MCP sample:
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F
+```
+
+For this mode, require `V86_APPLIANCE_RENDERER=webgpuvirt (v86 WebGPU)`,
+`V86_APPLIANCE_MCP_CONTEXT7=PASS`, and
+`V86_APPLIANCE_CODEX_APPS=DISABLED`; do not accept llvmpipe fallback.
+
 The page deliberately does not hardcode a relay. Without `relay=`, it reports `VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest, omits the virtual NIC, and still boots the local Codex UI. With a relay, the guest must obtain an IPv4 lease before the graphical session starts. It then performs an MCP `initialize`/`notifications/initialized`/`tools/list` handshake with the public, credential-free Context7 sample at `https://mcp.context7.com/mcp` and configures that endpoint for Codex. Use a trusted relay for real credentials; a public relay is suitable only for disposable testing and can observe connection metadata even though application HTTPS remains encrypted.
 
 ## Authentication and Persistence
