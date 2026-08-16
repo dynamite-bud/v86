@@ -10,12 +10,25 @@ cd "$HOME/workspace" || exit 1
 pid_file=/tmp/v86-codex.pid
 printf '%s\n' "$$" > "$pid_file.tmp"
 mv "$pid_file.tmp" "$pid_file"
-exec /usr/local/bin/codex \
+
+set -- /usr/local/bin/codex \
     --sandbox workspace-write \
     --ask-for-approval never \
     --disable code_mode \
     --disable code_mode_only \
     --disable code_mode_host \
+    --disable apps \
     --enable shell_tool \
     --enable unified_exec \
     -c code_mode.disable_in_process_fallback=false
+
+# Keep the no-relay appliance usable without waiting for an unreachable MCP
+# endpoint. A configured relay enables the public, credential-free sample.
+if ! grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
+    . /etc/conf.d/v86-networking
+    set -- "$@" \
+        -c "mcp_servers.context7.url=\"$V86_MCP_CONTEXT7_URL\"" \
+        -c mcp_servers.context7.startup_timeout_sec=30
+fi
+
+exec "$@"

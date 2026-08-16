@@ -11,6 +11,7 @@ fail()
     [ ! -f /tmp/v86-xrandr.log ] || tail -n 50 /tmp/v86-xrandr.log >&3
     [ ! -f /tmp/v86-ghostty.log ] || tail -n 200 /tmp/v86-ghostty.log >&3
     [ ! -f /tmp/v86-codex-direct-shell.log ] || tail -n 50 /tmp/v86-codex-direct-shell.log >&3
+    [ ! -f /var/log/v86-mcp-context7.log ] || tail -n 50 /var/log/v86-mcp-context7.log >&3
     printf 'V86_APPLIANCE_FAILURE=%s\n' "$reason" >&3
     printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
     exit 1
@@ -106,9 +107,16 @@ fi
 
 if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
     printf 'V86_APPLIANCE_NETWORK=UNCONFIGURED\n' >&3
+    printf 'V86_APPLIANCE_MCP_CONTEXT7=UNCONFIGURED\n' >&3
 elif [ -e /run/v86-network-ready ] &&
      ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet '; then
     printf 'V86_APPLIANCE_NETWORK=PASS\n' >&3
+    if [ -e /run/v86-mcp-context7-ready ]; then
+        printf 'V86_APPLIANCE_MCP_CONTEXT7=PASS\n' >&3
+    else
+        [ ! -f /var/log/v86-mcp-context7.log ] || cat /var/log/v86-mcp-context7.log >&3
+        fail mcp-context7-unavailable
+    fi
 else
     [ ! -f /var/log/v86-networking.log ] || cat /var/log/v86-networking.log >&3
     fail network-unavailable
@@ -177,14 +185,30 @@ while [ "$attempt" -lt 900 ]; do
             IFS= read -r codex_pid < /tmp/v86-codex.pid
             # Read NUL-delimited argv as lines and verify the live launcher contract.
             codex_arguments=$(tr '\0' '\n' < "/proc/$codex_pid/cmdline")
-            for argument in --disable code_mode code_mode_only code_mode_host \
+            for argument in --disable code_mode code_mode_only code_mode_host apps \
                 --enable shell_tool unified_exec -c code_mode.disable_in_process_fallback=false; do
                 if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
                     fail codex-exec-flags
                 fi
             done
+            if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
+                if printf '%s\n' "$codex_arguments" |
+                   grep -Fq 'mcp_servers.context7.url='; then
+                    fail codex-mcp-context7-unconfigured
+                fi
+            else
+                . /etc/conf.d/v86-networking
+                mcp_url_argument="mcp_servers.context7.url=\"$V86_MCP_CONTEXT7_URL\""
+                for argument in "$mcp_url_argument" \
+                    mcp_servers.context7.startup_timeout_sec=30; do
+                    if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
+                        fail codex-mcp-context7-flags
+                    fi
+                done
+            fi
             printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
             printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_APPS=DISABLED\n' >&3
             printf 'V86_APPLIANCE_NO_CODE_MODE_HOST=PASS\n' >&3
             printf 'V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS\n' >&3
         fi
