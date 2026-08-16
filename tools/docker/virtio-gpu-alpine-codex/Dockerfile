@@ -126,6 +126,7 @@ RUN chmod 0755 /usr/local/sbin/v86-appliance-session \
         -e 's/^tty1::respawn:/tty1::once:/' /etc/inittab && \
     echo 'ttyS0::respawn:/sbin/agetty --autologin codex -s ttyS0 115200 vt100' >> /etc/inittab && \
     printf '%s\n' virtio_gpu virtio_net > /etc/modules-load.d/v86-appliance.conf && \
+    printf '%s\n' 'V86_MCP_CONTEXT7_URL=https://mcp.context7.com/mcp' > /etc/conf.d/v86-networking && \
     printf '%s\n' 'allowed_users=anybody' 'needs_root_rights=yes' > /etc/X11/Xwrapper.config && \
     passwd -l root && \
     setup-hostname localhost && \

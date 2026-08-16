@@ -44,9 +44,9 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `packages.lock` | Sorted direct and transitive installed APK closure. The Docker build rejects drift with `apk info -v | sort | cmp`. |
 | `artifacts.lock` | Immutable Ghostty and Codex release tags, URLs, and SHA-256 values. |
 | `mesa-artifacts.lock` | Pinned Mesa commit plus reproducible i386 Gallium and DRI binary SHA-256 values. |
-| `v86-networking` | Deterministic hostname, UID 1000 runtime directory, optional VirtIO NIC DHCP, and `/run/v86-network-ready`. |
+| `v86-networking` | Deterministic hostname, UID 1000 runtime directory, optional VirtIO NIC DHCP, and the Context7 MCP protocol preflight. |
 | `profile` | Starts the appliance only for the automatic tty1 login. |
-| `appliance-session` | Architecture, privilege, network, DRM, process, negotiated renderer, 2D fallback, and serial readiness/failure contract. |
+| `appliance-session` | Architecture, privilege, network/MCP, DRM, process, negotiated renderer, 2D fallback, and serial readiness/failure contract. |
 | `virtio-gpu-capset-probe.c` | Direct pinned-libdrm `GET_CAPS` and `CONTEXT_INIT` proof for private capset ID 7. |
 | `virtio-gpu-triangle.c` | Frozen capset-v1/v2 triangles plus the version-3 Mesa llvmpipe reference and explicit resource/buffer/shader/binding/indexed-draw workload. |
 | `virtio-gpu-triangle-spv.h` | Pinned Naga-generated SPIR-V modules for the version-3 textured triangle. |
@@ -56,7 +56,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `xinitrc` | Openbox, selected renderer check, 1024x768 mode, Ghostty, and Codex process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
 | `ghostty-config` | Undecorated maximized window and the Codex launcher command. |
-| `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup with unavailable Code Mode disabled and supported direct shell/unified execution enabled. |
+| `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup with Codex Apps/Code Mode disabled, supported direct shell/unified execution enabled, and relay-gated Context7 configuration. |
 
 Docker assembles and exports the root filesystem; it is not part of the browser runtime. `normalize_rootfs.py --preserve-owners` sorts archive members, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged home and workspace.
 
@@ -127,7 +127,7 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=webgpu-js&relay=ws
 
 Change `renderer=webgpu-js` to `renderer=wgpu` for the Rust/Wasm renderer. The page preserves the relay parameter when switching renderers.
 
-The page deliberately does not hardcode a relay. Without `relay=`, it reports `VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest, omits the virtual NIC, and still boots the local Codex UI. With a relay, the guest must obtain an IPv4 lease before the graphical session starts. Use a trusted relay for real credentials; a public relay is suitable only for disposable testing and can observe connection metadata even though application HTTPS remains encrypted.
+The page deliberately does not hardcode a relay. Without `relay=`, it reports `VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest, omits the virtual NIC, and still boots the local Codex UI. With a relay, the guest must obtain an IPv4 lease before the graphical session starts. It then performs an MCP `initialize`/`notifications/initialized`/`tools/list` handshake with the public, credential-free Context7 sample at `https://mcp.context7.com/mcp` and configures that endpoint for Codex. Use a trusted relay for real credentials; a public relay is suitable only for disposable testing and can observe connection metadata even though application HTTPS remains encrypted.
 
 ## Authentication and Persistence
 
@@ -148,6 +148,7 @@ V86_APPLIANCE_UID=1000
 V86_APPLIANCE_HOSTNAME=v86-appliance
 V86_APPLIANCE_DRM=/dev/dri/card0
 V86_APPLIANCE_NETWORK=PASS|UNCONFIGURED
+V86_APPLIANCE_MCP_CONTEXT7=PASS|UNCONFIGURED
 V86_APPLIANCE_XORG=PASS
 V86_APPLIANCE_RENDERER=llvmpipe (...)|webgpuvirt (...)
 V86_APPLIANCE_OPENBOX=PASS
@@ -155,6 +156,7 @@ V86_APPLIANCE_GHOSTTY_PROCESS=PASS
 V86_APPLIANCE_GHOSTTY_WINDOW=PASS
 V86_APPLIANCE_CODEX_PROCESS=PASS
 V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
+V86_APPLIANCE_CODEX_APPS=DISABLED
 V86_APPLIANCE_NO_CODE_MODE_HOST=PASS
 V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS
 V86_APPLIANCE_READY=PASS
@@ -317,18 +319,33 @@ TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 ```
 
 The acceptance harness checks guest architecture and UID, pinned versions,
-hostname, relay behavior, CA-validated HTTPS when configured, the expected
-llvmpipe or `webgpuvirt` renderer, Xorg/Openbox/Ghostty/Codex processes, the
-live Codex direct-tool flags, visible scanout, accelerated background
-uniformity, cursor alpha, keyboard delivery, responsive layout, absence of
-desktop packages, writable workspace, and pristine fresh-session reset.
+hostname, relay behavior, CA-validated HTTPS when configured, the Context7 MCP
+handshake and tool list, the expected llvmpipe or `webgpuvirt` renderer,
+Xorg/Openbox/Ghostty/Codex processes, the live Codex feature and remote-MCP
+arguments, visible scanout, accelerated background uniformity, cursor alpha,
+keyboard delivery, responsive layout, absence of desktop packages, writable
+workspace, and pristine fresh-session reset.
 
-## Observed Codex Limitation
+## MCP Topology
 
-An authenticated run through the configured relay reached `gpt-5.6-sol` and
-returned a normal response. `codex_apps` MCP startup can still time out during
-`tools/list` pagination. This external MCP startup failure is reported visibly;
-it does not block the observed core prompt/response path.
+The host-owned `codex_apps` MCP is explicitly disabled with `--disable apps`.
+It is not a general MCP switch: the authenticated Apps/connector catalog was
+the server that timed out during paginated `tools/list`, while ordinary
+configured MCP servers use separate entries under `mcp_servers`.
+
+When a relay URL is present, `v86-networking` proves the guest path to Context7
+with the MCP 2025-06-18 initialization handshake and requires both
+`resolve-library-id` and `query-docs` in `tools/list`. The Codex launcher then
+adds the same HTTPS endpoint as `mcp_servers.context7`. Readiness checks the
+live process arguments and reports `V86_APPLIANCE_MCP_CONTEXT7=PASS`. This
+preflight proves guest DNS, TCP, TLS, HTTP, protocol initialization, and tool
+discovery without committing credentials. It does not claim an authenticated
+model invoked a Context7 tool.
+
+Without a relay, the launcher omits the remote server so the local UI does not
+wait for an unreachable endpoint; readiness reports
+`V86_APPLIANCE_MCP_CONTEXT7=UNCONFIGURED`. Resetting the page removes any MCP
+OAuth state or configuration added interactively.
 
 The i386 archive intentionally omits `/usr/local/bin/codex-code-mode-host` and
 its V8 runtime. Its downstream tool-mode patch treats unavailable
@@ -344,12 +361,12 @@ proving that the missing i386 seccomp backend no longer aborts direct
 commands.
 
 This does not implement Code Mode, package V8, or weaken the no-credential
-image contract. [XWAH-6](https://github.com/dynamite-bud/v86/issues/6)
-retains the bounded MCP pagination diagnosis.
+image contract.
 
 ## Troubleshooting
 
 - **`VirtIO NIC relay: unconfigured`:** add a percent-encoded `relay=wss://.../` query parameter, then reload. This status is intentional when no relay was supplied.
+- **`V86_APPLIANCE_FAILURE=mcp-context7-unavailable`:** inspect the bounded `/var/log/v86-mcp-context7.log` disclosure; confirm the relay supports guest DNS, TLS, HTTP POST, and streamed responses from `https://mcp.context7.com/mcp`.
 - **VGA console remains visible:** inspect the serial disclosure for `V86_APPLIANCE_FAILURE`; confirm `/dev/dri/card0` and the `1af4:1050` device.
 - **Xorg rejects the display name:** confirm `v86-networking` set `v86-appliance` and both loopback mappings before the tty1 session started.
 - **Openbox or Ghostty exits:** inspect `/tmp/v86-appliance.log`, `/tmp/v86-openbox.log`, `/tmp/v86-ghostty.log`, and `/tmp/v86-glxinfo.log` through the bounded serial failure output.

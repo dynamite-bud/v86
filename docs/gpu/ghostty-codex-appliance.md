@@ -302,9 +302,9 @@ The generated Codex appliance is smaller than the retained XFCE fixture:
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
 |Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
-|Compressed flat files|279,267,802|295,224,610|-15,956,808 bytes|5.40%|
-|Filesystem JSON|581,407|695,517|-114,110 bytes|16.41%|
-|Flat-file count|7,951|9,175|-1,224|13.34%|
+|Compressed flat files|279,268,428|295,224,610|-15,956,182 bytes|5.40%|
+|Filesystem JSON|581,461|695,517|-114,056 bytes|16.40%|
+|Flat-file count|7,952|9,175|-1,223|13.33%|
 |Package closure|311|420|-109|25.95%|
 
 These values come from the generated image contracts and package locks.
@@ -314,14 +314,14 @@ boots keep Alpine's system Gallium file in place; accelerated boot replaces it
 once, so the image carries no duplicate system backup. Recompute this evidence
 after any image, package, or artifact change.
 
-The final reproducible XWAH-5 rebuild produced these SHA-256 values:
+The final reproducible XWAH-6 rebuild produced these SHA-256 values:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`34da3e74563d830c8d1befc918ecc0a10e053025dc51ac9f4b0393b51faecd3c`|
-|Filesystem JSON|`06b1075e00a9a7a7cfb98a30676858d43eef2b6f3cf3842df96593baadce372c`|
-|Flat-file manifest|`4aca0a2a8bdec0190a8ae1c05445ef7965c2f2bafcd8e0e8570acfaa1ad97122`|
-|Image contract|`ad0d74e91903fb6410a3d54aaef2a5cb7a1e3260d4f391bf17fe759ba76ae7d5`|
+|Rootfs tar|`9b5e4acf5c835bf0c928445997a70d0028fc70e50180e44e917efb3c9f072d6f`|
+|Filesystem JSON|`002fba95c60d0953999951e8ff5656eaebe404d3e654fa58bcad6a94f558432d`|
+|Flat-file manifest|`3dce79927661de5623f908f3690fca94d3cdbdb961c6ca44a48578ea0c9743c5`|
+|Image contract|`d2d75fa457c5cda86f82d68afc114c13c556c44008ad51f6127d785760e843e7`|
 
 ## Original OMP Gate
 
