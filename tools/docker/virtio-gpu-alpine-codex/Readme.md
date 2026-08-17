@@ -297,6 +297,154 @@ Ghostty and Codex readiness, verified direct-tool process arguments, capset-7
 and zero invalid commands, backend errors, browser console errors, or WebGPU
 validation errors.
 
+## XWAH-5/XWAH-6 Change Review
+
+This is the PR-level audit of the feature history and broad diffs, not only the
+final happy path. The review covers the original XWAH-5 feature, its
+post-merge appliance/Codex corrections, XWAH-6, and the consolidated local
+handoff.
+
+The fork's GitHub PR index contained no PR object for these work items at
+review time; issue discussions and the commit ranges below are therefore the
+authoritative review record.
+
+### Broad diff review
+
+|Slice|Range|Files|Insertions|Deletions|Primary ownership|
+|---|---|---:|---:|---:|---|
+|XWAH-5 primary implementation|`5c7c8eb2..0b8cc576`|51|10,685|605|Mesa/Gallium and DRM winsys, capset-v3 protocol, Rust/Wasm renderer, appliance, benchmarks, acceptance, tools, and docs|
+|XWAH-5 post-merge corrections|`0b8cc576..8f42ae66`|8|173|212|Session lifecycle, direct-tool selection, reviewed i386 artifact, and sandboxed shell execution|
+|XWAH-6 MCP policy|`c1af225c..ffc7db1e`|7|136|31|Apps disablement, Context7 configuration/preflight, readiness, acceptance, and docs|
+|Consolidated operations|`f32bff78..4839842f`|4|123|55|Canonical runtime, image handoff, stale-build guard, and root/fixture agent guidance|
+
+The XWAH-5 primary diff is intentionally broad because the guest driver,
+wire format, host renderer, reproducible image, and observable acceptance
+contract had to move together. The smaller follow-up ranges are corrections;
+they are part of the shipped behavior and must not be omitted from review.
+
+### Bugs and hardening findings
+
+|Area|Observed failure or risk|Correction and retained guard|
+|---|---|---|
+|Mesa capability negotiation|Ghostty configured framebuffer sRGB, but `webgpuvirt` did not advertise the control.|Advertise the bounded capability (`e816e5bc`) and keep the measured GL callset test.|
+|Mesa patch generation|Adding sRGB support left the generated patch hunk range stale.|Correct the range (`490527a3`); CI applies the pinned patch from scratch.|
+|Mesa artifact CI|The built DRI driver was a symlink and artifact collection did not follow it.|Dereference the driver symlink (`b6bf0580`) and checksum the real runtime object.|
+|Build dependencies|The i386 Mesa recipe omitted XRandR, zlib, zstd, Expat, and ELF development inputs.|Install and lock the complete build closure (`0b0e56ee`).|
+|Resource validation|Valid Mesa buffer resource shapes were rejected by the private resource path.|Accept the measured shapes (`d0b6642b`) without widening dimensions or quotas generally.|
+|Validation attribution|A guest render failure could leak into unrelated global diagnostics.|Scope errors to the offending submit (`55df78b4`) and retain bounded rejection history (`a3c2c4d4`).|
+|Rejected submits|Validation failure could leave partially staged Mesa state.|Roll back atomically (`795dca31`); fuzzed decoding must not submit, retain descriptors, or create objects.|
+|Malformed submits|A bad submit could destroy an otherwise valid guest context.|Preserve the context (`84e86d7c`) while rejecting only the malformed command.|
+|Artifact portability|CI emitted platform-dependent checksum text.|Emit portable hashes (`905abc6b`) and separate artifact export from lock verification (`782fdc61`).|
+|Benchmark attribution|The accelerated benchmark could report the wrong renderer.|Emit and assert the selected renderer (`b2cc6555`).|
+|Texture capability gaps|Ghostty uses R8, RG, integer atlas, and atlas color-attachment formats not covered by the initial subset.|Add only the measured R8/RG/integer-atlas paths and advertised targets (`a0d2e138`, `69fa9e61`, `b94ee31e`, `d41823ea`, `0f7f447a`, `8a25f294`).|
+|Clear-color conversion|Mesa BGRA clears could arrive with swapped colors.|Preserve BGRA clear semantics (`168bf90f`) and retain the triangle/pixel contracts.|
+|Browser optimization|Closure could rename browser API properties used dynamically by WebGPU integration.|Preserve those property names (`df2dfb8c`).|
+|Tracing|Development virgl/format tracing was noisy and could perturb normal runs.|Gate command tracing (`1a472184`) and remove temporary format tracing (`06c5a1a9`).|
+|Snapshot memory|Compressed state chunks were materialized instead of streamed.|Stream chunks (`966735e5`) to bound transient memory.|
+|Visual acceptance|A single readiness pixel missed a diagonal two-tone Ghostty background.|Separate global and cell-background programs, draw the former with a synthetic full-screen triangle, and sample both diagonal regions (`60182f5a`, `0b8cc576`).|
+|Cursor conversion|Forcing opaque alpha for X-format cursors produced a black 64×64 square.|Keep scanout X formats opaque but preserve the cursor's fourth guest byte; require transparent and opaque pixels (`0b8cc576`).|
+|Benchmark readiness|An idle terminal could stop producing dirty frames after guest readiness and trigger a false timeout.|Use the guest marker plus visible canvas before measured runs; require nonzero presentations during every run (`0b8cc576`).|
+|Appliance lifecycle|The accelerated launch path could replace or lose the real Codex session.|Preserve the Ghostty PTY and Codex process (`40794b53`); acceptance rechecks the live process after readiness.|
+|Code Mode availability|The i386 archive has no V8-backed Code Mode host, so model-requested Code Mode failed closed and left commands unusable.|Disable all Code Mode selectors, retain in-process fallback, and expose supported direct tools (`491c4b50`). Never add a fake host.|
+|Artifact provenance|The first downstream Codex pin preceded the final CI-validated sandbox correction.|Pin `rust-v0.147.0-i386.3` from the reviewed successful workflow (`a6f3829f`).|
+|i386 network seccomp|The seccompiler dependency has no 32-bit x86 backend and aborted direct commands before `/bin/sh` ran.|Skip only the unavailable network filter, retain setuid Bubblewrap and `workspace-write`, and execute a direct shell smoke (`8f42ae66`).|
+|Codex Apps MCP|The account-owned `codex_apps` server timed out during paginated `tools/list` and created a false degraded-startup state.|Classify it as unsupported here and disable only Apps with `--disable apps` (`ffc7db1e`).|
+|Ordinary remote MCP|Disabling Apps alone did not prove that normal MCP servers worked through the guest relay.|Add relay-gated Context7 configuration and a real `initialize`/`notifications/initialized`/`tools/list` preflight requiring both expected tools (`ffc7db1e`).|
+|Offline MCP startup|An unconditional remote endpoint would make no-relay boots wait on an unreachable service.|Omit Context7 when the relay is unconfigured and report `MCP_CONTEXT7=UNCONFIGURED` (`ffc7db1e`).|
+|MCP diagnostics|Network success did not distinguish DHCP/TLS from MCP protocol/tool discovery.|Add separate ready files, bounded MCP logs, exact failure reasons, live argv checks, and `PASS|UNCONFIGURED` serial markers (`ffc7db1e`).|
+|Local worktree handoff|A current image copied into the base worktree was first exercised with a stale browser bundle that lacked `contexts_3d`.|Treat images and browser builds as revision-coupled; rebuild `libv86.mjs`, `v86.wasm`, and `virtio-gpu-wgpu` after handoff (`4839842f`).|
+|Public relay availability|The disposable public relay can occasionally fail DHCP or disappear.|Readiness fails honestly with `network-unavailable`; retry or use a trusted relay rather than weakening the contract.|
+
+### Improvements delivered
+
+- Added a deterministic llvmpipe control and accelerated five-run Ghostty
+  workload with stable full-canvas SHA-256, guest CPU, latency, throughput,
+  presentation, timer, long-task, and error evidence.
+- Added a reproducible, checksum-locked Mesa 26.1.6 i386 build with targeted
+  `webgpuvirt` Gallium/DRM winsys support, branch CI, complete dependency locks,
+  and release-only runtime artifacts.
+- Added capset-v3 resource and submit decoding, atomic validation, fuzz
+  coverage, quotas, ownership, ordered fences, deterministic teardown and
+  device-loss handling, bounded rejection evidence, and shared staged shader
+  bytes.
+- Added the independent version-3 resource triangle using standard VirtIO GPU
+  resources, SPIR-V modules, bindings, indexed drawing, browser pixel checks,
+  and zero-leak recovery.
+- Added the measured Ghostty vertex/rectangle/texture/atlas subset without
+  claiming general OpenGL, virgl, Vulkan, or default 3D compatibility.
+- Added fast content-addressed filesystem image patching for development while
+  preserving the full reproducible image build and checksum contract.
+- Added explicit opt-in appliance and benchmark targets, measured GL callset
+  evidence, a GLX-compatible pinned Ghostty artifact, live renderer reporting,
+  uniform-background and cursor-alpha gates, and stable direct-tool readiness.
+- Added secure, explicit Codex behavior for the actual i386 artifact:
+  non-root UID 1000, locked root, ephemeral credentials, Bubblewrap
+  `workspace-write`, no fake Code Mode host, direct shell smoke, Apps disabled,
+  and the remaining network-seccomp limitation disclosed.
+- Added ordinary remote MCP coverage without credentials: Context7 is
+  configured only with a relay, initialized from inside the guest, and checked
+  for its exact public tool list.
+- Added source/renderer/image ownership guidance, benchmark baselines, wire
+  documentation, browser and unit regressions, troubleshooting, image hashes,
+  and exact base-worktree handoff instructions.
+
+### Reviewed commit ledger
+
+|Work item|Commit|Message|
+|---|---|---|
+|XWAH-5|`b3e41650`|`perf(virtio-gpu): establish Ghostty llvmpipe baseline`|
+|XWAH-5|`abdb1d86`|`build(webgpuvirt): add reproducible i386 Mesa build`|
+|XWAH-5|`172ffd10`|`ci(webgpuvirt): build Mesa artifacts on branch updates`|
+|XWAH-5|`0b0e56ee`|`build(webgpuvirt): install Mesa build dependencies`|
+|XWAH-5|`e816e5bc`|`fix(webgpuvirt): advertise framebuffer srgb control`|
+|XWAH-5|`490527a3`|`fix(webgpuvirt): correct Mesa patch range`|
+|XWAH-5|`48f213ed`|`feat(webgpuvirt): expose Ghostty vertex formats`|
+|XWAH-5|`b6bf0580`|`fix(webgpuvirt): follow Mesa driver symlink in CI`|
+|XWAH-5|`d0b6642b`|`fix(virtio-gpu): accept Mesa buffer resource shapes`|
+|XWAH-5|`bd25fc4b`|`feat(tools): add fast filesystem image patching`|
+|XWAH-5|`86e63aa7`|`feat(virtio-gpu): render capset v3 guest workloads`|
+|XWAH-5|`55df78b4`|`fix(virtio-gpu): scope guest render validation errors`|
+|XWAH-5|`d97d314f`|`test(virtio-gpu): fuzz capset v3 submit decoding`|
+|XWAH-5|`795dca31`|`fix(virtio-gpu): roll back rejected Mesa submits`|
+|XWAH-5|`dcd0f1fe`|`perf(virtio-gpu): share staged Mesa shader bytes`|
+|XWAH-5|`318a2c42`|`chore(eslint): declare browser rendering globals`|
+|XWAH-5|`2d38044b`|`test(virtio-gpu): add accelerated Ghostty benchmark mode`|
+|XWAH-5|`905abc6b`|`fix(ci): emit portable Mesa artifact checksums`|
+|XWAH-5|`df5983fe`|`build(mesa): lock i386 webgpuvirt artifacts`|
+|XWAH-5|`b2cc6555`|`fix(virtio-gpu): report accelerated benchmark renderer`|
+|XWAH-5|`a0d2e138`|`feat(virtio-gpu): support Ghostty R8 textures`|
+|XWAH-5|`69fa9e61`|`fix(mesa): advertise R8 render targets`|
+|XWAH-5|`1a472184`|`fix(mesa): gate virgl command tracing`|
+|XWAH-5|`a3dc19d4`|`feat(virtio-gpu): render Ghostty rectangles`|
+|XWAH-5|`a3c2c4d4`|`feat(virtio-gpu): retain bounded 3D rejection history`|
+|XWAH-5|`782fdc61`|`build(mesa): separate artifact export from lock verification`|
+|XWAH-5|`21d54b15`|`feat(appliance): select opt-in webgpuvirt session`|
+|XWAH-5|`17d240f7`|`test(virtio-gpu): add accelerated appliance targets`|
+|XWAH-5|`d2cef02c`|`test(appliance): record measured Ghostty GL callset`|
+|XWAH-5|`f7126cb1`|`build(appliance): pin GLX-compatible Ghostty artifact`|
+|XWAH-5|`84e86d7c`|`fix(virtio-gpu): preserve contexts after malformed submits`|
+|XWAH-5|`a2f2db50`|`feat(virtio-gpu): add version three resource triangle`|
+|XWAH-5|`168bf90f`|`fix(virtio-gpu): preserve Mesa BGRA clear colors`|
+|XWAH-5|`06c5a1a9`|`chore(mesa): remove development format tracing`|
+|XWAH-5|`b94ee31e`|`fix(virtio-gpu): support Ghostty integer atlases`|
+|XWAH-5|`d41823ea`|`fix(virtio-gpu): expose RG texture support`|
+|XWAH-5|`df2dfb8c`|`fix(webgpu): preserve browser API property names`|
+|XWAH-5|`0f7f447a`|`fix(virtio-gpu): support Ghostty integer atlas`|
+|XWAH-5|`8a25f294`|`fix(virtio-gpu): advertise atlas color attachment`|
+|XWAH-5|`966735e5`|`fix(snapshot): stream compressed state chunks`|
+|XWAH-5|`60182f5a`|`feat(virtio-gpu): accelerate Ghostty with targeted WebGPU`|
+|XWAH-5|`0b8cc576`|`fix(virtio-gpu): harden accelerated Ghostty appliance`|
+|XWAH-5|`40794b53`|`fix(appliance): preserve accelerated Codex session`|
+|XWAH-5|`491c4b50`|`fix(codex): fall back to direct tools without code mode`|
+|XWAH-5|`a6f3829f`|`chore(codex): pin CI-validated i386 artifact`|
+|XWAH-5|`8f42ae66`|`fix(codex): enable sandboxed i386 shell execution`|
+|XWAH-6|`ffc7db1e`|`fix(codex): disable apps mcp and probe context7`|
+
+Integration points on `main`: `fed57a4c` merged Ghostty WebGPU acceleration,
+`76fa734d` merged direct-tool fallback, `60c65042` merged the validated artifact
+pin, `c1af225c` merged sandboxed shell execution, `f32bff78` merged remote MCP
+support, and `4839842f` consolidated the runtime and local handoff guidance.
+
 ## Verification
 
 The browser harness owns its HTTP server. Stop any manual server on port 8082 before running it:
