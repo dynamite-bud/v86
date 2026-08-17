@@ -468,6 +468,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/atomics-exactness.js
 	./tests/threads/guest-lock-exactness.js
 	./tests/threads/mailbox-protocol.js
+	./tests/threads/index-data-pairs.js
 	./tests/threads/multimem-instance.js
 	./tests/threads/plain-race-vs-atomic.js
 	./tests/threads/shared-view-coherence.js
