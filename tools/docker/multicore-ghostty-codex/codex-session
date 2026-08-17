@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# Ghostty's `command`: the Codex TUI, plus a watcher that earns the
+# v86-appliance-tui-ready marker.
+#
+# `pidof codex` only proves the process was spawned. It stays true for a
+# Codex that died into a stopped state, and for one that never took the
+# terminal — both of which look like a black Ghostty window to the user.
+# The watcher below upgrades that to: Codex is alive, Ghostty's pty is its
+# stdin AND stdout, and it has actually been scheduled (non-zero CPU time).
+#
+# What this does NOT prove is that anything was painted; the guest cannot
+# inspect its own framebuffer from here. That check belongs to the browser
+# acceptance test, which samples the real canvas and requires the pixels to
+# change in response to input
+# (tests/browser/multicore_ghostty_codex_acceptance.js).
+
+MARKER=/tmp/v86-appliance-tui-ready
+
+watch_tui()
+{
+    attempt=0
+    while [ "$attempt" -lt 900 ]; do
+        pid=$(pidof codex 2>/dev/null | tr ' ' '\n' | head -n 1)
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+            stdin_target=$(readlink "/proc/$pid/fd/0" 2>/dev/null)
+            stdout_target=$(readlink "/proc/$pid/fd/1" 2>/dev/null)
+            # utime + stime, in clock ticks
+            ticks=$(awk '{ print $14 + $15 }' "/proc/$pid/stat" 2>/dev/null)
+            case "$stdin_target:$stdout_target" in
+                /dev/pts/*:/dev/pts/*)
+                    if [ -n "$ticks" ] && [ "$ticks" -gt 0 ]; then
+                        touch "$MARKER"
+                        return 0
+                    fi
+                    ;;
+            esac
+        fi
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+cd "$HOME/workspace" || exit 1
+rm -f "$MARKER"
+
+# Runs as a sibling process, so it survives the exec below.
+watch_tui &
+
+exec /usr/local/bin/codex --sandbox workspace-write --ask-for-approval never

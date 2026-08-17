@@ -64,6 +64,86 @@ export const STATE_TIMEOUT_MS = 60000;
 // device ticks are never starved.
 export const SERVICE_SPIN = 4000;
 
+// ---- XWAH-37: index/data register pairs across workers ----
+//
+// An index/data register pair is two addresses where the first selects
+// which register the second one names: the guest writes the index, then
+// accesses the data window. That is TWO guest instructions, and under
+// worker-per-vCPU execution each of them forwards to this host as its own
+// independent mailbox RPC. Nothing keeps the two halves of one worker's
+// pair adjacent, so two workers interleave:
+//
+//     worker A: write index = entry_1_low
+//     worker B: write index = entry_7_low     <-- clobbers A's index
+//     worker A: write data  = <A's value>     <-- lands in entry 7
+//
+// The observable result is a register programmed with another register's
+// data. For the IOAPIC that is a redirection entry carrying a foreign
+// vector — e.g. unmasked with vector 0, which trips the "Invalid vector"
+// assert in apic.rs on the next device IRQ, and in a release build
+// silently misroutes the line instead.
+//
+// The fix is to make the pair atomic per requester rather than to lock the
+// host: this host remembers the index each worker last wrote, and re-writes
+// that index immediately before servicing that worker's data access. Both
+// halves then happen inside ONE synchronous dispatch, which no other
+// worker's RPC can split. It removes the interleaving window instead of
+// narrowing it, and needs no cross-worker blocking — a worker that writes
+// an index and then parks (or is saved) before its data access holds no
+// lock and stalls nobody.
+//
+// This gives each worker its own effective index register, where real
+// hardware has one shared one. A guest that serializes its own pair
+// accesses — Linux holds `ioapic_lock`, `rtc_lock`, `pci_config_lock` for
+// exactly this reason — cannot tell the difference: under its own lock the
+// index it reads back is always the one it wrote. Only a guest that
+// deliberately sets an index on one CPU and reads the data window from
+// another observes the change, and that sequence is already a data race on
+// real hardware.
+//
+// Engages only with two or more workers: with one worker no interleaving
+// exists, so topology (c) and a single-vCPU (b) machine keep byte-for-byte
+// the device-access sequence they had before.
+//
+// AUDIT of the other index/data pairs reachable over the mailbox
+// (docs/multicore.md "Known limitations" carries the same table):
+//
+// - IOAPIC IOREGSEL/IOWIN (MMIO 0xFEC00000/+0x10) — SERIALIZED here. The
+//   index write is a bare field store (ioapic.rs write32_internal), so
+//   replaying it has no side effect of its own.
+// - CMOS/RTC 0x70/0x71 — SERIALIZED here. Port 0x70's handler stores
+//   `cmos_index` and `nmi_disabled` and nothing else (rtc.js), and
+//   `nmi_disabled` is never read back by the emulator, so a replay is a
+//   pure index restore.
+// - PCI CF8/CFC — NOT serialized: replaying the config address is not
+//   side-effect free. pci.js routes the 0xCF9 reset control register
+//   through byte 1 of the CF8 window, so a replay can reach
+//   `cpu.reboot_internal()` on an address transition the guest never made.
+//   Needs the index carried with the data access instead of replayed.
+// - VGA attribute controller 0x3C0 — NOT an index/data pair: one port that
+//   alternates index and data through a flip-flop (reset by reading
+//   0x3DA). A replay would flip the flop, so this needs its own mechanism.
+// - VGA DAC 0x3C8/0x3C9 — NOT serializable this way: the data port
+//   auto-advances a sub-index across the three palette bytes, so replaying
+//   0x3C8 mid-triple would restart the colour.
+// - VGA CRTC/sequencer/graphics 0x3D4, 0x3C4, 0x3CE and SB16 mixer 0x224 —
+//   structurally exposed, but every driver programs them from one CPU, and
+//   the common 16-bit `outw` form already crosses as a single RPC. Left
+//   alone rather than paying a replay on the display path.
+//
+// The three that need a different mechanism are filed as follow-ups rather
+// than forced into this one.
+export const IOAPIC_MEM_ADDRESS = 0xFEC00000; // cpu.rs IOAPIC_MEM_ADDRESS
+export const IOAPIC_IOREGSEL = 0;
+export const IOAPIC_IOWIN = 0x10;
+export const CMOS_INDEX_PORT = 0x70;
+export const CMOS_DATA_PORT = 0x71;
+// one shadow slot per (worker, pair); -1 = this worker has not written
+// this pair's index yet, so its data accesses stay on the historical path
+export const PAIR_IOAPIC = 0;
+export const PAIR_CMOS = 1;
+export const PAIR_COUNT = 2;
+
 // struct sizes mirrored from the Rust layouts, as in cpu.js get_state_*
 export const APIC_STRUCT_SIZE = 4 * 46;
 export const PIC_STRUCT_SIZE = 13;
@@ -163,6 +243,113 @@ proto.init_core = function(cpu, emulator_bus, guest_memory, total, workers)
     this.lifecycle_chain = Promise.resolve();
     // a reboot already queued or in flight coalesces further requests
     this.rebooting = false;
+    // XWAH-37: per-worker last-written index of each index/data register
+    // pair, -1 until that worker writes one
+    this.index_shadow = new Int32Array(workers * PAIR_COUNT).fill(-1);
+};
+
+/**
+ * Drop every remembered index (XWAH-37). Called wherever the devices
+ * behind the pairs are reset or replaced wholesale — after a reboot's
+ * chipset reset and after a state restore — so a stale pre-reset index can
+ * never be replayed into a freshly programmed device. Dropping a shadow is
+ * always safe: it only returns that worker to the historical path, where
+ * its data access uses whatever index the device currently holds, and
+ * every guest writes the index again before its next data access anyway.
+ * @this {!Object}
+ */
+proto.forget_index_shadows = function()
+{
+    this.index_shadow.fill(-1);
+};
+
+/**
+ * Re-establish this worker's index before its data access, so an
+ * index/data pair cannot be split by another worker's RPC (XWAH-37; the
+ * audit and the reasoning are above the pair constants).
+ *
+ * Runs inside dispatch's try, before the op itself: a replay goes through
+ * the same primitive the op would use, so a throwing device handler is
+ * reported and answered exactly like a throwing op.
+ * @param {number} requester worker index the RPC came from
+ * @param {number} op
+ * @param {number} addr address for the mmap ops, port for the I/O ops
+ * @param {number} size
+ * @param {number} value
+ * @this {!Object}
+ */
+proto.sync_index_pair = function(requester, op, addr, size, value)
+{
+    const shadow = this.index_shadow;
+
+    if(op === MAILBOX_OP_MMAP_READ || op === MAILBOX_OP_MMAP_WRITE)
+    {
+        // Only the widths memory.rs routes into the IOAPIC reach the
+        // register file at all: write32, and read8/read32s (an 8-bit read
+        // is byte-extracted from the dword the selector names, which is why
+        // the register is masked to its dword below). Every other width
+        // falls through to the JS memory map without touching the device,
+        // so it must neither move nor consult the shadow.
+        if(op === MAILBOX_OP_MMAP_WRITE ? size !== 4 : size !== 1 && size !== 4)
+        {
+            return;
+        }
+        const reg = (addr >>> 0) - IOAPIC_MEM_ADDRESS & ~3;
+        const slot = requester * PAIR_COUNT + PAIR_IOAPIC;
+        if(reg === IOAPIC_IOREGSEL && op === MAILBOX_OP_MMAP_WRITE)
+        {
+            // the guest is selecting a register: this IS the index write,
+            // so record it and let it through unchanged
+            shadow[slot] = value;
+        }
+        else if(reg === IOAPIC_IOWIN || reg === IOAPIC_IOREGSEL)
+        {
+            const index = shadow[slot];
+            if(index !== -1)
+            {
+                this.cpu.write32(IOAPIC_MEM_ADDRESS + IOAPIC_IOREGSEL | 0, index);
+            }
+        }
+        return;
+    }
+
+    // Same rule on the port side: rtc.js registers only 8-bit handlers for
+    // 0x70 and 0x71, and io.js leaves the wider entries of every port at
+    // empty_port_write / empty_port_read, so a 16- or 32-bit access to
+    // either port is a no-op that must not move or consult the shadow
+    // either. The rep ops carry their ELEMENT width here, so a batched
+    // insb/outsb — which does reach the byte handlers — passes this test
+    // for the same reason a plain one does.
+    if(size !== 1)
+    {
+        return;
+    }
+    const slot = requester * PAIR_COUNT + PAIR_CMOS;
+    if(addr === CMOS_INDEX_PORT)
+    {
+        if(op === MAILBOX_OP_OUT)
+        {
+            shadow[slot] = value & 0xFF;
+        }
+        else if(op === MAILBOX_OP_OUT_REP)
+        {
+            // a batched `rep outsb` to the index port ends on a byte this
+            // host never sees as a value: forget the index rather than
+            // replay a stale one, which only returns this worker to the
+            // historical path
+            shadow[slot] = -1;
+        }
+        return;
+    }
+    if(addr !== CMOS_DATA_PORT)
+    {
+        return;
+    }
+    const index = shadow[slot];
+    if(index !== -1)
+    {
+        this.io.write8(CMOS_INDEX_PORT, index);
+    }
 };
 
 /**
@@ -382,7 +569,7 @@ proto.start_service_loop = function(index)
     const i32 = this.i32;
     const record = mailbox_record_word(this.ctl_base, index);
     const dispatch = (op, addr, size, value_lo, value_hi, seq, value_2, value_3) =>
-        this.dispatch(op, addr, size, value_lo, value_hi, seq, value_2, value_3);
+        this.dispatch(index, op, addr, size, value_lo, value_hi, seq, value_2, value_3);
     this.service_done.push((async () =>
     {
         while(!this.stopped)
@@ -438,6 +625,7 @@ proto.stop_service_loops = function()
  * ordered dword writes, the historical JS mmap_write64/128 dword split. A
  * throwing device handler is still answered so the worker never
  * deadlocks, then surfaced as emulator-error.
+ * @param {number} requester worker index this RPC came from (XWAH-37)
  * @param {number} op
  * @param {number} addr
  * @param {number} size
@@ -449,12 +637,16 @@ proto.stop_service_loops = function()
  * @return {number|undefined}
  * @this {!Object}
  */
-proto.dispatch = function(op, addr, size, value_lo, value_hi, seq, value_2, value_3)
+proto.dispatch = function(requester, op, addr, size, value_lo, value_hi, seq, value_2, value_3)
 {
     const cpu = this.cpu;
     const io = this.io;
     try
     {
+        if(this.workers > 1)
+        {
+            this.sync_index_pair(requester, op, addr, size, value_lo);
+        }
         switch(op)
         {
             case MAILBOX_OP_IN:
@@ -747,6 +939,7 @@ proto.reboot = function(reset_main)
             }
             const was_running = await this.quiesce();
             reset_main();
+            this.forget_index_shadows();
             this.halt_event_sent = false;
             this.before_reset && this.before_reset();
             for(let i = 0; i < this.workers; i++)

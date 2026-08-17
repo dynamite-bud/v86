@@ -448,6 +448,15 @@ virtio-gpu-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 
 virtio-gpu-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_codex_acceptance.js
+
+# XWAH-9: the multi-core appliance end to end — four worker vCPUs in a real
+# browser, the guest's SMP readiness contract, and a canvas that has to hold
+# real content AND change in response to typed input. Needs the multimem
+# artifact (worker mode does not load build/v86.wasm) and the image built by
+# multicore-ghostty-codex-image.
+multicore-ghostty-codex-browser-test: build/libv86.mjs build/v86-multimem.wasm \
+		build/gram.wasm build/gram-shared.wasm
+	./tests/browser/multicore_ghostty_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
@@ -468,6 +477,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 	./tests/threads/atomics-exactness.js
 	./tests/threads/guest-lock-exactness.js
 	./tests/threads/mailbox-protocol.js
+	./tests/threads/index-data-pairs.js
 	./tests/threads/multimem-instance.js
 	./tests/threads/plain-race-vs-atomic.js
 	./tests/threads/shared-view-coherence.js
@@ -558,6 +568,13 @@ virtio-gpu-desktop-image:
 virtio-gpu-codex-image:
 	tools/docker/virtio-gpu-alpine-codex/build.sh
 
+# Builds into images/multicore-ghostty-codex-* — a distinct prefix from
+# virtio-gpu-codex-image on purpose: images/ is a shared, gitignored
+# directory, so two branches writing one prefix means the last build silently
+# wins and the other branch boots a guest it never described.
+multicore-ghostty-codex-image:
+	tools/docker/multicore-ghostty-codex/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -573,4 +590,5 @@ denodoc:
 
 .PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-browser-test virtio-gpu-ready-snapshot-test virtio-gpu-codex-browser-test \
-	virtio-gpu-color-test virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
+	virtio-gpu-color-test virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image \
+	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test

@@ -290,6 +290,9 @@ execution.
 | Safari multi-memory pending | The multi-memory validation matrix passes on V8 (Node 24) and Chrome 151; Firefox is untested and Safari is the open go/no-go for the imported backend beyond Chromium/Gecko — and therefore transitively for worker execution, which ships Chrome-first behind the `"auto"` ladder. The Stage 0 probe page gained the W5 `memory.atomic.wait32`/`notify` cells; Firefox/Safari columns remain pending | [smp-phase3-design.md](smp-phase3-design.md) §1 S1, §5; [smp-phase4-design.md](smp-phase4-design.md) §8 |
 | Relaxed memory ordering on ARM hosts (worker mode) | Under per-vCPU workers, racing PLAIN guest accesses can observe x86-forbidden orderings on weakly ordered hosts at ppm rates (measured: 7–27 per 1e6 racing trials, Apple M4); locked/fenced guest code is unaffected (all LOCK ops are seq-cst). Opt-out: `smp_memory_model: "fenced"` (JIT fast paths fenced, TSO restored — measured 0/1e6; interpreter/slow paths stay unfenced) | [smp-phase4-design.md](smp-phase4-design.md) §5 W5 verdict; `tests/threads/tso-litmus.js` |
 | Exclusive-execution bus-lock cost (worker mode) | Misaligned/page-crossing LOCKed accesses park every other worker for the RMW; acquisition can wait out a busy peer's current execution slice, so split-lock throughput under load is slice-latency-bounded (~ms). Pathological guests only; aligned locked ops take the CAS fast path | [smp-phase4-design.md](smp-phase4-design.md) §5, §9 W4 note |
+| Index/data pairs are per-worker (worker mode) | The IOAPIC `IOREGSEL`/`IOWIN` and CMOS `0x70`/`0x71` pairs are serialized by remembering each worker's selector and re-applying it inside the same host dispatch (XWAH-37), so each worker effectively gets its own index register where hardware has one shared one. Indistinguishable to any guest that holds its own lock across the pair (Linux: `ioapic_lock`, `rtc_lock`); a guest that deliberately selects on one CPU and reads the data window from another sees the difference — already a data race on real hardware | `smp_host_core.js` `sync_index_pair`; `tests/threads/index-data-pairs.js` |
+| Index/data pairs still splittable (worker mode) | Three pairs are *not* serialized because re-applying their index is not side-effect free: PCI `CF8`/`CFC` (pci.js routes the `0xCF9` reset register through byte 1 of the address window, so a replay can reach `reboot_internal`), the VGA attribute controller `0x3C0` (one port alternating index and data through a flip-flop), and the VGA DAC `0x3C8`/`0x3C9` (the data port auto-advances a sub-index across the three palette bytes). Each needs the index carried with the data access rather than replayed | `smp_host_core.js` audit comment; XWAH-40 |
+| Index/data pairs splittable in time-sliced mode | The same hazard predates worker execution: `main_loop_smp` rotates vCPUs between guest instructions, so a slice boundary can fall between a pair's index and data access with the devices shared. Not fixed here — the fix belongs in the device models and would change the default artifact's bytes and the time-sliced paths, which this phase holds identical | [smp-phase4-design.md](smp-phase4-design.md) (intro); `cpu.rs` `main_loop_smp`; XWAH-41 |
 | SIPI entry in the default artifact | The default (non-multimem) artifact's time-sliced SIPI consume enters at linear 0 instead of the architectural vector<<12 (masked on first boot by the low-memory sled; multimem builds enter architecturally since W5). One-line fix deferred to the first phase allowed to change the default artifact's bytes | [smp-phase4-design.md](smp-phase4-design.md) §9 W5 note; `vcpu.rs` `sipi_entry_linear_ip!` |
 
 ## Worker execution (experimental)
@@ -357,6 +360,109 @@ Alpine SMP fixture with `cpus: 2` fully inside the worker, plus
 mailbox-under-load and hlt/wake-race stress) and
 `tests/threads/machine-in-worker-boottime.js` (the ≤ 1.25× boot-time gate
 vs time-sliced execution over the same memory backend).
+
+### Running the Codex appliance under worker vCPUs
+
+This line has its **own** appliance:
+`examples/multicore_ghostty_codex.html`, built from
+`tools/docker/multicore-ghostty-codex/` into `images/multicore-ghostty-codex-*`
+(`make multicore-ghostty-codex-image`). It defaults to `cpus=4&workers=1` —
+opt *out* with `?cpus=1` or `?workers=0`.
+
+It is separate from `examples/virtio_gpu_codex.html` for a concrete reason.
+`images/` is gitignored and shared across worktrees, so while both
+appliances built into `alpine-virtio-gpu-codex-*` the last build silently
+won and this branch's page booted `main`'s guest — visible only as
+unexpected packages in the readiness output and a DHCP failure this
+contract does not require. The multi-core guest now announces
+`V86_APPLIANCE_IMAGE=multicore-ghostty-codex` in its first serial lines and
+the acceptance test asserts it before anything else.
+
+Its readiness contract also proves what the single-core one cannot: vCPUs
+actually **online** (`V86_APPLIANCE_CPUS`, checked against the `v86_cpus=N`
+the page puts on the kernel command line, so a vCPU stuck in WaitForSipi
+fails the boot), a measured in-guest `V86_APPLIANCE_PARALLEL_SPEEDUP`
+(time-sliced execution cannot exceed ~1.0), and a Codex process that owns
+Ghostty's pty rather than merely existing. Pixels are checked browser-side
+by `make multicore-ghostty-codex-browser-test`, which requires the canvas to
+hold real content **and to change in response to typed input** — a static
+frame or a black screen fails.
+
+The older single-core fixture, `examples/virtio_gpu_codex.html`, still
+accepts the SMP query parameters below on this branch; the copy on `main`
+does not — see the divergence note at the end of this section.
+
+Build the release artifacts once. Worker mode loads the **multimem**
+module, not `build/v86.wasm`:
+
+```sh
+make build/libv86.mjs          # Closure bundle — needs Java on PATH
+make build/v86-multimem.wasm   # release multimem module
+make build/gram.wasm build/gram-shared.wasm
+```
+
+Serve with cross-origin isolation. This is the step the appliance guide's
+`python3 -m http.server 8082` recipe does not cover: without COOP/COEP the
+browser withholds `SharedArrayBuffer`. The page passes `smp_workers: true`
+(not `"auto"`), so it fails loudly rather than degrading — the constructor
+throws `smp_workers: shared WebAssembly.Memory is unavailable
+(crossOriginIsolated/SharedArrayBuffer)` (`starter.js`). An embedder
+passing `"auto"` gets the opposite: a silent step down to time-sliced
+execution, logged and reported through `smp_mode` but easy to mistake for a
+merely slow boot.
+
+```sh
+python3 tools/coi-server.py 8082
+```
+
+`make run-isolated` runs the same server but defaults to port 8000; the
+appliance guide and the browser acceptance tests standardise on 8082.
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?cpus=4&workers=1
+```
+
+| Query | Mode |
+| --- | --- |
+| `?cpus=4&workers=1` | 4 worker vCPUs — real host parallelism, the fastest configuration |
+| `?cpus=2&workers=1` | 2 worker vCPUs — less host contention on smaller machines |
+| `?cpus=4` | 4 vCPUs time-sliced on one thread |
+| `?cpus=1` | single core, the appliance's historical acpi-less setup |
+| `&mm=fenced` | seq-cst fences on the JIT fast paths (TSO restored); slower, for ordering A/B |
+
+**Confirm the mode actually took.** The `"auto"` ladder degrades silently
+by design, so a disappointing boot may simply not be running workers:
+
+```js
+emulator.smp_mode  // { execution: "workers", topology: "percpu", memory_model: "relaxed", … }
+```
+
+The `smp-mode` event carries the same record at startup.
+
+Measured on an Apple M4 (4P+6E), release artifacts: appliance readiness
+115–136 s under 4 workers versus 175 s time-sliced. Boot is not
+embarrassingly parallel, so this is not a 4× workload — see
+[smp-benchmark-report.md](smp-benchmark-report.md) for the gated workloads
+and for why 4 workers plus the device host thread can land on E-cores and
+produce outlier rounds.
+
+Notes:
+
+* `acpi` switches on automatically for `cpus > 1` (the LAPIC MMIO window is
+  gated on it); the one-CPU appliance keeps its historical acpi-less setup.
+* `renderer=wgpu` additionally needs `make virtio-gpu-wgpu`; the default
+  `webgpu-js` renderer needs no extra build.
+* The guest fixture must exist under `images/` — worktrees symlink it to
+  the primary checkout rather than duplicating ~700 MB.
+
+**Divergence to resolve at merge time.** `main` and `multi-core` have both
+edited `examples/virtio_gpu_codex.html` and neither side has the other's
+query parameters: `main` added `shader`/`resources`/`mesa`/`accelerated`/
+`benchmark` (the XWAH-5/XWAH-6 GPU acceleration work), `multi-core` added
+`cpus`/`workers`/`mm`. Merging the branches must **union** the parameter
+sets rather than take either side wholesale, or one feature set disappears
+silently. `AGENTS.md` and `docs/gpu/ghostty-codex-appliance.md` have
+diverged the same way.
 
 ## Testing
 

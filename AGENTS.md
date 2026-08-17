@@ -11,11 +11,12 @@ v86 is a 32-bit x86 PC emulator for browsers and Node.js. A Rust interpreter/JIT
 XWAH means **Xorcist Web Agent Harness**. Use `XWAH-N` as the project work-item identifier, where `N` is the immutable GitHub tracker number.
 
 - `main` is the authoritative integration branch and the base for all new work. Fetch `origin/main` before creating a branch or worktree, and start from that ref unless the user explicitly selects another base.
+- **Exception — SMP / multi-core work bases on and merges to `multi-core`, NOT `main`.** The XWAH-9 worker-vCPU stack (Phases 1-4; PRs #12, #17, #19, #20, #36) is integrated on `multi-core`, and `main` does not contain it. A change is SMP work if it touches `src/browser/smp_*.js`, `src/browser/vcpu_worker.js`, `src/rust/cpu/{smpctl,vcpu,worker,lock}.rs`, `tests/threads/`, or `docs/smp-*.md` / `docs/multicore.md` — including the XWAH-37/40/41/42 follow-ups. Basing such a branch on `main` produces a worktree that cannot see the code it is changing. Fetch `origin/multi-core`, branch from that ref, and open the PR with `gh pr create --base multi-core`. When unsure which line a commit belongs to, check `git branch -r --contains <commit>`.
 - Treat `master`, `feature/virtio-gpu-2d`, and existing topic branches as historical or backport targets, not bases for new work.
 - Every GitHub work-item title MUST begin with `XWAH-N:`, for example `XWAH-2: Expand VirtIO GPU color-fidelity coverage`.
 - In branches, commits, plans, and human-readable references, use `XWAH-N`; NEVER create a new `issue-N` identifier. GitHub `#N` syntax MAY still be used where a native link or CLI command requires the immutable tracker number.
 - Every tracker-backed branch MUST use `feature/XWAH-N/<kebab-case-slug>`, for example `feature/XWAH-2/virtio-gpu-3d`.
-- Open pull requests against `main`. Keep unrelated XWAH work on separate branches and in separate worktrees.
+- Open pull requests against `main`, or against `multi-core` for SMP work per the exception above. Keep unrelated XWAH work on separate branches and in separate worktrees.
 - Every commit MUST follow semantic Conventional Commit syntax with a nonempty lowercase scope: `<type>(<scope>): <imperative summary>`.
 - Prefer the narrow subsystem as the scope, such as `feat(codex): package i386 code mode host`, `feat(alpine): add cage kiosk image`, `fix(virtio-gpu): preserve scanout ordering`, or `docs(xwah): define branch workflow`.
 - Use `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, or `chore` as the commit type. Do not use unscoped messages or vague summaries such as `update`, `changes`, or `misc fixes`.
@@ -110,6 +111,47 @@ Integration images are external and ignored. Use the image download command in `
 - Full QA additionally needs NASM, GDB, QEMU, 32-bit GCC/libc, rustfmt, and downloaded guest images. The dev container provides an amd64 Linux toolchain.
 - The virtio-gpu Linux fixture additionally needs Docker with `linux/386` emulation and Python `zstandard`. Generated files under `images/` remain ignored; commit only reviewed fixture inputs and `image-contract.json`.
 - `build/`, `images/`, generated Rust dispatch files, Wasm, maps, objects, and the root `Cargo.lock` are ignored. `tools/virtio-gpu-wgpu/Cargo.lock` is intentionally committed for deterministic renderer builds. Do not commit generated artifacts unless a release workflow explicitly requires them.
+
+### Running the Ghostty/Codex appliance in the browser
+
+Serve on port **8082** — the appliance guide and the browser acceptance
+tests standardise on it. Which server depends on whether you need worker
+vCPUs:
+
+```sh
+python3 -m http.server 8082 --bind 127.0.0.1   # single core / time-sliced only
+python3 tools/coi-server.py 8082               # required for smp_workers
+```
+
+`SharedArrayBuffer` is only exposed to cross-origin isolated pages, so
+worker mode needs the COOP/COEP headers `coi-server.py` sends. The
+appliance page passes `smp_workers: true`, so serving it without them
+throws `smp_workers: shared WebAssembly.Memory is unavailable
+(crossOriginIsolated/SharedArrayBuffer)` from the constructor. Embedders
+passing `"auto"` instead degrade silently to time-sliced execution, which
+reads as a slow boot rather than a misconfiguration — so verify the mode,
+never assume it. (`make run-isolated` runs the same server but defaults to
+port 8000.)
+
+Worker mode loads the multimem module, so build the release artifacts
+first — `build/v86.wasm` is not used in this configuration:
+
+```sh
+make build/libv86.mjs build/v86-multimem.wasm build/gram.wasm build/gram-shared.wasm
+```
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?cpus=4&workers=1
+```
+
+`cpus=N` sets vCPU count (`acpi` auto-enables above 1), `workers=1` selects
+worker-per-vCPU execution, `mm=fenced` restores TSO for ordering A/B, and
+`renderer=wgpu` needs `make virtio-gpu-wgpu` first. Always verify the mode
+actually took via `emulator.smp_mode` rather than trusting the URL.
+
+Full matrix, measured numbers, and the `main`/`multi-core` divergence in
+this example's query parameters: `docs/multicore.md` (worker-execution
+section, `multi-core` branch).
 
 ## Testing & QA
 

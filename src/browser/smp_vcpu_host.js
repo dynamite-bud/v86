@@ -424,6 +424,11 @@ SMPVcpuHost.prototype.assemble_save = async function(capture)
 SMPVcpuHost.prototype.distribute_restore = async function()
 {
     const cpu = this.cpu;
+    // main has already replaced its chipset with the image's, so every
+    // remembered index/data selector belongs to the pre-restore machine
+    // (XWAH-37). Only this topology runs more than one worker, so only this
+    // one ever populates the shadows.
+    this.forget_index_shadows();
     // covers cpus=1 images (no trailing vcpu slot: the live block is the
     // only source); for cpus>1 this re-writes identical bytes
     cpu.vcpu_prepare_save();
