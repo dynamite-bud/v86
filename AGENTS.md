@@ -96,11 +96,12 @@ Integration images are external and ignored. Use the image download command in `
 - Scanout X formats force opaque alpha, but cursor X formats preserve the
   fourth guest byte as the cursor mask. A shared conversion rule creates an
   opaque 64x64 pointer square.
-- The i386 Codex appliance has no Code Mode host. Its launcher disables
+- The i386 Codex appliance boots to Ghostty with no Codex process. Its manual
+  launcher sets `--dangerously-bypass-approvals-and-sandbox`, disables
   `code_mode`, `code_mode_only`, `code_mode_host`, and host-owned Codex Apps;
   enables `shell_tool` and `unified_exec`; and keeps direct fallback enabled.
-  Preserve the live `/proc/<pid>/cmdline` readiness check and never add a fake
-  host executable.
+  Preserve the no-autostart, writable-home, and full-access readiness checks;
+  never add a fake host executable or an automatic MCP server.
 
 ## XWAH-5/XWAH-6 Appliance Operations
 
@@ -108,13 +109,14 @@ Integration images are external and ignored. Use the image download command in `
   browser-side Rust/Wasm backend and `accelerated=1` selects guest Mesa
   `webgpuvirt`. The standard 2D scanout remains the presentation path.
 - XWAH-6 disables only the host-owned `codex_apps` catalog. A supplied relay
-  enables the separate Context7 Streamable HTTP server after a guest-side MCP
-  initialization and `tools/list` preflight; no relay means both network and
-  Context7 report `UNCONFIGURED`.
+  provides guest networking only; MCP servers are exclusively user-configured.
+  The guest must bring up `127.0.0.1/8` for local OAuth listeners, but the
+  appliance does not claim that a host-browser OAuth callback can reach the
+  guest.
 - The canonical integrated URL is
   `http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F`.
-  A successful run must report `webgpuvirt (v86 WebGPU)`,
-  `MCP_CONTEXT7=PASS`, `CODEX_APPS=DISABLED`, and final readiness.
+  A successful run must report `webgpuvirt (v86 WebGPU)`, `LOOPBACK=PASS`,
+  `NETWORK=PASS`, `CODEX_AUTOSTART=DISABLED`, and final readiness.
 - The Codex browser harness owns port 8082. Stop a manual server before tests;
   restart one afterward only when an interactive link is required.
 - A runnable local base worktree needs all four ignored outputs together under
@@ -123,7 +125,8 @@ Integration images are external and ignored. Use the image download command in `
   generation and verify the documented hashes; never commit these artifacts.
 - The base worktree also needs browser artifacts rebuilt from the same `main`
   revision: `make build/libv86.mjs build/v86.wasm virtio-gpu-wgpu`. A stale
-  bundle can boot the copied image but lacks current 3D/MCP acceptance state.
+  bundle can boot the copied image but lacks current 3D/session acceptance
+  state.
 
 ## Important Files
 
@@ -174,5 +177,6 @@ Common controls are `TEST_RELEASE_BUILD=1`, `MAX_PARALLEL_TESTS=n`, and `TEST_NA
 The Codex browser harness owns port 8082. Stop any manual server before running
 it. For an accelerated renderer or cursor change, acceptance is incomplete
 until the browser reports a uniform off-diagonal background, mixed cursor
-alpha, `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`, and zero browser/WebGPU/backend
-errors.
+alpha, `V86_APPLIANCE_CODEX_AUTOSTART=DISABLED`,
+`V86_APPLIANCE_CODEX_FULL_ACCESS=PASS`, a writable Codex configuration, and
+zero browser/WebGPU/backend errors.

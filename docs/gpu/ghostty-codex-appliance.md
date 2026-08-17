@@ -17,7 +17,7 @@ Ghostty was cross-compiled for `x86-linux-musl` against an Alpine x86 sysroot. T
 
 Codex was cross-compiled from upstream `rust-v0.147.0` for `i686-unknown-linux-musl`. The fork's `i386` branch contains the complete patch stack, pinned Rust 1.95.0 and Zig 0.15.2 workflow, reproducible packaging, recurring upstream updates, and the i386 sandbox correction. Validation run [31892304999](https://github.com/dynamite-bud/codex/actions/runs/31892304999) compiled release commit `a5f4a008a657b497b7361db547bf86269aeba1bf` and smoke-tested the exact artifact in Alpine `linux/386`.
 
-Codex's standard Linux network seccomp filter is unavailable on i386 because its seccompiler dependency does not support 32-bit x86. The appliance selects Codex's `workspace-write` filesystem sandbox with no interactive approvals, but model-generated commands do not receive Codex's usual network seccomp isolation. Use the port only inside an external isolation boundary such as this disposable v86 guest. No model credential is included in the image.
+The image now boots to an interactive Ghostty shell and does not start Codex automatically. When the user runs `codex`, the launcher sets `--dangerously-bypass-approvals-and-sandbox`: the disposable v86 guest is the external isolation boundary, while the process remains unprivileged UID 1000 and root stays locked. The i386 port also lacks Codex's normal Linux network seccomp filter because its seccompiler dependency does not support 32-bit x86. No model credential is included in the image.
 
 ## Image Contract
 
@@ -32,7 +32,7 @@ Alpine OpenRC
   -> Openbox
   -> Mesa llvmpipe (default) or targeted webgpuvirt (explicit acceleration)
   -> maximized undecorated Ghostty
-  -> Codex with direct shell/unified-exec tools
+  -> interactive /bin/sh; user runs codex manually when wanted
 ```
 
 The image pins:
@@ -73,15 +73,35 @@ The work followed a gated, reproducible path rather than modifying the existing 
 4. `world.lock` records deliberate direct APK inputs. `packages.lock` records the full installed closure, and the Docker build fails on any closure drift.
 5. Docker exports the root filesystem, then `normalize_rootfs.py --preserve-owners` sorts entries, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged session.
 6. The page adds the fixture as an isolated browser entry point. A relay is opt-in, and a supplied relay becomes a VirtIO NIC plus guest DHCP rather than an implicit host network dependency.
-7. Bounded serial markers make architecture, privileges, networking, rendering, and every live process observable. Browser acceptance requires both those markers and a visible WebGPU scanout.
+7. Bounded serial markers make architecture, privileges, networking, rendering, the Ghostty shell, the installed Codex binary, and disabled Codex autostart observable. Browser acceptance requires both those markers and a visible WebGPU scanout.
 
 This structure keeps downloaded application artifacts, guest assembly, emulator presentation, and browser acceptance independently reviewable.
+
+## Manual Codex Session
+
+Normal boot stops at `/home/codex/workspace` in Ghostty. Codex is installed but
+not running. Type `codex` after editing any desired configuration. The launcher
+uses the pinned real binary and always passes
+`--dangerously-bypass-approvals-and-sandbox`; it also disables the unavailable
+Code Mode host and Codex Apps, keeps direct shell/unified execution enabled,
+and leaves every ordinary MCP server to user configuration.
+
+The previous automatic `workspace-write` session caused model-spawned
+`codex mcp add` commands to see `/home/codex/.codex` as read-only. The manual
+full-access launcher removes that inner filesystem sandbox, so configuration
+persists for the current guest session. This is deliberately dangerous:
+model-generated commands receive unrestricted UID-1000 guest access and no
+Codex approval prompts. Resetting the page discards configuration, credentials,
+and workspace changes.
+
+The guest includes pinned Python 3.14.7-r1 and jq 1.8.1-r0 for ordinary agent
+and MCP workflows.
 
 ## Networking
 
 The browser page does not hardcode a relay. The consolidated XWAH-5/XWAH-6
 mode uses the Rust/Wasm `wgpu` host renderer, explicit guest `webgpuvirt`
-acceleration, and a percent-encoded WISP/wsproxy relay:
+acceleration, and an optional percent-encoded WISP/wsproxy relay:
 
 ```text
 http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F
@@ -89,13 +109,12 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1
 
 `renderer=wgpu` selects the browser-side Rust/Wasm backend;
 `accelerated=1` selects the checksum-locked Mesa `webgpuvirt` renderer inside
-the guest. When a relay is supplied, v86 creates a VirtIO NIC and the
-privileged OpenRC service obtains DHCP, performs the Context7 MCP 2025-06-18
-initialization handshake, and verifies `resolve-library-id` plus `query-docs`
-in `tools/list` before the unprivileged graphical session starts. The same
-Context7 URL is then added to Codex as an ordinary configured MCP server.
-Without a relay, the NIC and remote MCP entry are omitted; readiness reports
-both network and Context7 as `UNCONFIGURED` and still starts the local UI.
+the guest. `v86-networking` always configures IPv4 loopback. When a relay is
+supplied, v86 creates a VirtIO NIC and the privileged OpenRC service obtains
+DHCP before the unprivileged graphical session starts. Without a relay, the
+NIC is omitted, readiness reports the network as `UNCONFIGURED`, and the local
+UI still starts. The boot path never selects or probes an MCP server; add one
+manually after the relay is available.
 
 For local verification, use port **8082**:
 
@@ -110,12 +129,12 @@ The tty1 session writes bounded evidence to `ttyS0`:
 - architecture, UID, deterministic hostname, and kernel;
 - Ghostty and Codex versions;
 - `/dev/dri/card0`;
-- `NETWORK=PASS|UNCONFIGURED` and
-  `MCP_CONTEXT7=PASS|UNCONFIGURED`;
+- `LOOPBACK=PASS` and `NETWORK=PASS|UNCONFIGURED`;
 - the selected Mesa renderer, `llvmpipe` by default or `webgpuvirt` when
   acceleration is explicit;
-- live Openbox, Ghostty, and Codex processes, checked direct-tool and remote
-  MCP launcher arguments, `CODEX_APPS=DISABLED`, and a direct sandboxed shell;
+- live Openbox, Ghostty, and interactive shell processes; the installed but
+  non-running Codex binary; full-access manual-launch policy; writable Codex
+  home; disabled Code Mode host and Apps;
 - final `V86_APPLIANCE_READY=PASS` or a precise failure reason.
 
 The page declares success only after the guest PASS marker and a visible WebGPU
@@ -139,22 +158,25 @@ The acceptance harness verifies:
 - i686 guest and UID 1000 session;
 - exact application versions;
 - llvmpipe OpenGL plus visible 1024x768 scanout;
-- Xorg, Openbox, Ghostty, and Codex processes;
-- supplied-relay DHCP, CA-validated HTTPS, and the Context7 MCP handshake/tool
-  list, or an honest unconfigured network/MCP state;
+- live Xorg, Openbox, Ghostty, and interactive shell processes, with Codex installed but not started;
+- configured IPv4 loopback plus an actual localhost socket bind, and
+  supplied-relay DHCP or an honest unconfigured network state;
+- pinned Python execution and jq parsing inside the guest;
 - absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`,
   Tumbler, Garcon, and Exo;
 - unconfigured Codex login with no baked home credential;
 - browser keyboard delivery and responsive narrow layout;
 - a writable workspace and pristine fresh-session reset on the direct
   JavaScript backend;
-- live Codex process arguments that disable Code Mode, its absent host, and
-  host-owned Codex Apps; enable direct shell/unified execution; retain
-  in-process fallback; and configure Context7 only when a relay exists;
+- manual launcher policy that disables Code Mode, its absent host, and
+  host-owned Codex Apps; enables direct shell/unified execution; retains
+  in-process fallback; uses
+  `--dangerously-bypass-approvals-and-sandbox`; and injects no MCP server;
+- no automatically configured Context7 entry before the user's first
+  `codex mcp add`;
 - verified absence of the external Code Mode host and its V8 runtime;
-- a direct `/bin/sh` command executed through `codex sandbox --`, proving
-  Bubblewrap enforces the filesystem sandbox while the unavailable i386
-  network seccomp backend is bypassed without aborting;
+- an actual `codex mcp add`/`list`/`remove` cycle proving that the manual
+  full-access launcher can write `~/.codex/config.toml`;
 - a uniform accelerated terminal background and a non-rectangular,
   alpha-masked hardware cursor.
 
@@ -243,37 +265,38 @@ and alpha-preserving cursor conversion. It remains opt-in through
 
 XWAH-6 classifies the host-owned `codex_apps` service as unsupported in this
 i386 appliance and disables it with `--disable apps`. This is not a global MCP
-disable. With a relay, Codex receives a separate
-`mcp_servers.context7.url="https://mcp.context7.com/mcp"` entry after the guest
-has completed a real MCP initialization and tool-list preflight. Without a
-relay, that entry is omitted so offline startup does not wait for an
-unreachable server.
+disable. Relay configuration controls only guest networking; the boot service
+and launcher inject no Context7 or other ordinary MCP endpoint. Users can add a
+server explicitly with `codex mcp add` once networking is available.
 
 The launcher also disables `code_mode`, `code_mode_only`, and
-`code_mode_host`; enables `shell_tool` and `unified_exec`; and sets
-`code_mode.disable_in_process_fallback=false`. The pinned i386 binary reports
-Codex Apps and all three Code Mode features disabled, both direct-tool
-features enabled, and no external Code Mode host. Readiness verifies the live
-arguments and executes `/bin/sh` through `codex sandbox --`.
+`code_mode_host`; enables `shell_tool` and `unified_exec`; sets
+`code_mode.disable_in_process_fallback=false`; and uses
+`--dangerously-bypass-approvals-and-sandbox`. The pinned i386 binary reports
+Codex Apps and all three Code Mode features disabled and both direct-tool
+features enabled. Readiness verifies the launcher contract, writable Codex
+home, and that Codex has not started. Browser acceptance exercises a real MCP
+configuration write.
 
-The combined browser run on port 8082 has been observed with:
+The combined browser run on port 8082 must report:
 
 ```text
+V86_APPLIANCE_LOOPBACK=PASS
 V86_APPLIANCE_NETWORK=PASS
-V86_APPLIANCE_MCP_CONTEXT7=PASS
 V86_APPLIANCE_RENDERER=webgpuvirt (v86 WebGPU)
 V86_APPLIANCE_OPENGL=4.3 (Compatibility Profile) Mesa 26.1.6 (git-ffa422e53d)
-V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
-V86_APPLIANCE_CODEX_APPS=DISABLED
-V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS
+V86_APPLIANCE_CODEX_AUTOSTART=DISABLED
+V86_APPLIANCE_CODEX_FULL_ACCESS=PASS
+V86_APPLIANCE_CODEX_HOME_WRITABLE=PASS
 V86_APPLIANCE_READY=PASS
 ```
 
-This proves the guest DNS/TCP/TLS/HTTP path, MCP protocol initialization and
-tool discovery, graphics selection, and launcher contract. It does not claim
-that an authenticated model invoked a Context7 tool. Authentication remains
-user-provided and ephemeral; no credential or authenticated home directory is
-part of the image.
+This proves loopback setup, relay-backed guest networking, graphics selection,
+and launcher/configuration contracts. A local MCP OAuth listener can now bind,
+but a callback opened at host-browser `127.0.0.1` does not reach guest
+loopback; authenticated OAuth therefore needs an explicit callback bridge not
+provided by this fixture. Authentication remains user-provided and ephemeral;
+no credential or authenticated home directory is part of the image.
 
 ## Measured Follow-up Map
 
@@ -328,15 +351,16 @@ Cleanup for the Cage phase means removing temporary probes, generated images, st
 
 ## Size Evidence
 
-The generated Codex appliance is smaller than the retained XFCE fixture:
+The generated Codex artifact sizes remain smaller than the retained XFCE
+fixture. Python and jq add files, so flat-file count is no longer lower:
 
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
-|Rootfs tar|697,118,720|794,818,560|-97,699,840 bytes|12.29%|
-|Compressed flat files|279,268,428|295,224,610|-15,956,182 bytes|5.40%|
-|Filesystem JSON|581,461|695,517|-114,056 bytes|16.40%|
-|Flat-file count|7,952|9,175|-1,223|13.33%|
-|Package closure|311|420|-109|25.95%|
+|Rootfs tar|736,215,040|794,818,560|-58,603,520 bytes|7.37%|
+|Compressed flat files|293,076,455|295,224,610|-2,148,155 bytes|0.73%|
+|Filesystem JSON|661,972|695,517|-33,545 bytes|4.82%|
+|Flat-file count|9,222|9,175|+47|-0.51%|
+|Package closure|321|420|-99|23.57%|
 
 These values come from the generated image contracts and package locks.
 Release-stripping reduced the custom Gallium library from 84,857,252 to
@@ -345,14 +369,15 @@ boots keep Alpine's system Gallium file in place; accelerated boot replaces it
 once, so the image carries no duplicate system backup. Recompute this evidence
 after any image, package, or artifact change.
 
-The final reproducible XWAH-6 rebuild produced these SHA-256 values:
+The reproducible loopback/Python/jq rebuild produced these SHA-256 values
+identically on consecutive builds:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`9b5e4acf5c835bf0c928445997a70d0028fc70e50180e44e917efb3c9f072d6f`|
-|Filesystem JSON|`002fba95c60d0953999951e8ff5656eaebe404d3e654fa58bcad6a94f558432d`|
-|Flat-file manifest|`3dce79927661de5623f908f3690fca94d3cdbdb961c6ca44a48578ea0c9743c5`|
-|Image contract|`d2d75fa457c5cda86f82d68afc114c13c556c44008ad51f6127d785760e843e7`|
+|Rootfs tar|`680d4d4fc271f4b773b2dabe3e0ac11f89132942610c1cba2c52a450b0e37c2a`|
+|Filesystem JSON|`8d7cb5e8bd142067f6f7c6e255e8f78a65d68c8db04f4b1ceb4743cbe051b46e`|
+|Flat-file manifest|`aa7886167d2f72ab03a3ffc016fdd37bc55f1cf2a39be9d35de196efa7ef88b2`|
+|Image contract|`94341efeb0431ab67f8b9faded6f76d3b1ef8ff2e679bcef6850718fa69ccd93`|
 
 ## Original OMP Gate
 

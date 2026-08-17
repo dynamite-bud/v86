@@ -10,8 +10,6 @@ fail()
     [ ! -f /tmp/v86-openbox.log ] || tail -n 50 /tmp/v86-openbox.log >&3
     [ ! -f /tmp/v86-xrandr.log ] || tail -n 50 /tmp/v86-xrandr.log >&3
     [ ! -f /tmp/v86-ghostty.log ] || tail -n 200 /tmp/v86-ghostty.log >&3
-    [ ! -f /tmp/v86-codex-direct-shell.log ] || tail -n 50 /tmp/v86-codex-direct-shell.log >&3
-    [ ! -f /var/log/v86-mcp-context7.log ] || tail -n 50 /var/log/v86-mcp-context7.log >&3
     printf 'V86_APPLIANCE_FAILURE=%s\n' "$reason" >&3
     printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
     exit 1
@@ -31,12 +29,14 @@ pid_file_alive()
     IFS= read -r pid < "$1"
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
-codex_process_ready()
+codex_process_running()
 {
-    [ -r "$1" ] || return 1
-    IFS= read -r pid < "$1"
-    [ -n "$pid" ] &&
-        [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = /usr/local/bin/codex ]
+    for process in /proc/[0-9]*; do
+        if [ "$(readlink "$process/exe" 2>/dev/null)" = /usr/local/libexec/codex ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 printf 'V86_APPLIANCE_BEGIN\n' >&3
@@ -49,17 +49,43 @@ printf 'V86_APPLIANCE_KERNEL=%s\n' "$(uname -r)" >&3
 [ "$(uname -m)" = i686 ] || fail wrong-architecture
 [ "$(id -u)" = 1000 ] || fail privileged-session
 [ "$hostname_value" = v86-appliance ] || fail hostname
+ip -4 addr show dev lo | grep -q 'inet 127\.0\.0\.1/8' || fail loopback
+printf 'V86_APPLIANCE_LOOPBACK=PASS\n' >&3
 
 ghostty_version=$(ghostty --version 2>/dev/null | head -n 1) || fail ghostty-version
 codex_version=$(codex --version 2>/dev/null) || fail codex-version
+python_version=$(python3 --version 2>&1) || fail python3-version
+jq_version=$(jq --version 2>/dev/null) || fail jq-version
+[ "$python_version" = "Python 3.14.7" ] || fail python3-version
+[ "$jq_version" = "jq-1.8.1" ] || fail jq-version
+printf 'V86_APPLIANCE_PYTHON3=%s\n' "$python_version" >&3
+printf 'V86_APPLIANCE_JQ=%s\n' "$jq_version" >&3
+[ -x /usr/local/libexec/codex ] || fail codex-binary
 [ ! -e /usr/local/bin/codex-code-mode-host ] || fail code-mode-host-present
-direct_shell_error=/tmp/v86-codex-direct-shell.log
-direct_shell_output=$(
-    cd "$HOME/workspace" &&
-    codex sandbox -- /bin/sh -c 'printf V86_DIRECT_SHELL_OK'
-) 2>"$direct_shell_error" || fail codex-direct-shell
-[ "$direct_shell_output" = V86_DIRECT_SHELL_OK ] || fail codex-direct-shell-output
-rm -f "$direct_shell_error"
+if ! grep -Fq -- '--dangerously-bypass-approvals-and-sandbox' \
+        /usr/local/bin/codex ||
+   grep -Fq -- '--sandbox' /usr/local/bin/codex; then
+    fail codex-full-access-launcher
+fi
+codex_features=$(codex features list 2>/dev/null) || fail codex-features
+for feature in apps code_mode code_mode_host code_mode_only; do
+    if ! printf '%s\n' "$codex_features" |
+       grep -Eq "^$feature[[:space:]].*false$"; then
+        fail "codex-feature-enabled:$feature"
+    fi
+done
+for feature in shell_tool unified_exec; do
+    if ! printf '%s\n' "$codex_features" |
+       grep -Eq "^$feature[[:space:]].*true$"; then
+        fail "codex-feature-disabled:$feature"
+    fi
+done
+mkdir -p "$HOME/.codex" || fail codex-home-create
+codex_write_probe="$HOME/.codex/.v86-write-probe"
+printf '%s\n' writable > "$codex_write_probe.tmp" &&
+    mv "$codex_write_probe.tmp" "$codex_write_probe" &&
+    rm "$codex_write_probe" ||
+    fail codex-home-read-only
 printf 'V86_APPLIANCE_GHOSTTY=%s\n' "$ghostty_version" >&3
 printf 'V86_APPLIANCE_CODEX=%s\n' "$codex_version" >&3
 
@@ -107,16 +133,9 @@ fi
 
 if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
     printf 'V86_APPLIANCE_NETWORK=UNCONFIGURED\n' >&3
-    printf 'V86_APPLIANCE_MCP_CONTEXT7=UNCONFIGURED\n' >&3
 elif [ -e /run/v86-network-ready ] &&
      ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet '; then
     printf 'V86_APPLIANCE_NETWORK=PASS\n' >&3
-    if [ -e /run/v86-mcp-context7-ready ]; then
-        printf 'V86_APPLIANCE_MCP_CONTEXT7=PASS\n' >&3
-    else
-        [ ! -f /var/log/v86-mcp-context7.log ] || cat /var/log/v86-mcp-context7.log >&3
-        fail mcp-context7-unavailable
-    fi
 else
     [ ! -f /var/log/v86-networking.log ] || cat /var/log/v86-networking.log >&3
     fail network-unavailable
@@ -151,8 +170,8 @@ if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
     benchmark_mode=true
 fi
 rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready \
-    /tmp/v86-appliance-benchmark-ready /tmp/v86-codex.pid \
-    /tmp/v86-openbox.pid /tmp/v86-ghostty.pid
+    /tmp/v86-appliance-benchmark-ready /tmp/v86-openbox.pid \
+    /tmp/v86-ghostty.pid /tmp/v86-ghostty-shell.pid
 startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-appliance.log 2>&1 &
 session_pid=$!
 
@@ -162,7 +181,7 @@ while [ "$attempt" -lt 900 ]; do
     application_ready=false
     if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
         application_ready=true
-    elif ! $benchmark_mode && codex_process_ready /tmp/v86-codex.pid; then
+    elif ! $benchmark_mode && [ -e /tmp/v86-appliance-ui-ready ]; then
         application_ready=true
     fi
     if [ -e /tmp/v86-appliance-gl-ready ] &&
@@ -182,35 +201,19 @@ while [ "$attempt" -lt 900 ]; do
         if $benchmark_mode; then
             printf 'V86_APPLIANCE_BENCHMARK_PROCESS=PASS\n' >&3
         else
-            IFS= read -r codex_pid < /tmp/v86-codex.pid
-            # Read NUL-delimited argv as lines and verify the live launcher contract.
-            codex_arguments=$(tr '\0' '\n' < "/proc/$codex_pid/cmdline")
-            for argument in --disable code_mode code_mode_only code_mode_host apps \
-                --enable shell_tool unified_exec -c code_mode.disable_in_process_fallback=false; do
-                if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
-                    fail codex-exec-flags
-                fi
-            done
-            if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
-                if printf '%s\n' "$codex_arguments" |
-                   grep -Fq 'mcp_servers.context7.url='; then
-                    fail codex-mcp-context7-unconfigured
-                fi
-            else
-                . /etc/conf.d/v86-networking
-                mcp_url_argument="mcp_servers.context7.url=\"$V86_MCP_CONTEXT7_URL\""
-                for argument in "$mcp_url_argument" \
-                    mcp_servers.context7.startup_timeout_sec=30; do
-                    if ! printf '%s\n' "$codex_arguments" | grep -Fqx -e "$argument"; then
-                        fail codex-mcp-context7-flags
-                    fi
-                done
+            if ! pid_file_alive /tmp/v86-ghostty-shell.pid; then
+                fail ghostty-shell
             fi
-            printf 'V86_APPLIANCE_CODEX_PROCESS=PASS\n' >&3
-            printf 'V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS\n' >&3
+            if codex_process_running; then
+                fail codex-autostarted
+            fi
+            printf 'V86_APPLIANCE_GHOSTTY_SHELL=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_BINARY=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_AUTOSTART=DISABLED\n' >&3
+            printf 'V86_APPLIANCE_CODEX_FULL_ACCESS=PASS\n' >&3
+            printf 'V86_APPLIANCE_CODEX_HOME_WRITABLE=PASS\n' >&3
             printf 'V86_APPLIANCE_CODEX_APPS=DISABLED\n' >&3
             printf 'V86_APPLIANCE_NO_CODE_MODE_HOST=PASS\n' >&3
-            printf 'V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS\n' >&3
         fi
         printf 'V86_APPLIANCE_READY=PASS\nV86_APPLIANCE_END\n' >&3
         wait "$session_pid"

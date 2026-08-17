@@ -20,13 +20,18 @@ Read `Readme.md`, `../../../docs/gpu/ghostty-codex-appliance.md`, and `../../../
 
 ## Runtime Contract
 
-The normal chain is OpenRC -> unprivileged tty1 login -> Xorg -> Openbox -> Ghostty -> Codex. The default renderer is llvmpipe. The integrated accelerated mode requires `renderer=wgpu&accelerated=1`: `wgpu` is the browser-side Rust/Wasm backend and `accelerated=1` selects checksum-locked Mesa `webgpuvirt` inside the guest. Failure must not silently fall back.
+The normal chain is OpenRC -> unprivileged tty1 login -> Xorg -> Openbox ->
+Ghostty -> interactive `/bin/sh`. Codex is installed but MUST NOT start
+automatically. The default renderer is llvmpipe. The integrated accelerated
+mode requires `renderer=wgpu&accelerated=1`: `wgpu` is the browser-side
+Rust/Wasm backend and `accelerated=1` selects checksum-locked Mesa
+`webgpuvirt` inside the guest. Failure must not silently fall back.
 
-The pinned i386 Codex release has no `codex-code-mode-host`. `codex-session` must keep these exact semantic settings:
+The pinned i386 Codex release has no `codex-code-mode-host`. The manual
+`codex-launcher` must keep these exact semantic settings:
 
 ```text
---sandbox workspace-write
---ask-for-approval never
+--dangerously-bypass-approvals-and-sandbox
 --disable code_mode
 --disable code_mode_only
 --disable code_mode_host
@@ -36,9 +41,22 @@ The pinned i386 Codex release has no `codex-code-mode-host`. `codex-session` mus
 -c code_mode.disable_in_process_fallback=false
 ```
 
-These select supported direct tools, explicitly disable the unsupported host-owned Codex Apps catalog, and do not implement Code Mode. With a relay, `codex-session` separately configures `mcp_servers.context7.url="https://mcp.context7.com/mcp"`; without a relay it must omit that entry. `appliance-session` inspects the live process arguments before emitting `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS` and `V86_APPLIANCE_CODEX_APPS=DISABLED`. Never add a fake host executable or suppress a real startup failure.
+These select full manual permissions inside the already isolated disposable
+guest, retain supported direct tools, explicitly disable the unsupported
+host-owned Codex Apps catalog, and do not implement Code Mode. MCP servers are
+exclusively user-configured; do not inject Context7 or any other endpoint from
+the relay startup path. `appliance-session` verifies the installed binary,
+launcher policy, feature states, writable `~/.codex`, live Ghostty shell, and
+absence of an auto-started Codex process. Never add a fake host executable or
+suppress a real startup failure.
 
-The i386 port lacks Codex's normal Linux network seccomp filter. Keep the `workspace-write` sandbox and external disposable-v86 isolation warning. Authentication remains user-provided and ephemeral; fresh reset must discard credentials and workspace mutations.
+Do not reintroduce the `workspace-write` launcher: it made `~/.codex` read-only
+to model-spawned configuration commands. The full-access flag intentionally
+removes Codex approval and filesystem sandboxing; the i386 port also lacks
+Codex's normal Linux network seccomp filter. The external v86 guest is the
+sandbox, Codex remains UID 1000, root remains locked, and authentication stays
+user-provided and ephemeral. Fresh reset must discard credentials,
+configuration, and workspace mutations.
 
 ## Graphics Invariants
 
@@ -49,9 +67,9 @@ The i386 port lacks Codex's normal Linux network seccomp filter. Keep the `works
 
 ## Readiness and Failure Evidence
 
-A successful normal boot must prove architecture, UID, hostname, kernel, application versions, DRM, relay and Context7 states, renderer, Xorg, Openbox, Ghostty, Codex, direct-tool/MCP flags, Apps disablement, and `V86_APPLIANCE_READY=PASS` on ttyS0. Failure emits a precise reason plus bounded Xorg/Openbox/Ghostty/GL/MCP logs.
+A successful normal boot must prove architecture, UID, hostname, kernel, application versions, DRM, IPv4 loopback, relay state, renderer, Xorg, Openbox, Ghostty, its interactive shell, the installed Codex binary, disabled Codex autostart, full-access launcher policy, writable Codex home, Apps disablement, and `V86_APPLIANCE_READY=PASS` on ttyS0. Failure emits a precise reason plus bounded Xorg/Openbox/Ghostty/GL/network logs.
 
-Do not replace readiness markers with sleeps. No relay means both `NETWORK=UNCONFIGURED` and `MCP_CONTEXT7=UNCONFIGURED`, not success. A supplied relay must obtain DHCP, pass CA-validated HTTPS, complete MCP initialization, and expose both expected Context7 tools before graphical readiness.
+Do not replace readiness markers with sleeps. `V86_APPLIANCE_LOOPBACK=PASS` is mandatory so local OAuth listeners can bind. No relay means `NETWORK=UNCONFIGURED`; a supplied relay must obtain DHCP before graphical readiness. Relay startup MUST NOT add or probe an MCP server.
 
 ## Change Workflow
 1. Change the narrow source input; do not hand-edit generated images.
@@ -74,4 +92,4 @@ V86_CODEX_BROWSER_PORT=8082 V86_CODEX_RELAY_URL=wss://relay.example.test/ \
 make virtio-gpu-codex-benchmark-accelerated
 ```
 
-Accelerated acceptance requires `webgpuvirt`, `SUBMIT_3D`, a uniform off-diagonal background, mixed cursor alpha, the live Codex flag marker, and zero browser/WebGPU/backend errors. Performance claims require the fixed five-run workload, unchanged terminal SHA-256, raw results, and the documented 20% gain/5% non-regression gate.
+Accelerated acceptance requires `webgpuvirt`, `SUBMIT_3D`, a uniform off-diagonal background, mixed cursor alpha, `V86_APPLIANCE_CODEX_AUTOSTART=DISABLED`, `V86_APPLIANCE_CODEX_FULL_ACCESS=PASS`, a successful Codex configuration write, and zero browser/WebGPU/backend errors. Performance claims require the fixed five-run workload, unchanged terminal SHA-256, raw results, and the documented 20% gain/5% non-regression gate.

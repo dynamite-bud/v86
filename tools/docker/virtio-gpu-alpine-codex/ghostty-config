@@ -1,4 +1,4 @@
-command = /usr/local/bin/v86-codex-session
+command = /usr/local/bin/v86-ghostty-session
 maximize = true
 window-decoration = false
 font-family = DejaVu Sans Mono

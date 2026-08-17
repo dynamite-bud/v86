@@ -95,13 +95,13 @@ RUN set -eux; \
     wget -q -O /tmp/codex.tar.gz "$CODEX_URL"; \
     printf '%s  %s\n' "$CODEX_SHA256" /tmp/codex.tar.gz | sha256sum -c -; \
     tar -xzf /tmp/codex.tar.gz -C /tmp; \
-    install -m 0755 /tmp/codex-linux-i386-musl/codex /usr/local/bin/codex; \
+    install -D -m 0755 /tmp/codex-linux-i386-musl/codex /usr/local/libexec/codex; \
     install -D -m 0644 /tmp/codex-linux-i386-musl/I386-BUILD.txt /usr/share/doc/codex/I386-BUILD.txt; \
     install -D -m 0644 /tmp/artifacts.lock /usr/share/v86-appliance/artifacts.lock; \
     install -D -m 0644 /tmp/mesa-artifacts.lock /usr/share/v86-appliance/mesa-artifacts.lock; \
     install -D -m 0644 /tmp/packages.lock /usr/share/v86-appliance/packages.lock; \
     ghostty --version; \
-    codex --version; \
+    /usr/local/libexec/codex --version; \
     rm -rf /root/.codex /tmp/ghostty.tar.gz /tmp/codex.tar.gz /tmp/codex-linux-i386-musl
 
 RUN adduser -D -u 1000 -s /bin/sh codex && \
@@ -112,7 +112,8 @@ RUN adduser -D -u 1000 -s /bin/sh codex && \
     install -d -m 0755 -o codex -g codex /home/codex/workspace
 
 COPY appliance-session /usr/local/sbin/v86-appliance-session
-COPY codex-session /usr/local/bin/v86-codex-session
+COPY codex-launcher /usr/local/bin/codex
+COPY ghostty-session /usr/local/bin/v86-ghostty-session
 COPY v86-networking /etc/init.d/v86-networking
 COPY profile /home/codex/.profile
 COPY xinitrc /home/codex/.xinitrc
@@ -120,13 +121,13 @@ COPY ghostty-config /home/codex/.config/ghostty/config.ghostty
 COPY 20-virtio-gpu.conf /etc/X11/xorg.conf.d/20-virtio-gpu.conf
 
 RUN chmod 0755 /usr/local/sbin/v86-appliance-session \
-        /usr/local/bin/v86-codex-session /etc/init.d/v86-networking /home/codex/.xinitrc && \
+        /usr/local/bin/codex /usr/local/bin/v86-ghostty-session \
+        /etc/init.d/v86-networking /home/codex/.xinitrc && \
     chown -R codex:codex /home/codex && \
     sed -i -e 's/getty 38400 tty1/agetty --autologin codex tty1 linux/' \
         -e 's/^tty1::respawn:/tty1::once:/' /etc/inittab && \
     echo 'ttyS0::respawn:/sbin/agetty --autologin codex -s ttyS0 115200 vt100' >> /etc/inittab && \
     printf '%s\n' virtio_gpu virtio_net > /etc/modules-load.d/v86-appliance.conf && \
-    printf '%s\n' 'V86_MCP_CONTEXT7_URL=https://mcp.context7.com/mcp' > /etc/conf.d/v86-networking && \
     printf '%s\n' 'allowed_users=anybody' 'needs_root_rights=yes' > /etc/X11/Xwrapper.config && \
     passwd -l root && \
     setup-hostname localhost && \

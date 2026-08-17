@@ -2,58 +2,21 @@
 
 description="Configure the v86 relay network before the unprivileged appliance session"
 
-mcp_post()
-{
-    wget -q -T 30 -O "$2" \
-        --header="Content-Type: application/json" \
-        --header="Accept: application/json, text/event-stream" \
-        --header="MCP-Protocol-Version: 2025-06-18" \
-        --post-data="$1" "$V86_MCP_CONTEXT7_URL"
-}
-
-probe_context7()
-{
-    initialize_response=/tmp/v86-mcp-context7-initialize
-    tools_response=/tmp/v86-mcp-context7-tools
-    : > /var/log/v86-mcp-context7.log
-
-    if ! mcp_post \
-        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"v86-appliance-probe","version":"1"}}}' \
-        "$initialize_response" 2>>/var/log/v86-mcp-context7.log ||
-       ! grep -q '"name":"Context7"' "$initialize_response"; then
-        printf '%s\n' 'Context7 initialize failed' >> /var/log/v86-mcp-context7.log
-        return 1
-    fi
-    if ! mcp_post \
-        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-        /dev/null 2>>/var/log/v86-mcp-context7.log; then
-        printf '%s\n' 'Context7 initialized notification failed' >> /var/log/v86-mcp-context7.log
-        return 1
-    fi
-    if ! mcp_post \
-        '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-        "$tools_response" 2>>/var/log/v86-mcp-context7.log ||
-       ! grep -q '"name":"resolve-library-id"' "$tools_response" ||
-       ! grep -q '"name":"query-docs"' "$tools_response"; then
-        printf '%s\n' 'Context7 tools/list failed' >> /var/log/v86-mcp-context7.log
-        return 1
-    fi
-
-    rm -f "$initialize_response" "$tools_response"
-}
 
 start()
 {
     ebegin "Preparing v86 appliance runtime"
-    if ! hostname v86-appliance ||
+    if ! ip link set lo up ||
+       ! ip -4 address replace 127.0.0.1/8 dev lo ||
+       ! hostname v86-appliance ||
        ! printf '%s\n' \
             '127.0.0.1 localhost v86-appliance' \
             '::1 localhost v86-appliance' > /etc/hosts
     then
-        eend 1 "could not configure the appliance hostname"
+        eend 1 "could not configure the appliance loopback and hostname"
         return 1
     fi
-    rm -f /run/v86-network-ready /run/v86-mcp-context7-ready
+    rm -f /run/v86-network-ready
     if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
         if ! ln -sfn /opt/webgpuvirt/lib/libgallium-26.1.6.so \
             /usr/lib/libgallium-26.1.6.so
@@ -85,11 +48,6 @@ start()
     if [ "$status" -eq 0 ] &&
        ip -4 addr show dev eth0 | grep -q 'inet '; then
         touch /run/v86-network-ready
-        if probe_context7; then
-            touch /run/v86-mcp-context7-ready
-        else
-            status=1
-        fi
     else
         status=1
     fi
