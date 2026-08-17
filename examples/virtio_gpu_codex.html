@@ -269,12 +269,12 @@ function update_readiness()
         status.textContent = accelerated ?
             benchmark_enabled ?
                 `Running the accelerated Ghostty benchmark (${renderer_label})…` :
-                `Codex is ready in accelerated Ghostty (${renderer_label}).` :
+                `Ghostty is ready (${renderer_label}); run codex to start Codex.` :
             triangle ?
                 `Reference triangle is ready (${renderer_label}).` :
                 benchmark_enabled ?
                     `Running the deterministic Ghostty benchmark (${renderer_label})…` :
-                    `Codex is ready in maximized Ghostty (${renderer_label}).`;
+                    `Ghostty is ready (${renderer_label}); run codex to start Codex.`;
         document.body.dataset.result = "pass";
         clearInterval(readiness_timer);
     }

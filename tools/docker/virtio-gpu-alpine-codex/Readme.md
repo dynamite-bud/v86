@@ -1,6 +1,6 @@
 # Alpine i386 Openbox Ghostty Codex Appliance
 
-This directory is the reproducible **Xorg/Openbox reference appliance** for the i386 Ghostty and Codex work tracked in [XWAH-3](https://github.com/dynamite-bud/v86/issues/3). It boots directly into Codex inside a maximized, undecorated Ghostty window while retaining v86's standard VirtIO GPU 2D protocol and either browser WebGPU presentation backend.
+This directory is the reproducible **Xorg/Openbox reference appliance** for the i386 Ghostty and Codex work tracked in [XWAH-3](https://github.com/dynamite-bud/v86/issues/3). It boots into an interactive shell inside a maximized, undecorated Ghostty window. Codex is installed but is not started automatically, so the user can edit configuration before running it.
 
 Keep this implementation intact when adding a Cage variant. A Cage + Ghostty + Codex appliance belongs in the sibling directory `tools/docker/virtio-gpu-alpine-cage-codex/` with distinct image names, generated artifacts, browser entry point, readiness markers, and acceptance harness. The two fixtures must remain runnable side by side.
 
@@ -16,10 +16,11 @@ Alpine OpenRC
   -> Xorg modesetting on /dev/dri/card0 at 1024x768x24
   -> Openbox
   -> Mesa llvmpipe (default) or targeted webgpuvirt Gallium (opt-in)
-  -> maximized undecorated Ghostty
-  -> codex --sandbox workspace-write --ask-for-approval never
+  -> maximized undecorated Ghostty with an interactive /bin/sh
+  -> user runs codex when wanted
+       --dangerously-bypass-approvals-and-sandbox
        --disable code_mode --disable code_mode_only --disable code_mode_host
-       --enable shell_tool --enable unified_exec
+       --disable apps --enable shell_tool --enable unified_exec
        -c code_mode.disable_in_process_fallback=false
 ```
 
@@ -38,25 +39,26 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 
 | File | Contract |
 | --- | --- |
-| `Dockerfile` | Pinned Alpine and Mesa sources, verified Mesa/application artifacts, exact package closure, UID 1000 account, OpenRC services, locked root account, and initramfs generation. |
+| `Dockerfile` | Pinned Alpine and Mesa sources, verified Mesa/application artifacts, exact package closure, UID 1000 account, separate real Codex binary and manual launcher, OpenRC services, locked root account, and initramfs generation. |
 | `build.sh` | `linux/386` Docker build/export, deterministic rootfs normalization, filesystem JSON and zstd chunk generation, and image-contract generation. |
 | `world.lock` | Exact direct APK requests. Openbox/Xorg packages in this file are part of this fixture's identity. |
 | `packages.lock` | Sorted direct and transitive installed APK closure. The Docker build rejects drift with `apk info -v | sort | cmp`. |
 | `artifacts.lock` | Immutable Ghostty and Codex release tags, URLs, and SHA-256 values. |
 | `mesa-artifacts.lock` | Pinned Mesa commit plus reproducible i386 Gallium and DRI binary SHA-256 values. |
-| `v86-networking` | Deterministic hostname, UID 1000 runtime directory, optional VirtIO NIC DHCP, and the Context7 MCP protocol preflight. |
+| `v86-networking` | Deterministic hostname, IPv4 loopback setup, UID 1000 runtime directory, and optional VirtIO NIC DHCP. |
 | `profile` | Starts the appliance only for the automatic tty1 login. |
-| `appliance-session` | Architecture, privilege, network/MCP, DRM, process, negotiated renderer, 2D fallback, and serial readiness/failure contract. |
+| `appliance-session` | Architecture, privilege, loopback/network, DRM, process, negotiated renderer, 2D fallback, and serial readiness/failure contract. |
 | `virtio-gpu-capset-probe.c` | Direct pinned-libdrm `GET_CAPS` and `CONTEXT_INIT` proof for private capset ID 7. |
 | `virtio-gpu-triangle.c` | Frozen capset-v1/v2 triangles plus the version-3 Mesa llvmpipe reference and explicit resource/buffer/shader/binding/indexed-draw workload. |
 | `virtio-gpu-triangle-spv.h` | Pinned Naga-generated SPIR-V modules for the version-3 textured triangle. |
 | `ghostty-terminal-benchmark.c` | Offline fixed ANSI/scroll workload, guest CPU accounting, keyboard synchronization, and serial run markers for the XWAH-5 baseline. |
 | `probe-world.lock` | Exact direct build-only packages for the probes and triangle workloads. |
 | `probe-packages.lock` | Complete sorted probe/triangle builder package closure; the build rejects drift. |
-| `xinitrc` | Openbox, selected renderer check, 1024x768 mode, Ghostty, and Codex process startup. |
+| `xinitrc` | Openbox, selected renderer check, 1024x768 mode, and Ghostty process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
-| `ghostty-config` | Undecorated maximized window and the Codex launcher command. |
-| `codex-session` | Pristine workspace selection and non-interactive `workspace-write` Codex startup with Codex Apps/Code Mode disabled, supported direct shell/unified execution enabled, and relay-gated Context7 configuration. |
+| `ghostty-config` | Undecorated maximized window and the interactive shell-session command. |
+| `ghostty-session` | Benchmark selection or a ready-marked interactive `/bin/sh` in `/home/codex/workspace`. |
+| `codex-launcher` | Manual `codex` command, exact full-access bypass, unsupported feature disablement, supported direct tools, and user-owned MCP configuration. |
 
 Docker assembles and exports the root filesystem; it is not part of the browser runtime. `normalize_rootfs.py --preserve-owners` sorts archive members, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged home and workspace.
 
@@ -67,7 +69,7 @@ Docker assembles and exports the root filesystem; it is not part of the browser 
 - The normal v86 JavaScript/Wasm build dependencies.
 - Rust stable, `wasm32-unknown-unknown`, and `wasm-bindgen` when exercising the Rust/Wasm `wgpu` backend.
 - Chromium or Chrome with WebGPU for browser acceptance.
-- Enough disk space for Docker layers, a roughly 677 MiB rootfs tar, and about 275 MiB of content-addressed compressed files.
+- Enough disk space for Docker layers, a roughly 703 MiB rootfs tar, and about 280 MiB of content-addressed compressed files.
 
 Install the Python dependency if needed:
 
@@ -128,17 +130,58 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=webgpu-js&relay=ws
 Change `renderer=webgpu-js` to `renderer=wgpu` for the Rust/Wasm renderer. The page preserves the relay parameter when switching renderers.
 
 The canonical consolidated XWAH-5/XWAH-6 launch uses browser-side Rust/Wasm
-`wgpu`, guest-side Mesa `webgpuvirt`, and the relay-backed Context7 MCP sample:
+`wgpu`, guest-side Mesa `webgpuvirt`, and an optional relay for guest
+networking:
 
 ```text
 http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1&relay=wss%3A%2F%2Frelay.example.test%2F
 ```
 
 For this mode, require `V86_APPLIANCE_RENDERER=webgpuvirt (v86 WebGPU)`,
-`V86_APPLIANCE_MCP_CONTEXT7=PASS`, and
+`V86_APPLIANCE_LOOPBACK=PASS`, `V86_APPLIANCE_NETWORK=PASS`, and
 `V86_APPLIANCE_CODEX_APPS=DISABLED`; do not accept llvmpipe fallback.
 
-The page deliberately does not hardcode a relay. Without `relay=`, it reports `VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest, omits the virtual NIC, and still boots the local Codex UI. With a relay, the guest must obtain an IPv4 lease before the graphical session starts. It then performs an MCP `initialize`/`notifications/initialized`/`tools/list` handshake with the public, credential-free Context7 sample at `https://mcp.context7.com/mcp` and configures that endpoint for Codex. Use a trusted relay for real credentials; a public relay is suitable only for disposable testing and can observe connection metadata even though application HTTPS remains encrypted.
+The page deliberately does not hardcode a relay. Without `relay=`, it reports
+`VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest,
+omits the virtual NIC, and still boots the local Ghostty shell. With a relay,
+the guest must obtain an IPv4 lease before the graphical session starts. The
+relay startup path does not add, probe, or otherwise select an MCP server.
+Configure MCP servers manually in the writable guest home. Use a trusted relay
+for real credentials; a public relay is suitable only for disposable testing
+and can observe connection metadata even though application HTTPS remains
+encrypted.
+
+## Manual Codex Launch and Permissions
+
+Normal boots intentionally stop at a shell prompt in
+`/home/codex/workspace`. Codex remains installed and available on `PATH`; start
+it only when wanted:
+
+```sh
+codex
+```
+
+`/usr/local/bin/codex` is a small launcher for the pinned real binary at
+`/usr/local/libexec/codex`. It always sets
+`--dangerously-bypass-approvals-and-sandbox` because the disposable v86 guest
+is the external sandbox. It also retains the supported direct tools and
+disables the unavailable Code Mode host and host-owned Apps catalog. It does
+not inject an MCP server; relay and MCP selection are independent.
+
+This fixes the previous `Read-only file system (os error 30)` failure: the old
+automatic `workspace-write` session mounted paths outside the workspace,
+including `/home/codex/.codex`, read-only for model-spawned commands. A manual
+full-access session can persist commands such as `codex mcp add` in the
+session's writable `~/.codex/config.toml`.
+
+Full access is deliberate and dangerous. Model-generated commands run without
+Codex approval prompts or a Codex filesystem sandbox, as unprivileged UID
+1000. Root remains locked, no credential is baked into the image, and resetting
+the page discards every guest mutation.
+
+The guest includes pinned `python3` 3.14.7-r1 and `jq` 1.8.1-r0 for ordinary
+agent and MCP workflows. They are direct inputs in `world.lock`; their complete
+transitive closure is checksum-stable through `packages.lock`.
 
 ## Authentication and Persistence
 
@@ -146,7 +189,7 @@ No model credential or `/home/codex/.codex/auth.json` is baked into the image. P
 
 The root filesystem is writable only for the current emulator session. **Reset fresh session** reloads the page and discards authentication, workspace changes, and all other guest mutations. Persistence is intentionally out of scope for this reference fixture.
 
-The i386 Codex port cannot apply Codex's normal Linux network seccomp filter because the filter's compiler dependency does not support 32-bit x86. The port deliberately skips that extra filter instead of aborting direct commands. The `workspace-write` Bubblewrap filesystem sandbox remains enabled, but model commands lack the additional network isolation. Run this appliance only inside an external isolation boundary.
+The pinned i386 port also lacks Codex's normal Linux network seccomp filter because the filter's compiler dependency does not support 32-bit x86. Manual Codex sessions therefore have neither Codex filesystem sandboxing nor its network seccomp isolation. Run this appliance only inside the external disposable-v86 isolation boundary.
 
 ## Readiness Contract
 
@@ -157,19 +200,23 @@ V86_APPLIANCE_BEGIN
 V86_APPLIANCE_ARCH=i686
 V86_APPLIANCE_UID=1000
 V86_APPLIANCE_HOSTNAME=v86-appliance
+V86_APPLIANCE_LOOPBACK=PASS
+V86_APPLIANCE_PYTHON3=Python 3.14.7
+V86_APPLIANCE_JQ=jq-1.8.1
 V86_APPLIANCE_DRM=/dev/dri/card0
 V86_APPLIANCE_NETWORK=PASS|UNCONFIGURED
-V86_APPLIANCE_MCP_CONTEXT7=PASS|UNCONFIGURED
 V86_APPLIANCE_XORG=PASS
 V86_APPLIANCE_RENDERER=llvmpipe (...)|webgpuvirt (...)
 V86_APPLIANCE_OPENBOX=PASS
 V86_APPLIANCE_GHOSTTY_PROCESS=PASS
 V86_APPLIANCE_GHOSTTY_WINDOW=PASS
-V86_APPLIANCE_CODEX_PROCESS=PASS
-V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS
+V86_APPLIANCE_GHOSTTY_SHELL=PASS
+V86_APPLIANCE_CODEX_BINARY=PASS
+V86_APPLIANCE_CODEX_AUTOSTART=DISABLED
+V86_APPLIANCE_CODEX_FULL_ACCESS=PASS
+V86_APPLIANCE_CODEX_HOME_WRITABLE=PASS
 V86_APPLIANCE_CODEX_APPS=DISABLED
 V86_APPLIANCE_NO_CODE_MODE_HOST=PASS
-V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS
 V86_APPLIANCE_READY=PASS
 V86_APPLIANCE_END
 ```
@@ -292,10 +339,10 @@ terminal hash and report zero invalid commands, backend errors, WebGPU
 validation errors, or long tasks.
 
 Both targets own port 8082. Acceptance requires a `webgpuvirt` renderer marker,
-Ghostty and Codex readiness, verified direct-tool process arguments, capset-7
-`SUBMIT_3D` traffic, a uniform off-diagonal background, a mixed-alpha cursor,
-and zero invalid commands, backend errors, browser console errors, or WebGPU
-validation errors.
+Ghostty shell readiness, installed/manual Codex markers, a successful
+configuration write, capset-7 `SUBMIT_3D` traffic, a uniform off-diagonal
+background, a mixed-alpha cursor, and zero invalid commands, backend errors,
+browser console errors, or WebGPU validation errors.
 
 ## XWAH-5/XWAH-6 Change Review
 
@@ -344,14 +391,15 @@ they are part of the shipped behavior and must not be omitted from review.
 |Visual acceptance|A single readiness pixel missed a diagonal two-tone Ghostty background.|Separate global and cell-background programs, draw the former with a synthetic full-screen triangle, and sample both diagonal regions (`60182f5a`, `0b8cc576`).|
 |Cursor conversion|Forcing opaque alpha for X-format cursors produced a black 64×64 square.|Keep scanout X formats opaque but preserve the cursor's fourth guest byte; require transparent and opaque pixels (`0b8cc576`).|
 |Benchmark readiness|An idle terminal could stop producing dirty frames after guest readiness and trigger a false timeout.|Use the guest marker plus visible canvas before measured runs; require nonzero presentations during every run (`0b8cc576`).|
-|Appliance lifecycle|The accelerated launch path could replace or lose the real Codex session.|Preserve the Ghostty PTY and Codex process (`40794b53`); acceptance rechecks the live process after readiness.|
+|Appliance lifecycle|The accelerated launch path could replace or lose the terminal session.|Preserve the Ghostty PTY and interactive shell. The current manual workflow intentionally starts no Codex process and acceptance proves its absence.|
 |Code Mode availability|The i386 archive has no V8-backed Code Mode host, so model-requested Code Mode failed closed and left commands unusable.|Disable all Code Mode selectors, retain in-process fallback, and expose supported direct tools (`491c4b50`). Never add a fake host.|
 |Artifact provenance|The first downstream Codex pin preceded the final CI-validated sandbox correction.|Pin `rust-v0.147.0-i386.3` from the reviewed successful workflow (`a6f3829f`).|
-|i386 network seccomp|The seccompiler dependency has no 32-bit x86 backend and aborted direct commands before `/bin/sh` ran.|Skip only the unavailable network filter, retain setuid Bubblewrap and `workspace-write`, and execute a direct shell smoke (`8f42ae66`).|
+|i386 network seccomp|The seccompiler dependency has no 32-bit x86 backend and aborted direct commands before `/bin/sh` ran.|Skip only the unavailable network filter; retain setuid Bubblewrap for modes that use it, and disclose that the manual full-access launcher relies on the disposable guest boundary (`8f42ae66`).|
 |Codex Apps MCP|The account-owned `codex_apps` server timed out during paginated `tools/list` and created a false degraded-startup state.|Classify it as unsupported here and disable only Apps with `--disable apps` (`ffc7db1e`).|
-|Ordinary remote MCP|Disabling Apps alone did not prove that normal MCP servers worked through the guest relay.|Add relay-gated Context7 configuration and a real `initialize`/`notifications/initialized`/`tools/list` preflight requiring both expected tools (`ffc7db1e`).|
-|Offline MCP startup|An unconditional remote endpoint would make no-relay boots wait on an unreachable service.|Omit Context7 when the relay is unconfigured and report `MCP_CONTEXT7=UNCONFIGURED` (`ffc7db1e`).|
-|MCP diagnostics|Network success did not distinguish DHCP/TLS from MCP protocol/tool discovery.|Add separate ready files, bounded MCP logs, exact failure reasons, live argv checks, and `PASS|UNCONFIGURED` serial markers (`ffc7db1e`).|
+|Automatic remote MCP|Relay startup selected Context7 and coupled graphical readiness to an unrelated public service.|Remove automatic MCP configuration and preflight. Relay startup now owns only DHCP; users choose servers with `codex mcp add`.|
+|Manual customization|The automatic `workspace-write` Codex session made `~/.codex` read-only to model-spawned commands and prevented interactive MCP configuration.|Boot only the Ghostty shell, keep Codex manually runnable, and launch it with `--dangerously-bypass-approvals-and-sandbox`; readiness proves no autostart and a writable Codex home.|
+|OAuth loopback|The guest never configured `lo`, so Codex's local OAuth listener failed with `Address not available (os error 99)`.|Bring up `lo` with `127.0.0.1/8` before the session and require `LOOPBACK=PASS`. Host-browser callbacks still need an explicit host-to-guest bridge.|
+|Guest utility gap|Ordinary agent workflows lacked Python and jq.|Pin `python3` and `jq` directly and lock their complete i386 package closure.|
 |Local worktree handoff|A current image copied into the base worktree was first exercised with a stale browser bundle that lacked `contexts_3d`.|Treat images and browser builds as revision-coupled; rebuild `libv86.mjs`, `v86.wasm`, and `virtio-gpu-wgpu` after handoff (`4839842f`).|
 |Public relay availability|The disposable public relay can occasionally fail DHCP or disappear.|Readiness fails honestly with `network-unavailable`; retry or use a trusted relay rather than weakening the contract.|
 
@@ -377,13 +425,14 @@ they are part of the shipped behavior and must not be omitted from review.
 - Added explicit opt-in appliance and benchmark targets, measured GL callset
   evidence, a GLX-compatible pinned Ghostty artifact, live renderer reporting,
   uniform-background and cursor-alpha gates, and stable direct-tool readiness.
-- Added secure, explicit Codex behavior for the actual i386 artifact:
-  non-root UID 1000, locked root, ephemeral credentials, Bubblewrap
-  `workspace-write`, no fake Code Mode host, direct shell smoke, Apps disabled,
-  and the remaining network-seccomp limitation disclosed.
-- Added ordinary remote MCP coverage without credentials: Context7 is
-  configured only with a relay, initialized from inside the guest, and checked
-  for its exact public tool list.
+- Added explicit Codex behavior for the actual i386 artifact: non-root UID
+  1000, locked root, ephemeral credentials, no fake Code Mode host, Apps
+  disabled, manual full-access startup inside the external guest boundary, and
+  the remaining network-seccomp limitation disclosed.
+- Removed automatic Context7 selection and protocol preflight. Relays now
+  provide networking only; ordinary MCP servers are user-configured in the
+  writable guest home.
+- Added deterministic IPv4 loopback plus pinned Python 3 and jq guest tools.
 - Added source/renderer/image ownership guidance, benchmark baselines, wire
   documentation, browser and unit regressions, troubleshooting, image hashes,
   and exact base-worktree handoff instructions.
@@ -478,54 +527,63 @@ TEST_RELEASE_BUILD=1 ./tests/devices/virtio_gpu.js
 ```
 
 The acceptance harness checks guest architecture and UID, pinned versions,
-hostname, relay behavior, CA-validated HTTPS when configured, the Context7 MCP
-handshake and tool list, the expected llvmpipe or `webgpuvirt` renderer,
-Xorg/Openbox/Ghostty/Codex processes, the live Codex feature and remote-MCP
-arguments, visible scanout, accelerated background uniformity, cursor alpha,
-keyboard delivery, responsive layout, absence of desktop packages, writable
-workspace, and pristine fresh-session reset.
+hostname, configured IPv4 loopback plus an actual localhost socket bind,
+relay/DHCP behavior, Python execution, jq parsing, absence of automatic
+Context7 configuration, the expected llvmpipe or `webgpuvirt` renderer, live
+Xorg/Openbox/Ghostty and interactive-shell processes, the installed but
+non-running Codex binary, full-access launcher policy, writable Codex
+configuration, visible scanout, accelerated background uniformity, cursor
+alpha, keyboard delivery, responsive layout, absence of desktop packages,
+writable workspace, and pristine fresh-session reset.
 
 ## MCP Topology
 
-The host-owned `codex_apps` MCP is explicitly disabled with `--disable apps`.
-It is not a general MCP switch: the authenticated Apps/connector catalog was
-the server that timed out during paginated `tools/list`, while ordinary
-configured MCP servers use separate entries under `mcp_servers`.
+The host-owned `codex_apps` MCP is explicitly disabled with `--disable apps`
+whenever the user manually launches Codex. It is not a general MCP switch: the
+authenticated Apps/connector catalog was the server that timed out during
+paginated `tools/list`, while ordinary configured MCP servers use separate
+entries under `mcp_servers`.
 
-When a relay URL is present, `v86-networking` proves the guest path to Context7
-with the MCP 2025-06-18 initialization handshake and requires both
-`resolve-library-id` and `query-docs` in `tools/list`. The Codex launcher then
-adds the same HTTPS endpoint as `mcp_servers.context7`. Readiness checks the
-live process arguments and reports `V86_APPLIANCE_MCP_CONTEXT7=PASS`. This
-preflight proves guest DNS, TCP, TLS, HTTP, protocol initialization, and tool
-discovery without committing credentials. It does not claim an authenticated
-model invoked a Context7 tool.
+The appliance never injects Context7 or another endpoint. A relay URL controls
+only guest network availability. Once the relay is configured, add any desired
+server explicitly:
 
-Without a relay, the launcher omits the remote server so the local UI does not
-wait for an unreachable endpoint; readiness reports
-`V86_APPLIANCE_MCP_CONTEXT7=UNCONFIGURED`. Resetting the page removes any MCP
-OAuth state or configuration added interactively.
+```sh
+codex mcp add context7 --url https://mcp.context7.com/mcp
+codex mcp list
+```
+
+The writable `~/.codex/config.toml` retains that configuration until the page
+is reset. Browser acceptance performs an actual add/list/remove cycle against
+a local inert entry to verify this path without choosing a service or sending
+credentials.
+
+`v86-networking` configures `127.0.0.1/8` before the unprivileged session, so
+Codex can bind an MCP OAuth listener. An older image that omitted this step
+failed with `Address not available (os error 99)`. Loopback binding alone does
+not bridge address spaces: a callback to `http://127.0.0.1:<port>/callback`
+opened in the host browser targets the host, not the v86 guest. This fixture
+therefore does not claim browser OAuth completion; it requires an explicit
+callback bridge or a server authentication method that does not depend on a
+host-browser localhost redirect.
 
 The i386 archive intentionally omits `/usr/local/bin/codex-code-mode-host` and
-its V8 runtime. Its downstream tool-mode patch treats unavailable
-model-requested `CodeModeOnly` like `CodeMode`: when in-process fallback is
-enabled, Codex exposes direct tools instead of unusable Code Mode calls. The
-appliance disables `code_mode`, `code_mode_only`, and `code_mode_host`, enables
-the stable `shell_tool` and `unified_exec` features, keeps fallback enabled,
-and verifies those arguments from `/proc/<pid>/cmdline` before readiness.
-`codex features list` on the packaged i386 binary confirms the resulting
-feature states. Readiness also executes `/bin/sh` through
-`codex sandbox --` and requires `V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS`,
-proving that the missing i386 seccomp backend no longer aborts direct
-commands.
+its V8 runtime. The launcher disables `code_mode`, `code_mode_only`, and
+`code_mode_host`, disables host-owned Apps, enables `shell_tool` and
+`unified_exec`, and keeps in-process fallback enabled. It also sets
+`--dangerously-bypass-approvals-and-sandbox`; no `--sandbox` option is present.
+Readiness checks the launcher, packaged feature states, writable
+`/home/codex/.codex`, and absence of a running Codex process.
 
-This does not implement Code Mode, package V8, or weaken the no-credential
-image contract.
+This does not implement Code Mode, package V8, add credentials, select an MCP
+server, or start Codex without an explicit user command.
 
 ## Troubleshooting
 
+- **`V86_APPLIANCE_FAILURE=session-exited-after-readiness:0`:** Ghostty exited cleanly because its `/bin/sh` child ended or its window was closed; the GTK, systemd-scope, and on-screen-keyboard warnings are non-fatal. The tty1 session is intentionally one-shot, so use **Reset fresh session** to boot Ghostty again. Avoid `Ctrl+D`, `exit`, or `Alt+F4` when the shell should remain open.
+- **`V86_APPLIANCE_FAILURE=network-unavailable` or `udhcpc` obtains no lease:** the configured public relay may be unavailable even though the page can parse its URL. Use **Reset fresh session** to retry or provide a trusted relay; inspect the bounded `/var/log/v86-networking.log` output for missing `eth0` versus exhausted DHCP discovery.
 - **`VirtIO NIC relay: unconfigured`:** add a percent-encoded `relay=wss://.../` query parameter, then reload. This status is intentional when no relay was supplied.
-- **`V86_APPLIANCE_FAILURE=mcp-context7-unavailable`:** inspect the bounded `/var/log/v86-mcp-context7.log` disclosure; confirm the relay supports guest DNS, TLS, HTTP POST, and streamed responses from `https://mcp.context7.com/mcp`.
+- **MCP OAuth reports `Address not available (os error 99)`:** rebuild the image and require `V86_APPLIANCE_LOOPBACK=PASS`; the current boot service configures `127.0.0.1/8` before Codex can start. Host-browser redirects to guest localhost still require an explicit callback bridge.
 - **VGA console remains visible:** inspect the serial disclosure for `V86_APPLIANCE_FAILURE`; confirm `/dev/dri/card0` and the `1af4:1050` device.
 - **Xorg rejects the display name:** confirm `v86-networking` set `v86-appliance` and both loopback mappings before the tty1 session started.
 - **Openbox or Ghostty exits:** inspect `/tmp/v86-appliance.log`, `/tmp/v86-openbox.log`, `/tmp/v86-ghostty.log`, and `/tmp/v86-glxinfo.log` through the bounded serial failure output.
@@ -538,11 +596,12 @@ image contract.
 - **Black square around the pointer:** cursor conversion forced X-format alpha
   opaque. Preserve the cursor resource's fourth byte; do not change the
   scanout X-format rule.
-- **Codex cannot run commands:** inspect
-  `/proc/$(cat /tmp/v86-codex.pid)/cmdline` and require
-  `V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS`,
-  `V86_APPLIANCE_NO_CODE_MODE_HOST=PASS`, and
-  `V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS`. The image provides `/bin/sh`, not
+- **Codex reports `Read-only file system` for `~/.codex`:** the session is using an old image that still starts Codex under `workspace-write`. Rebuild the image, confirm `V86_APPLIANCE_CODEX_AUTOSTART=DISABLED`, then run `codex` manually from the Ghostty shell. The launcher must contain `--dangerously-bypass-approvals-and-sandbox`.
+- **Codex is not visible after boot:** this is intentional. The image now opens an interactive Ghostty shell so configuration can be edited first; type `codex` to start it.
+- **Codex cannot run commands:** require
+  `V86_APPLIANCE_CODEX_FULL_ACCESS=PASS`,
+  `V86_APPLIANCE_CODEX_HOME_WRITABLE=PASS`, and
+  `V86_APPLIANCE_NO_CODE_MODE_HOST=PASS`. The image provides `/bin/sh`, not
   Bash. Do not add a fake or V8-backed `codex-code-mode-host`; this fixture
   uses direct tools.
 

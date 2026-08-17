@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# The entire guest is the external isolation boundary. Keep manual Codex
+# sessions unsandboxed so the unprivileged codex user can edit its home and
+# configuration; the guest is disposable and root remains locked. MCP servers
+# are exclusively user-configured.
+exec /usr/local/libexec/codex \
+    --dangerously-bypass-approvals-and-sandbox \
+    --disable code_mode \
+    --disable code_mode_only \
+    --disable code_mode_host \
+    --disable apps \
+    --enable shell_tool \
+    --enable unified_exec \
+    -c code_mode.disable_in_process_fallback=false \
+    "$@"

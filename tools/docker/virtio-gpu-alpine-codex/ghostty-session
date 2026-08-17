@@ -1,0 +1,12 @@
+#!/bin/sh
+
+if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
+    exec /usr/local/bin/v86-ghostty-benchmark
+fi
+
+cd "$HOME/workspace" || exit 1
+pid_file=/tmp/v86-ghostty-shell.pid
+printf '%s\n' "$$" > "$pid_file.tmp"
+mv "$pid_file.tmp" "$pid_file"
+touch /tmp/v86-appliance-ui-ready
+exec /bin/sh -l

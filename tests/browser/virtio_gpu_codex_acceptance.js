@@ -605,17 +605,21 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_ARCH=i686",
             "V86_APPLIANCE_UID=1000",
             "V86_APPLIANCE_HOSTNAME=v86-appliance",
+            "V86_APPLIANCE_LOOPBACK=PASS",
+            "V86_APPLIANCE_PYTHON3=Python 3.14.7",
+            "V86_APPLIANCE_JQ=jq-1.8.1",
             `V86_APPLIANCE_NETWORK=${RELAY_URL ? "PASS" : "UNCONFIGURED"}`,
-            `V86_APPLIANCE_MCP_CONTEXT7=${RELAY_URL ? "PASS" : "UNCONFIGURED"}`,
             "V86_APPLIANCE_XORG=PASS",
             "V86_APPLIANCE_OPENBOX=PASS",
             "V86_APPLIANCE_GHOSTTY_PROCESS=PASS",
             "V86_APPLIANCE_GHOSTTY_WINDOW=PASS",
-            "V86_APPLIANCE_CODEX_PROCESS=PASS",
-            "V86_APPLIANCE_CODEX_EXEC_FLAGS=PASS",
+            "V86_APPLIANCE_GHOSTTY_SHELL=PASS",
+            "V86_APPLIANCE_CODEX_BINARY=PASS",
+            "V86_APPLIANCE_CODEX_AUTOSTART=DISABLED",
+            "V86_APPLIANCE_CODEX_FULL_ACCESS=PASS",
+            "V86_APPLIANCE_CODEX_HOME_WRITABLE=PASS",
             "V86_APPLIANCE_CODEX_APPS=DISABLED",
             "V86_APPLIANCE_NO_CODE_MODE_HOST=PASS",
-            "V86_APPLIANCE_CODEX_DIRECT_SHELL=PASS",
             "V86_APPLIANCE_READY=PASS",
         ])
         {
@@ -668,11 +672,27 @@ async function run_scenario(browser_ws, base_url, renderer)
                 "V86_APPLIANCE_TLS=PASS", "V86_APPLIANCE_TLS=FAIL", 60000);
         }
         await guest_command(cdp,
+            "if python3 -c 'import socket; s = socket.socket(); s.bind((\"127.0.0.1\", 0)); s.close()'; then printf 'V86_APPLIANCE_LOOPBACK_BIND=%s\\n' PASS; else printf 'V86_APPLIANCE_LOOPBACK_BIND=%s\\n' FAIL; fi",
+            "V86_APPLIANCE_LOOPBACK_BIND=PASS",
+            "V86_APPLIANCE_LOOPBACK_BIND=FAIL", 30000);
+        await guest_command(cdp,
+            "if printf '%s\\n' '{\"ready\":true}' | jq -e '.ready == true' >/dev/null; then printf 'V86_APPLIANCE_GUEST_TOOLS=%s\\n' PASS; else printf 'V86_APPLIANCE_GUEST_TOOLS=%s\\n' FAIL; fi",
+            "V86_APPLIANCE_GUEST_TOOLS=PASS",
+            "V86_APPLIANCE_GUEST_TOOLS=FAIL", 30000);
+        await guest_command(cdp,
             "found=; for package in xfce4 xfce4-panel xfce4-session xfdesktop thunar xfce4-terminal tumbler garcon exo; do if apk info -e \"$package\" >/dev/null 2>&1; then found=1; fi; done; if [ -z \"$found\" ]; then printf 'V86_APPLIANCE_EXCLUSIONS=%s\\n' PASS; else printf 'V86_APPLIANCE_EXCLUSIONS=%s\\n' FAIL; fi",
             "V86_APPLIANCE_EXCLUSIONS=PASS", "V86_APPLIANCE_EXCLUSIONS=FAIL", 30000);
         await guest_command(cdp,
             "if codex login status >/tmp/v86-codex-login.log 2>&1; then printf 'V86_APPLIANCE_LOGIN=%s\\n' FAIL; elif grep -q 'Not logged in' /tmp/v86-codex-login.log && [ ! -e /home/codex/.codex/auth.json ]; then printf 'V86_APPLIANCE_LOGIN=%s\\n' UNCONFIGURED; else printf 'V86_APPLIANCE_LOGIN=%s\\n' FAIL; fi",
             "V86_APPLIANCE_LOGIN=UNCONFIGURED", "V86_APPLIANCE_LOGIN=FAIL", 30000);
+        await guest_command(cdp,
+            "if codex mcp list >/tmp/v86-codex-mcp-list.log 2>&1 && ! grep -q '^context7 ' /tmp/v86-codex-mcp-list.log; then printf 'V86_APPLIANCE_CONTEXT7_AUTOCONFIG=%s\\n' DISABLED; else cat /tmp/v86-codex-mcp-list.log; printf 'V86_APPLIANCE_CONTEXT7_AUTOCONFIG=%s\\n' FAIL; fi",
+            "V86_APPLIANCE_CONTEXT7_AUTOCONFIG=DISABLED",
+            "V86_APPLIANCE_CONTEXT7_AUTOCONFIG=FAIL", 30000);
+        await guest_command(cdp,
+            "log=/tmp/v86-codex-mcp-write.log; if codex mcp add v86-write-probe -- /bin/true >\"$log\" 2>&1 && codex mcp list | grep -q '^v86-write-probe ' && codex mcp remove v86-write-probe >>\"$log\" 2>&1; then printf 'V86_APPLIANCE_CODEX_CONFIG_WRITE=%s\\n' PASS; else cat \"$log\"; codex mcp remove v86-write-probe >/dev/null 2>&1 || true; printf 'V86_APPLIANCE_CODEX_CONFIG_WRITE=%s\\n' FAIL; fi",
+            "V86_APPLIANCE_CODEX_CONFIG_WRITE=PASS",
+            "V86_APPLIANCE_CODEX_CONFIG_WRITE=FAIL", 30000);
 
         await evaluate(cdp, `(() => {
             window.applianceKeyboardEvents = 0;
@@ -752,8 +772,15 @@ async function run_scenario(browser_ws, base_url, renderer)
             llvmpipe: !accelerated,
             accelerated_3d: accelerated,
             tls_relay: Boolean(RELAY_URL),
-            remote_mcp: RELAY_URL ? "context7" : null,
             codex_apps_disabled: true,
+            codex_autostart: false,
+            codex_full_access: true,
+            codex_home_writable: true,
+            python3: true,
+            jq: true,
+            loopback_bind: true,
+            guest_tools: true,
+            context7_autoconfig: false,
             desktop_exclusions: true,
             login_unconfigured: true,
             keyboard_input: true,
