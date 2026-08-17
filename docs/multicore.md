@@ -361,6 +361,85 @@ mailbox-under-load and hlt/wake-race stress) and
 `tests/threads/machine-in-worker-boottime.js` (the ≤ 1.25× boot-time gate
 vs time-sliced execution over the same memory backend).
 
+### Running the Codex appliance under worker vCPUs
+
+The flagship fixture is `examples/virtio_gpu_codex.html` (Alpine + Openbox
++ Ghostty + Codex over 9p). On this branch it accepts the SMP query
+parameters below; the copy on `main` does not — see the divergence note at
+the end of this section.
+
+Build the release artifacts once. Worker mode loads the **multimem**
+module, not `build/v86.wasm`:
+
+```sh
+make build/libv86.mjs          # Closure bundle — needs Java on PATH
+make build/v86-multimem.wasm   # release multimem module
+make build/gram.wasm build/gram-shared.wasm
+```
+
+Serve with cross-origin isolation. This is the step the appliance guide's
+`python3 -m http.server 8082` recipe does not cover: without COOP/COEP the
+browser withholds `SharedArrayBuffer`. The page passes `smp_workers: true`
+(not `"auto"`), so it fails loudly rather than degrading — the constructor
+throws `smp_workers: shared WebAssembly.Memory is unavailable
+(crossOriginIsolated/SharedArrayBuffer)` (`starter.js`). An embedder
+passing `"auto"` gets the opposite: a silent step down to time-sliced
+execution, logged and reported through `smp_mode` but easy to mistake for a
+merely slow boot.
+
+```sh
+python3 tools/coi-server.py 8082
+```
+
+`make run-isolated` runs the same server but defaults to port 8000; the
+appliance guide and the browser acceptance tests standardise on 8082.
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?cpus=4&workers=1
+```
+
+| Query | Mode |
+| --- | --- |
+| `?cpus=4&workers=1` | 4 worker vCPUs — real host parallelism, the fastest configuration |
+| `?cpus=2&workers=1` | 2 worker vCPUs — less host contention on smaller machines |
+| `?cpus=4` | 4 vCPUs time-sliced on one thread |
+| `?cpus=1` | single core, the appliance's historical acpi-less setup |
+| `&mm=fenced` | seq-cst fences on the JIT fast paths (TSO restored); slower, for ordering A/B |
+
+**Confirm the mode actually took.** The `"auto"` ladder degrades silently
+by design, so a disappointing boot may simply not be running workers:
+
+```js
+emulator.smp_mode  // { execution: "workers", topology: "percpu", memory_model: "relaxed", … }
+```
+
+The `smp-mode` event carries the same record at startup.
+
+Measured on an Apple M4 (4P+6E), release artifacts: appliance readiness
+115–136 s under 4 workers versus 175 s time-sliced. Boot is not
+embarrassingly parallel, so this is not a 4× workload — see
+[smp-benchmark-report.md](smp-benchmark-report.md) for the gated workloads
+and for why 4 workers plus the device host thread can land on E-cores and
+produce outlier rounds.
+
+Notes:
+
+* `acpi` switches on automatically for `cpus > 1` (the LAPIC MMIO window is
+  gated on it); the one-CPU appliance keeps its historical acpi-less setup.
+* `renderer=wgpu` additionally needs `make virtio-gpu-wgpu`; the default
+  `webgpu-js` renderer needs no extra build.
+* The guest fixture must exist under `images/` — worktrees symlink it to
+  the primary checkout rather than duplicating ~700 MB.
+
+**Divergence to resolve at merge time.** `main` and `multi-core` have both
+edited `examples/virtio_gpu_codex.html` and neither side has the other's
+query parameters: `main` added `shader`/`resources`/`mesa`/`accelerated`/
+`benchmark` (the XWAH-5/XWAH-6 GPU acceleration work), `multi-core` added
+`cpus`/`workers`/`mm`. Merging the branches must **union** the parameter
+sets rather than take either side wholesale, or one feature set disappears
+silently. `AGENTS.md` and `docs/gpu/ghostty-codex-appliance.md` have
+diverged the same way.
+
 ## Testing
 
 * `tests/api/smp.js` — boots an SMP guest with `cpus: 2`, asserts `nproc`
