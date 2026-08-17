@@ -363,10 +363,34 @@ vs time-sliced execution over the same memory backend).
 
 ### Running the Codex appliance under worker vCPUs
 
-The flagship fixture is `examples/virtio_gpu_codex.html` (Alpine + Openbox
-+ Ghostty + Codex over 9p). On this branch it accepts the SMP query
-parameters below; the copy on `main` does not — see the divergence note at
-the end of this section.
+This line has its **own** appliance:
+`examples/multicore_ghostty_codex.html`, built from
+`tools/docker/multicore-ghostty-codex/` into `images/multicore-ghostty-codex-*`
+(`make multicore-ghostty-codex-image`). It defaults to `cpus=4&workers=1` —
+opt *out* with `?cpus=1` or `?workers=0`.
+
+It is separate from `examples/virtio_gpu_codex.html` for a concrete reason.
+`images/` is gitignored and shared across worktrees, so while both
+appliances built into `alpine-virtio-gpu-codex-*` the last build silently
+won and this branch's page booted `main`'s guest — visible only as
+unexpected packages in the readiness output and a DHCP failure this
+contract does not require. The multi-core guest now announces
+`V86_APPLIANCE_IMAGE=multicore-ghostty-codex` in its first serial lines and
+the acceptance test asserts it before anything else.
+
+Its readiness contract also proves what the single-core one cannot: vCPUs
+actually **online** (`V86_APPLIANCE_CPUS`, checked against the `v86_cpus=N`
+the page puts on the kernel command line, so a vCPU stuck in WaitForSipi
+fails the boot), a measured in-guest `V86_APPLIANCE_PARALLEL_SPEEDUP`
+(time-sliced execution cannot exceed ~1.0), and a Codex process that owns
+Ghostty's pty rather than merely existing. Pixels are checked browser-side
+by `make multicore-ghostty-codex-browser-test`, which requires the canvas to
+hold real content **and to change in response to typed input** — a static
+frame or a black screen fails.
+
+The older single-core fixture, `examples/virtio_gpu_codex.html`, still
+accepts the SMP query parameters below on this branch; the copy on `main`
+does not — see the divergence note at the end of this section.
 
 Build the release artifacts once. Worker mode loads the **multimem**
 module, not `build/v86.wasm`:
