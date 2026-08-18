@@ -1228,9 +1228,9 @@ pub unsafe fn instr_0F30() {
             // Enable Misc. Processor Features
         },
         IA32_MCG_CAP => {}, // netbsd
-        IA32_KERNEL_GS_BASE => {
-            // Only used in 64 bit mode (by SWAPGS), but set by kvm-unit-test
-            dbg_log!("GS Base written");
+        IA32_GS_BASE => {
+            dbg_assert!(high == 0, "64-bit GS base not supported");
+            *segment_offsets.offset(GS as isize) = low;
         },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
@@ -1315,6 +1315,7 @@ pub unsafe fn instr_0F32() {
         IA32_PMC0 | IA32_PMC1 => {},               // linux
         IA32_PAT => {},
         MSR_PKG_C2_RESIDENCY => {},
+        IA32_GS_BASE => low = *segment_offsets.offset(GS as isize),
         IA32_SPEC_CTRL => {},      // linux 5.19
         IA32_TSX_CTRL => {},       // linux 5.19
         MSR_TSX_FORCE_ABORT => {}, // linux 5.19
