@@ -56,7 +56,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `probe-packages.lock` | Complete sorted probe/triangle builder package closure; the build rejects drift. |
 | `xinitrc` | Openbox, selected renderer check, 1920x1080 mode, and Ghostty process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
-| `ghostty-config` | Undecorated maximized window and the interactive shell-session command. |
+| `ghostty-config` | Undecorated maximized window, 16-point text tuned for responsive 1080p downscaling, and the interactive shell-session command. |
 | `ghostty-session` | Benchmark selection or a ready-marked interactive `/bin/sh` in `/home/codex/workspace`. |
 | `codex-launcher` | Manual `codex` command, exact full-access bypass, unsupported feature disablement, supported direct tools, and user-owned MCP configuration. |
 

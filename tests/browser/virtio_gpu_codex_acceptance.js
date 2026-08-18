@@ -295,6 +295,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_visible: !canvas.hidden && getComputedStyle(canvas).display !== "none",
                 canvas_width: canvas.width,
                 canvas_height: canvas.height,
+                image_rendering: getComputedStyle(canvas).imageRendering,
                 rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
                 cursor_alpha,
                 cursor_hidden: !cursor_canvas || cursor_canvas.hidden ||
@@ -685,6 +686,7 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.scanout.height, 1080);
         assert.equal(state.cursor_hidden, true);
         assert.equal(state.host_cursor_hidden, true);
+        assert.equal(state.image_rendering, "auto");
         if(accelerated)
         {
             const gpu = await evaluate(cdp, `(() => {

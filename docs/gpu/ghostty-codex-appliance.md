@@ -179,6 +179,8 @@ The acceptance harness verifies:
   full-access launcher can write `~/.codex/config.toml`;
 - a uniform accelerated terminal background, a valid alpha-masked hardware
   cursor resource, and hidden host/guest pointer overlays.
+  The 16-point guest font and browser-native canvas filtering preserve
+  readability when the 1920x1080 scanout is fitted into a narrower viewport.
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
 
