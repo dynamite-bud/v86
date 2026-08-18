@@ -1,5 +1,5 @@
 import { v86 } from "../main.js";
-import { LOG_CPU, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
+import { LOG_CPU, MMAP_BLOCK_SIZE, WASM_TABLE_OFFSET, WASM_TABLE_SIZE } from "../const.js";
 import { get_rand_int, load_file, read_sized_string_from_mem } from "../lib.js";
 import { dbg_assert, dbg_trace, dbg_log, set_log_level } from "../log.js";
 import * as print_stats from "./print_stats.js";
@@ -23,6 +23,34 @@ import { Modem } from "./modem.js";
 import { MemoryFileStorage, ServerFileStorageWrapper } from "./filestorage.js";
 import { SyncBuffer, buffer_from_object } from "../buffer.js";
 import { FS } from "../../lib/filesystem.js";
+import { ctl_pages } from "./smpctl.js";
+import { build_gram_env } from "./gram_env.js";
+import { SMPWorkerHost } from "./smp_worker_host.js";
+import { SMPVcpuHost } from "./smp_vcpu_host.js";
+
+// Multi-memory capability probe (XWAH-9 Phase 3): a minimal hand-assembled
+// two-memory module — imports "e"."m" and "e"."g" (the JIT modules' shape,
+// wasm_builder.rs) and performs one memidx-1 i32.load. Engines without the
+// multi-memory proposal reject it at validation, so guest_memory_backend
+// "imported" can fail loudly at construction instead of wedging at the
+// first JIT compile (byte layout cribbed from
+// tests/rust/verify-wasmgen-multimem-output.js's module contract; memarg
+// encoding: flags|0x40, then memidx LEB, then offset LEB).
+// Exported for tests/api/multimem-negative.js.
+export const MULTIMEM_PROBE_MODULE = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6D, // \0asm magic
+    0x01, 0x00, 0x00, 0x00, // version 1
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type section: one type, () -> ()
+    0x02, 0x0F, 0x02, // import section, two imports:
+    0x01, 0x65, 0x01, 0x6D, 0x02, 0x00, 0x00, // "e" "m" memory {min 0}
+    0x01, 0x65, 0x01, 0x67, 0x02, 0x00, 0x00, // "e" "g" memory {min 0}
+    0x03, 0x02, 0x01, 0x00, // function section: one function of type 0
+    0x0A, 0x0B, 0x01, 0x09, 0x00, // code section: one body, no locals
+    0x41, 0x00, // i32.const 0
+    0x28, 0x42, 0x01, 0x00, // i32.load align=2|0x40 memidx=1 offset=0
+    0x1A, // drop
+    0x0B, // end
+]);
 
 /**
  * Constructor for emulator instances.
@@ -32,7 +60,13 @@ import { FS } from "../../lib/filesystem.js";
  * @param {{
       disable_mouse: (boolean|undefined),
       disable_keyboard: (boolean|undefined),
+      cpus: (number|undefined),
       wasm_fn: (Function|undefined),
+      guest_memory_backend: (string|undefined),
+      guest_memory_shared: (string|boolean|undefined),
+      smp_workers: (boolean|string|undefined),
+      smp_worker_topology: (string|undefined),
+      smp_memory_model: (string|undefined),
       screen: ({
           scale: (number|undefined),
       } | undefined),
@@ -61,6 +95,208 @@ export function V86(options)
     var wasm_memory;
 
     const wasm_table = new WebAssembly.Table({ element: "anyfunc", initial: WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
+
+    // NOTE: Experimental (XWAH-9 Phase 3 Stage 5): guest_memory_backend
+    // "imported" loads the multimem build (v86-multimem[-debug].wasm), in
+    // which guest RAM is a separate WebAssembly.Memory created here and
+    // imported by gram.wasm (interpreter accessors) and by JIT-generated
+    // modules (docs/smp-phase3-design.md §2 option A). The default "linear"
+    // backend is byte-for-byte untouched.
+    let guest_memory_backend =
+        options.guest_memory_backend === undefined ? "linear" : options.guest_memory_backend;
+    dbg_assert(guest_memory_backend === "linear" || guest_memory_backend === "imported",
+        "options.guest_memory_backend must be \"linear\" or \"imported\"");
+
+    // Sub-option: whether the imported guest memory is shared
+    // (SharedArrayBuffer-backed). "auto" = crossOriginIsolated in browsers;
+    // in Node there is no crossOriginIsolated gate, so "auto" follows
+    // SharedArrayBuffer availability (i.e. shared). Explicit true/false is
+    // meant for testing both artifact variants without COI headers.
+    const guest_memory_shared_option =
+        options.guest_memory_shared === undefined ? "auto" : options.guest_memory_shared;
+    dbg_assert(guest_memory_shared_option === "auto" || typeof guest_memory_shared_option === "boolean",
+        "options.guest_memory_shared must be \"auto\", true or false");
+
+    // NOTE: Experimental (XWAH-9 Phase 4 Stages W2-W4): smp_workers
+    // requests worker execution (docs/smp-phase4-design.md §8/§9) over the
+    // shared imported guest memory while this thread becomes the device
+    // host — one worker per vCPU (topology (b), real parallelism) for
+    // cpus > 1, the whole machine in one worker (topology (c)) for
+    // cpus == 1; see smp_worker_topology below to override.
+    // false = default, true = hard requirement (loud constructor throw
+    // naming the missing capability), "auto" = degrade down the ladder
+    // (workers -> time-sliced over imported memory -> time-sliced) with a
+    // dbg_log. The resolved mode is observable through the "smp-mode" bus
+    // event and the emulator.smp_mode property.
+    const smp_workers = options.smp_workers === undefined ? false : options.smp_workers;
+    dbg_assert(smp_workers === false || smp_workers === true || smp_workers === "auto",
+        "options.smp_workers must be false, true or \"auto\"");
+    this.smp_workers = smp_workers;
+    this.smp_worker_host = null;
+    // compiled-once modules shared with every worker (smp_compile_modules)
+    this.smp_modules = null;
+    this.smp_mode = null;
+    // Stage W3: worker-execution topology (docs/smp-phase4-design.md §1,
+    // §9 W3). "auto" (default): one worker per vCPU — topology (b) — when
+    // cpus > 1, the whole machine in one worker — topology (c) — when
+    // cpus == 1 (a single vCPU gains nothing from the (b) wire; (c) is the
+    // landed, cheaper path there). "percpu"/"machine" force the respective
+    // topology, primarily for testing ((c) with cpus > 1 remains the
+    // time-sliced-in-a-worker mode W2 landed; (b) with cpus == 1 is legal
+    // and exercises the per-vCPU wire without SMP).
+    const smp_worker_topology =
+        options.smp_worker_topology === undefined ? "auto" : options.smp_worker_topology;
+    dbg_assert(smp_worker_topology === "auto" || smp_worker_topology === "percpu" ||
+        smp_worker_topology === "machine",
+        "options.smp_worker_topology must be \"auto\", \"percpu\" or \"machine\"");
+    this.smp_worker_topology = smp_worker_topology;
+    // Stage W5: memory-ordering posture for worker execution (design §5).
+    // "relaxed" (default): plain guest accesses stay plain wasm accesses —
+    // guest TSO is inherited from the host on x86 hosts, and empirically
+    // violated at ppm rates on weakly ordered (ARM) hosts under real
+    // parallelism (tests/threads/tso-litmus.js is the detector and the
+    // record). "fenced": every JIT guest-RAM fast-path access carries a
+    // seq-cst wasm fence restoring TSO at a large per-access cost; slow
+    // paths and the interpreter stay unfenced (docs/multicore.md table).
+    const smp_memory_model =
+        options.smp_memory_model === undefined ? "relaxed" : options.smp_memory_model;
+    dbg_assert(smp_memory_model === "relaxed" || smp_memory_model === "fenced",
+        "options.smp_memory_model must be \"relaxed\" or \"fenced\"");
+    this.smp_memory_model = smp_memory_model;
+
+    // Ladder step 1 requirements (design §8), probed synchronously; any
+    // failure throws for `true` and degrades for "auto".
+    let smp_workers_effective = false;
+    if(smp_workers)
+    {
+        const is_node = typeof process === "object" && typeof process.versions === "object" &&
+            typeof process.versions.node === "string";
+        const shared_memory_available = typeof SharedArrayBuffer !== "undefined" &&
+            (typeof globalThis.crossOriginIsolated === "undefined" ||
+                Boolean(globalThis.crossOriginIsolated));
+        const failure =
+            options.multiboot ?
+                "multiboot pokes CPU registers from the main thread, which has no guest" :
+            options.wasm_fn ?
+                "a custom wasm_fn hides the module bytes the worker must instantiate" :
+            !WebAssembly.validate(MULTIMEM_PROBE_MODULE) ?
+                "WebAssembly multi-memory support is missing" :
+            !shared_memory_available ?
+                "shared WebAssembly.Memory is unavailable (crossOriginIsolated/SharedArrayBuffer)" :
+            options.guest_memory_shared === false ?
+                "guest_memory_shared: false conflicts with worker execution" :
+            !is_node && typeof Worker === "undefined" ?
+                "Worker is unavailable" :
+            is_node && typeof process["getBuiltinModule"] !== "function" ?
+                "Node without process.getBuiltinModule (needs Node >= 22.3)" :
+            "";
+        if(failure)
+        {
+            if(smp_workers === true)
+            {
+                throw new Error("smp_workers: " + failure);
+            }
+            dbg_log("smp_workers \"auto\" degraded to time-sliced: " + failure);
+        }
+        else
+        {
+            smp_workers_effective = true;
+        }
+    }
+    this.smp_workers_effective = smp_workers_effective;
+    // The machine worker is a standalone module entry point (deliberately
+    // outside the bundled library — see the Makefile note): embedders whose
+    // layout differs from the repository tree pass its URL explicitly.
+    // Node default resolves against the working directory.
+    this.smp_worker_url = options.smp_worker_url ||
+        (typeof window === "undefined"
+            ? "./src/browser/vcpu_worker.js"
+            : "src/browser/vcpu_worker.js");
+
+    if(smp_workers_effective && guest_memory_backend !== "imported")
+    {
+        if(options.guest_memory_backend !== undefined)
+        {
+            dbg_log("smp_workers forces guest_memory_backend \"imported\" " +
+                "(overriding \"" + options.guest_memory_backend + "\")");
+        }
+        guest_memory_backend = "imported";
+    }
+
+    let guest_memory = null;
+    let guest_memory_is_shared = false;
+    let guest_memory_ctl_pages = 0;
+
+    if(guest_memory_backend === "imported")
+    {
+        // Capability probe before committing to the backend: JIT-generated
+        // modules of the multimem build are true multi-memory modules, so an
+        // engine without multi-memory support could instantiate the (single
+        // -memory) main artifact and gram.wasm fine, then silently fail
+        // every JIT compile. Fail at construction instead.
+        if(!WebAssembly.validate(MULTIMEM_PROBE_MODULE))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires WebAssembly " +
+                "multi-memory support (JIT-generated modules import guest RAM as a " +
+                "second memory), which this engine lacks");
+        }
+
+        // worker execution requires the shared variant (the probe above
+        // already rejected explicit false)
+        guest_memory_is_shared = smp_workers_effective ? true :
+            guest_memory_shared_option === "auto"
+            ? (typeof globalThis.crossOriginIsolated !== "undefined"
+                ? Boolean(globalThis.crossOriginIsolated)
+                : typeof SharedArrayBuffer !== "undefined")
+            : guest_memory_shared_option;
+
+        // Mirror of CPU.create_memory's size normalisation (cpu.js) — the
+        // memory must exist before the module instantiates, long before
+        // CPU.init runs; create_memory asserts the two calculations agree.
+        // The minimum_size mirrors CPU.init's `settings.initrd ? 64M : 1M`
+        // under the conditions continue_init will produce: settings.initrd
+        // is populated from options.initrd unconditionally, but from
+        // bzimage_initrd_from_filesystem only when there is no initial
+        // state (see done() in continue_init — the filesystem-sourced
+        // initrd is skipped when a state image overrides boot).
+        let guest_memory_size = options.memory_size || 64 * 1024 * 1024;
+        const minimum_size =
+            options.initrd || (options.bzimage_initrd_from_filesystem && !options.initial_state)
+                ? 64 * 1024 * 1024 : 1024 * 1024;
+        if(guest_memory_size < minimum_size)
+        {
+            guest_memory_size = minimum_size;
+        }
+        else if((guest_memory_size | 0) < 0)
+        {
+            guest_memory_size = Math.pow(2, 31) - MMAP_BLOCK_SIZE;
+        }
+        guest_memory_size = ((guest_memory_size - 1) | (MMAP_BLOCK_SIZE - 1)) + 1 | 0;
+
+        // One wasm page more than guest RAM: the JIT slow-path scratch pages
+        // live at [memory_size, memory_size + 0x2000) in the guest memory
+        // (src/rust/cpu/memory.rs gram_jit_scratch_base). maximum must be
+        // present (shared memories require one; gram.wasm's and the JIT
+        // modules' import declarations rely on it) and equals initial: guest
+        // RAM never grows.
+        //
+        // Under smp_workers the shared control region follows at CTL_BASE =
+        // memory_size + 0x10000 (src/rust/cpu/smpctl.rs / ./smpctl.js —
+        // Stage W1): ceil(ctl_size(N)/64K) more pages. N mirrors
+        // continue_init's cpus validation; sizing for the raw option value
+        // is safe when continue_init later clamps it to 1 (the region only
+        // has to be at least as large as the effective count needs).
+        const cpus_option = options.cpus || 0;
+        const sizing_cpus =
+            Number.isInteger(cpus_option) && cpus_option >= 1 && cpus_option <= 255
+                ? cpus_option : 1;
+        guest_memory_ctl_pages =
+            smp_workers_effective ? ctl_pages(sizing_cpus, guest_memory_size) : 0;
+        const guest_pages = guest_memory_size / (64 * 1024) + 1 + guest_memory_ctl_pages;
+        guest_memory = new WebAssembly.Memory(guest_memory_is_shared
+            ? { "initial": guest_pages, "maximum": guest_pages, "shared": true }
+            : { "initial": guest_pages, "maximum": guest_pages });
+    }
 
     const wasm_shared_funcs = {
         "cpu_exception_hook": n => this.cpu_exception_hook(n),
@@ -109,32 +345,46 @@ export function V86(options)
         "__indirect_function_table": wasm_table,
     };
 
+    /* global __dirname */
+
+    // Artifact directory rule, shared by the default loader and the gram
+    // loader below: an explicit options.wasm_path names the main artifact
+    // verbatim (it wins also under guest_memory_backend "imported", where it
+    // must then point at a multimem-compatible build — cpu.js verifies), and
+    // gram artifacts are expected next to the main artifact.
+    const wasm_dirname = () =>
+        options.wasm_path ? options.wasm_path.substring(0, options.wasm_path.lastIndexOf("/") + 1) :
+        typeof window === "undefined" && typeof __dirname === "string" ? __dirname + "/" :
+        "build/";
+
     let wasm_fn = options.wasm_fn;
 
     if(!wasm_fn)
     {
         wasm_fn = env =>
         {
-            /* global __dirname */
-
             return new Promise(resolve => {
                 let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
                 let v86_bin_fallback = "v86-fallback.wasm";
 
+                if(guest_memory)
+                {
+                    // multimem build variant (XWAH-9): guest RAM is imported.
+                    // No fallback artifact — v86-fallback.wasm is a
+                    // single-memory build without the gram import ABI.
+                    v86_bin = DEBUG ? "v86-multimem-debug.wasm" : "v86-multimem.wasm";
+                    v86_bin_fallback = null;
+                }
+
                 if(options.wasm_path)
                 {
                     v86_bin = options.wasm_path;
-                    v86_bin_fallback = v86_bin.replace("v86.wasm", "v86-fallback.wasm");
-                }
-                else if(typeof window === "undefined" && typeof __dirname === "string")
-                {
-                    v86_bin = __dirname + "/" + v86_bin;
-                    v86_bin_fallback = __dirname + "/" + v86_bin_fallback;
+                    v86_bin_fallback = v86_bin_fallback && v86_bin.replace("v86.wasm", "v86-fallback.wasm");
                 }
                 else
                 {
-                    v86_bin = "build/" + v86_bin;
-                    v86_bin_fallback = "build/" + v86_bin_fallback;
+                    v86_bin = wasm_dirname() + v86_bin;
+                    v86_bin_fallback = v86_bin_fallback && wasm_dirname() + v86_bin_fallback;
                 }
 
                 load_file(v86_bin, {
@@ -148,6 +398,10 @@ export function V86(options)
                         }
                         catch(err)
                         {
+                            if(!v86_bin_fallback)
+                            {
+                                throw err;
+                            }
                             load_file(v86_bin_fallback, {
                                     done: async bytes => {
                                         const { instance } = await WebAssembly.instantiate(bytes, env);
@@ -174,15 +428,86 @@ export function V86(options)
         };
     }
 
-    wasm_fn({ "env": wasm_shared_funcs })
+    // Instantiation order under guest_memory_backend "imported"
+    // (docs/smp-phase3-design.md §2 option A): the guest memory already
+    // exists (above); instantiate the matching gram variant over it, merge
+    // its accessor exports plus the JS-implemented gram_copy_out into env,
+    // and only then instantiate the main module (default or custom wasm_fn
+    // alike — a custom wasm_fn receives the merged env unchanged in shape).
+    const build_env = async () =>
+    {
+        if(!guest_memory)
+        {
+            return { "env": wasm_shared_funcs };
+        }
+
+        const gram_bin = wasm_dirname() + (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm");
+        // load_file's failure paths only console.error and may never call
+        // done (in Node the readFile rejection additionally surfaces
+        // through the returned promise, caught here), so check what
+        // arrived: a missing or invalid gram artifact must fail the init
+        // chain loudly (see the .catch below) instead of hanging it
+        let gram_bytes = null;
+        try
+        {
+            gram_bytes = await new Promise((resolve, reject) =>
+            {
+                Promise.resolve(load_file(gram_bin, { done: resolve })).catch(reject);
+            });
+        }
+        catch(e)
+        {
+            console.error(e);
+        }
+        if(!gram_bytes || !WebAssembly.validate(gram_bytes))
+        {
+            throw new Error("guest_memory_backend \"imported\" requires " +
+                (guest_memory_is_shared ? "gram-shared.wasm" : "gram.wasm") +
+                " next to the multimem artifact (make gram-wasm), but " + gram_bin +
+                " is missing or not a valid WebAssembly module");
+        }
+        // kept for the machine-worker spawn payload (Stage W2): the worker
+        // instantiates its own gram instance over the same shared memory
+        this.gram_bytes = gram_bytes;
+        // gram instantiation + env merge (incl. the JS-implemented
+        // gram_copy_out, the svga LFB path): the shape is shared with the
+        // worker runtime — see src/browser/gram_env.js
+        return build_gram_env(wasm_shared_funcs, gram_bytes, guest_memory,
+            () => wasm_memory.buffer);
+    };
+
+    build_env()
+        .then(env => wasm_fn(env))
         .then((exports) => {
             wasm_memory = exports.memory;
             exports["rust_init"]();
 
-            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
+            const emulator = this.v86 = new v86(this.emulator_bus, {
+                exports,
+                wasm_table,
+                guest_memory,
+                // plumbed alongside guest_memory itself so the CPU and the
+                // copy-first shims never have to sniff the buffer's type
+                // (the SharedArrayBuffer global can be hidden while shared
+                // memory still works)
+                guest_memory_shared: guest_memory_is_shared,
+                // control-region sizing (smp_workers), for create_memory's
+                // cross-check of the guest memory's total size
+                guest_memory_ctl_pages,
+            });
             cpu = emulator.cpu;
 
-            this.continue_init(emulator, options);
+            return this.continue_init(emulator, options);
+        })
+        .catch(e => {
+            // a swallowed rejection here would leave the emulator silently
+            // half-constructed (no "emulator-loaded", no error): log
+            // prominently, notify listeners (same channel as the
+            // "download-error" precedent above), and rethrow asynchronously
+            // so embedders get an uncaught error instead of a silent hang
+            console.error("Failed to initialize the emulator:", e);
+            this.emulator_bus && this.emulator_bus.send("emulator-error", e);
+            setTimeout(() => { throw e; }, 0);
         });
 
     this.zstd_worker = null;
@@ -244,6 +569,23 @@ V86.prototype.continue_init = async function(emulator, options)
     settings.preserve_mac_from_state_image = options.preserve_mac_from_state_image;
     settings.mac_address_translation = options.mac_address_translation;
     settings.cpuid_level = options.cpuid_level;
+    // NOTE: Experimental (XWAH-9): time-sliced SMP — the firmware
+    // advertises all CPUs and secondary CPUs actually boot, multiplexed on
+    // one host thread. Requires acpi (the LAPIC MMIO window is gated on
+    // acpi_enabled; without it the guest could never start or interrupt
+    // the secondary CPUs)
+    const cpus = options.cpus === undefined ? 1 : options.cpus;
+    const cpus_valid = Number.isInteger(cpus) && cpus >= 1 && cpus <= 255;
+    dbg_assert(cpus_valid, "options.cpus must be an integer between 1 and 255");
+    const cpus_without_acpi = cpus_valid && cpus > 1 && !options.acpi;
+    dbg_assert(!cpus_without_acpi, "options.cpus > 1 requires acpi: true");
+    if(cpus_without_acpi)
+    {
+        dbg_log("cpus option clamped to 1: cpus > 1 requires acpi: true " +
+            "(the LAPIC MMIO window is gated on acpi_enabled, so secondary " +
+            "CPUs could never be started or interrupted)");
+    }
+    settings.cpus = cpus_valid && !cpus_without_acpi ? cpus : 1;
     settings.virtio_balloon = options.virtio_balloon;
     settings.virtio_console = !!options.virtio_console;
     if(options.virtio_gpu &&
@@ -648,11 +990,58 @@ V86.prototype.continue_init = async function(emulator, options)
 
         await this.v86.init(settings);
 
+        // Stages W2/W3 (docs/smp-phase4-design.md §9): hand execution to
+        // the worker(s). Topology resolution: "percpu" (or "auto" with
+        // cpus > 1) spawns one worker per vCPU — topology (b); otherwise
+        // the whole machine runs in one worker — topology (c). Spawn
+        // failures degrade one ladder step under "auto" (time-sliced over
+        // the already-created imported memory) and fail loudly under
+        // `true`. The "smp-mode" event below reports whatever this
+        // resolves to.
+        let topology_effective = null;
+        if(this.smp_workers_effective)
+        {
+            topology_effective =
+                this.smp_worker_topology === "percpu" ||
+                this.smp_worker_topology === "auto" && emulator.cpu.smp_cpus > 1
+                    ? "percpu" : "machine";
+            try
+            {
+                await this.smp_start(emulator, settings, topology_effective);
+            }
+            catch(e)
+            {
+                if(this.smp_workers === true)
+                {
+                    this.emulator_bus.send("emulator-error", e);
+                    throw e;
+                }
+                dbg_log("smp_workers \"auto\" degraded to time-sliced: " +
+                    "worker spawn failed: " + e);
+                this.smp_workers_effective = false;
+                topology_effective = null;
+            }
+        }
+        this.smp_mode = {
+            "execution": this.smp_worker_host ? "workers" : "time-sliced",
+            "topology": topology_effective,
+            "memory_model": this.smp_worker_host ? this.smp_memory_model : null,
+            "cpus_effective": emulator.cpu.smp_cpus,
+            "guest_memory": {
+                "backend": emulator.cpu.guest_memory ? "imported" : "linear",
+                "shared": emulator.cpu.guest_memory_shared,
+            },
+        };
+        this.emulator_bus.send("smp-mode", this.smp_mode);
+
         this.modem && this.modem.initialize();
 
         if(settings.initial_state)
         {
-            emulator.restore_state(settings.initial_state);
+            // worker-aware (Stage W4): under smp_workers the workers are
+            // still parked here (run() only fires on emulator-started), so
+            // the restore distributes the state before anything executes
+            await this.restore_state_internal(settings.initial_state);
 
             // The GC can't free settings, since it is referenced from
             // several closures. This isn't needed anymore, so we delete it
@@ -667,6 +1056,94 @@ V86.prototype.continue_init = async function(emulator, options)
 
         this.emulator_bus.send("emulator-loaded");
     }
+};
+
+/**
+ * Compile the main module and gram ONCE on this thread and hand the
+ * workers the compiled `WebAssembly.Module`s rather than the bytes.
+ *
+ * A Module survives structured clone, and engines share the compiled code
+ * across the agent cluster instead of recompiling per worker — measured on
+ * build/v86-multimem.wasm (2.25 MB) under Node 24 / V8 13.6: bringing up
+ * four workers costs 15.1 ms against 114.0 ms when each compiles its own
+ * copy, and sixteen workers 121.5 ms against 2564.6 ms with resident memory
+ * of 180 MB against 461 MB. Host compile time stays flat in the worker
+ * count. Delivery also stops copying the multi-MB ArrayBuffer into every
+ * worker (0.14 ms per worker vs 0.94 ms).
+ *
+ * Cached: a restore or a second start must not recompile.
+ * @return {!Promise<{wasm_module: !WebAssembly.Module, gram_module: !WebAssembly.Module}>}
+ */
+V86.prototype.smp_compile_modules = async function()
+{
+    if(!this.smp_modules)
+    {
+        const [wasm_module, gram_module] = await Promise.all([
+            WebAssembly.compile(this.wasm_source),
+            WebAssembly.compile(this.gram_bytes),
+        ]);
+        this.smp_modules = { wasm_module, gram_module };
+    }
+    return this.smp_modules;
+};
+
+/**
+ * Spawn the worker(s) for the selected topology, hand each the compiled
+ * modules and the shared guest memory, and rewire this thread's CPU object
+ * into the matching device host. Resolves when every worker reports ready;
+ * rejects on any spawn/instantiate failure, tearing down whatever was
+ * spawned (the caller decides between fail-stop under `smp_workers: true`
+ * and ladder degradation under "auto").
+ *
+ * One path for both topologies: "percpu" (b) puts each vCPU in its own
+ * worker and keeps the authoritative chipset on this instance; "machine"
+ * (c) puts the whole machine in one worker. Everything that differs is
+ * behind the host objects themselves (attach_to / on_spawn_teardown), so
+ * this function cannot drift between the two the way the two former
+ * copies did.
+ * @param {!Object} emulator
+ * @param {!Object} settings
+ * @param {string} topology "percpu" | "machine"
+ * @return {!Promise}
+ */
+V86.prototype.smp_start = async function(emulator, settings, topology)
+{
+    const cpu = emulator.cpu;
+    if(!this.wasm_source)
+    {
+        throw new Error("smp_workers requires the built-in wasm loader " +
+            "(the workers instantiate the same module bytes)");
+    }
+    const modules = await this.smp_compile_modules();
+    const host = topology === "percpu"
+        ? new SMPVcpuHost(cpu, this.emulator_bus, cpu.guest_memory, cpu.smp_cpus)
+        : new SMPWorkerHost(cpu, this.emulator_bus, cpu.guest_memory, cpu.smp_cpus);
+    host.cpu_exception_hook = n => this.cpu_exception_hook(n);
+    try
+    {
+        await host.start({
+            worker_url: this.smp_worker_url,
+            wasm_module: modules.wasm_module,
+            gram_module: modules.gram_module,
+            guest_memory: cpu.guest_memory,
+            acpi: !!settings.acpi,
+            disable_jit: !!settings.disable_jit,
+            cpuid_level: settings.cpuid_level,
+            memory_model: this.smp_memory_model,
+        });
+    }
+    catch(e)
+    {
+        host.spawn_teardown();
+        throw e;
+    }
+    host.attach_to(cpu);
+    host.on_fatal = () => this.stop();
+    this.smp_worker_host = host;
+    // the §8 command protocol follows the emulator lifecycle: run resumes
+    // the machine loop, stop parks it at the next slice boundary
+    this.bus.register("emulator-started", function() { host.run(); }, this);
+    this.bus.register("emulator-stopped", function() { host.park(); }, this);
 };
 
 /**
@@ -728,7 +1205,25 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                     };
                     env["dbg_trace_from_wasm"] = () => console.trace();
 
-                    wasm = new WebAssembly.Instance(new WebAssembly.Module(e.data), { "env": env });
+                    const module = new WebAssembly.Module(e.data);
+
+                    // stub the multimem build's gram_* guest-RAM accessors:
+                    // zstd decompression is self-contained in the module's
+                    // own memory, so they are the only imports legitimately
+                    // absent here and none of them are expected to be
+                    // called. Anything else unknown must keep producing a
+                    // hard LinkError at instantiation.
+                    for(const import_entry of WebAssembly.Module.imports(module))
+                    {
+                        const name = import_entry["name"];
+                        if(import_entry["module"] === "env" && import_entry["kind"] === "function" &&
+                            name.startsWith("gram_") && !env[name])
+                        {
+                            env[name] = () => console.error("zstd worker unexpectedly called " + name);
+                        }
+                    }
+
+                    wasm = new WebAssembly.Instance(module, { "env": env });
                     return;
                 }
 
@@ -751,7 +1246,11 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
         const url = URL.createObjectURL(new Blob(["(" + the_worker.toString() + ")()"], { type: "text/javascript" }));
         this.zstd_worker = new Worker(url);
         URL.revokeObjectURL(url);
-        this.zstd_worker.postMessage(this.wasm_source, [this.wasm_source]);
+        // under worker execution the module bytes must stay intact for the
+        // machine-worker spawn (smp_worker_start), so clone instead of
+        // transferring them to the zstd worker
+        this.zstd_worker.postMessage(this.wasm_source,
+            this.smp_workers_effective ? [] : [this.wasm_source]);
     }
 
     return new Promise(resolve => {
@@ -840,6 +1339,12 @@ V86.prototype.destroy = async function()
 {
     await this.stop();
 
+    if(this.smp_worker_host)
+    {
+        await this.smp_worker_host.terminate();
+        this.smp_worker_host = null;
+    }
+
     const virtio_gpu = this.v86.cpu.devices.virtio_gpu;
     if(virtio_gpu)
     {
@@ -905,7 +1410,47 @@ V86.prototype.remove_listener = function(event, listener)
 V86.prototype.restore_state = async function(state)
 {
     dbg_assert(arguments.length === 1);
-    this.v86.restore_state(state);
+    await this.restore_state_internal(state);
+};
+
+/**
+ * Worker-aware restore (XWAH-9 Phase 4 Stage W4, design §7). Without a
+ * worker host this is today's synchronous restore. Under smp_workers:
+ * quiesce all workers (each parks at its next slice boundary; a mid-RPC
+ * worker completes the RPC first — the device host keeps servicing),
+ * validate and restore the main instance exactly as today (fail-fast
+ * intact: a rejected image leaves the machine unharmed and resumed), then
+ * distribute each worker's state regions and resume.
+ * @param {ArrayBuffer} state
+ */
+V86.prototype.restore_state_internal = async function(state)
+{
+    const host = this.smp_worker_host;
+    if(!host)
+    {
+        this.v86.restore_state(state);
+        return;
+    }
+    // serialized against any other in-flight lifecycle operation — a
+    // guest-triggered reboot landing mid-restore would otherwise overwrite
+    // the RESTORE command word with RESET (smp_host_core.js lifecycle)
+    return host.lifecycle(async () =>
+    {
+        const was_running = await host.quiesce();
+        try
+        {
+            this.v86.restore_state(state);
+        }
+        catch(e)
+        {
+            // the fail-fast validation rejected the image before any
+            // mutation: the quiesced machine is intact, resume it
+            host.resume(was_running);
+            throw e;
+        }
+        await host.distribute_restore();
+        host.resume(was_running);
+    });
 };
 
 /**
@@ -916,7 +1461,35 @@ V86.prototype.restore_state = async function(state)
 V86.prototype.save_state = async function()
 {
     dbg_assert(arguments.length === 0);
-    return this.v86.save_state();
+    const host = this.smp_worker_host;
+    if(!host)
+    {
+        return this.v86.save_state();
+    }
+    // XWAH-9 Phase 4 Stage W4 (design §7): quiesce, pull every worker's
+    // state regions into the main instance, run today's get_state
+    // unchanged (v7 extends untouched), resume. The capture runs inside
+    // assemble_save, synchronously after its final in-flight-interrupt
+    // drain — the device tick must not slip a vector into the control
+    // region between drain and capture.
+    // serialized against reboot/restore/destroy (smp_host_core.js
+    // lifecycle): a guest reset port write fires reboot_internal from
+    // inside a mailbox dispatch, i.e. at any instant, and a reboot landing
+    // between this quiesce and its capture used to clobber the SAVE
+    // command word with RESET — hanging this save until its 60 s deadline
+    // or, worse, capturing a machine that had already rebooted
+    return host.lifecycle(async () =>
+    {
+        const was_running = await host.quiesce();
+        try
+        {
+            return await host.assemble_save(() => this.v86.save_state());
+        }
+        finally
+        {
+            host.resume(was_running);
+        }
+    });
 };
 
 /**
@@ -925,6 +1498,13 @@ V86.prototype.save_state = async function()
  */
 V86.prototype.get_instruction_counter = function()
 {
+    if(this.smp_worker_host && this.smp_worker_host.sum_instruction_counters)
+    {
+        // topology (b): the guest executes in the vCPU workers; sum the
+        // per-worker published counters (design §8 — approximate, per
+        // slice). The main instance's own counter stays 0.
+        return this.smp_worker_host.sum_instruction_counters();
+    }
     if(this.v86)
     {
         return this.v86.cpu.instruction_counter[0] >>> 0;
@@ -1570,7 +2150,19 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
  */
 V86.prototype.read_memory = function(offset, length)
 {
-    return this.v86.cpu.read_blob(offset, length);
+    const cpu = this.v86.cpu;
+    const blob = cpu.read_blob(offset, length);
+    if(cpu.guest_memory_shared)
+    {
+        // Guest RAM is a shared imported memory (guest_memory_backend
+        // "imported" + shared): browsers reject SharedArrayBuffer-backed
+        // views in TextDecoder/Blob/fetch etc. (docs/smp-phase3-design.md
+        // §1 S4), so hand embedders a copy instead of the live view.
+        // guest_memory_shared is the flag the starter plumbed through wm —
+        // no buffer sniffing (the SharedArrayBuffer global can be hidden).
+        return blob.slice();
+    }
+    return blob;
 };
 
 /**

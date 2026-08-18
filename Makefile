@@ -7,7 +7,7 @@ INSTRUCTION_TABLES=src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
 		   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs \
 
 # Only the dependencies common to both generate_{jit,interpreter}.js
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js, $(wildcard gen/*.js))
+GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js gen/generate_gram_wasm.js, $(wildcard gen/*.js))
 JIT_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_jit.js
 INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
 ANALYZER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_analyzer.js
@@ -97,7 +97,11 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
 	      print_stats.js filestorage.js modem.js virtio_gpu_backend.js virtio_gpu_wgpu_backend.js \
-	      virtio_gpu_webgpu_backend.js
+	      virtio_gpu_webgpu_backend.js smpctl.js gram_env.js smp_host_core.js \
+	      smp_worker_host.js smp_vcpu_host.js
+# NOTE: src/browser/vcpu_worker.js (XWAH-9 Phase 4) is deliberately NOT in
+# BROWSER_FILES: it is a standalone worker entry point (loaded as its own
+# module worker / worker_thread), not part of the bundled library.
 
 RUST_FILES=$(shell find src/rust/ -name '*.rs') \
 	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
@@ -215,6 +219,17 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
+# guest-RAM accessor modules for the multimem build (XWAH-9 Phase 3 Stage 3).
+# Stage 5's guest_memory_backend "imported" loads them next to the main
+# artifact at runtime; shipping them with release bundles is Stage 6
+build/gram.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant nonshared
+build/gram-shared.wasm: gen/generate_gram_wasm.js gen/util.js
+	./gen/generate_gram_wasm.js --output-dir build/ --variant shared
+
+.PHONY: gram-wasm
+gram-wasm: build/gram.wasm build/gram-shared.wasm
+
 .PHONY: virtio-gpu-wgpu
 .NOTPARALLEL: virtio-gpu-wgpu
 virtio-gpu-wgpu: $(VIRTIO_GPU_WGPU_JS) $(VIRTIO_GPU_WGPU_WASM)
@@ -247,6 +262,26 @@ build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Carg
 	mkdir -p build/
 	cargo rustc --release $(CARGO_FLAGS_SAFE)
 	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-fallback.wasm || true
+
+# multimem build (XWAH-9 Phase 3 Stage 4): guest RAM is an imported second
+# wasm memory, reached through gram.wasm's accessor exports (`make gram-wasm`)
+# and memidx-1 JIT code. Uses the same cargo artifact path as the default
+# build, so a default and a multimem build invalidate each other's cargo
+# cache; the copied build/*.wasm artifacts stay distinct.
+build/v86-multimem.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+	cargo rustc --release --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-multimem.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86-multimem.wasm -o build/v86-multimem.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem.wasm
+
+build/v86-multimem-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+	mkdir -p build/
+	-BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
+	cargo rustc --features guest-ram-import $(CARGO_FLAGS)
+	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-multimem-debug.wasm
+	BLOCK_SIZE=K ls -l build/v86-multimem-debug.wasm
 
 debug-with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
@@ -294,6 +329,9 @@ clean:
 
 run:
 	python3 -m http.server 2> /dev/null
+
+run-isolated:
+	python3 tools/coi-server.py 2> /dev/null
 
 update_version:
 	set -e ;\
@@ -360,12 +398,14 @@ kvm-unit-test: build/v86-debug.wasm
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	CPUS=2 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/smptest.flat
 
 kvm-unit-test-release: build/libv86.mjs build/v86.wasm
 	tests/kvm-unit-tests/build.sh
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+	TEST_RELEASE_BUILD=1 CPUS=2 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/smptest.flat
 
 expect-tests: build/v86-debug.wasm build/libwabt.cjs
 	make -C tests/expect/tests
@@ -421,6 +461,15 @@ virtio-gpu-codex-accelerated-test: build/libv86.mjs build/v86.wasm virtio-gpu-wg
 virtio-gpu-codex-benchmark-accelerated: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu virtio-gpu-codex-image
 	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_SCENARIO=benchmark-accelerated \
 		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
+
+# XWAH-9: the multi-core appliance end to end — four worker vCPUs in a real
+# browser, the guest's SMP readiness contract, and a canvas that has to hold
+# real content AND change in response to typed input. Needs the multimem
+# artifact (worker mode does not load build/v86.wasm) and the image built by
+# multicore-ghostty-codex-image.
+multicore-ghostty-codex-browser-test: build/libv86.mjs build/v86-multimem.wasm \
+		build/gram.wasm build/gram-shared.wasm
+	./tests/browser/multicore_ghostty_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
@@ -443,12 +492,57 @@ virtio-gpu-webgpuvirt-triangle-test: build/libv86.mjs build/v86.wasm virtio-gpu-
 virtio-gpu-ready-snapshot-test: build/libv86.mjs build/v86.wasm
 	V86_GPU_BROWSER_MATRIX=webgpu-js:xorg V86_GPU_BROWSER_SNAPSHOT=1 ./tests/browser/virtio_gpu_acceptance.js
 
-rust-test: $(RUST_FILES)
+rust-test: $(RUST_FILES) build/gram.wasm build/gram-shared.wasm
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
+	./tests/rust/verify-wasmgen-multimem-output.js
+	./tests/rust/verify-gram-wasm.js
 
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
+
+.PHONY: threads-test
+threads-test: build/gram.wasm build/gram-shared.wasm
+	./tests/threads/atomics-exactness.js
+	./tests/threads/guest-lock-exactness.js
+	./tests/threads/mailbox-protocol.js
+	./tests/threads/index-data-pairs.js
+	./tests/threads/multimem-instance.js
+	./tests/threads/plain-race-vs-atomic.js
+	./tests/threads/shared-view-coherence.js
+	./tests/threads/worker-skeleton.js
+	./tests/threads/machine-in-worker.js
+	./tests/threads/vcpu-workers-lock.js
+	./tests/threads/vcpu-workers-smp.js
+	./tests/threads/worker-save-restore.js
+	./tests/threads/worker-reboot.js
+	./tests/threads/tso-litmus.js
+	./tests/threads/invlpg-storm.js
+	./tests/threads/worker-failure.js
+
+# multimem variant (XWAH-9 Phase 3 Stage 5, named by design doc §4 Stage 6):
+# the imported-guest-memory backend end-to-end — real guests through the
+# public API plus the Layer B cross-thread test (which threads-test skips
+# unless the multimem artifact happens to exist; here it is a hard
+# dependency). NOTE: the multimem and default builds share the cargo
+# artifact path (see build/v86-multimem.wasm above), so this target
+# invalidates a previous default build's cargo cache and vice versa — the
+# copied build/*.wasm artifacts stay distinct.
+.PHONY: multimem-tests
+multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
+	./tests/api/multimem-negative.js
+	./tests/api/multimem.js
+	./tests/threads/guest-lock-exactness.js
+	./tests/threads/multimem-instance.js
+	./tests/threads/worker-skeleton.js
+	./tests/threads/machine-in-worker.js
+	./tests/threads/vcpu-workers-lock.js
+	./tests/threads/vcpu-workers-smp.js
+	./tests/threads/worker-save-restore.js
+	./tests/threads/worker-reboot.js
+	./tests/threads/tso-litmus.js
+	./tests/threads/invlpg-storm.js
+	./tests/threads/worker-failure.js
 
 api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/clean-shutdown.js
@@ -461,10 +555,16 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/reboot.js
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
+	./tests/api/smp.js
+	./tests/api/smp-state.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test multimem-tests
 	# Skipping:
 	# - devices-test (hangs)
+	# multimem-tests runs last: its build/v86-multimem-debug.wasm dependency
+	# shares the cargo artifact path with the default build (see the
+	# build/v86-multimem.wasm comment), so ordering it after every
+	# default-artifact consumer avoids extra cargo cache invalidations
 
 eslint:
 	eslint src tests gen lib examples tools
@@ -497,6 +597,13 @@ virtio-gpu-desktop-image:
 virtio-gpu-codex-image:
 	tools/docker/virtio-gpu-alpine-codex/build.sh
 
+# Builds into images/multicore-ghostty-codex-* — a distinct prefix from
+# virtio-gpu-codex-image on purpose: images/ is a shared, gitignored
+# directory, so two branches writing one prefix means the last build silently
+# wins and the other branch boots a guest it never described.
+multicore-ghostty-codex-image:
+	tools/docker/multicore-ghostty-codex/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -516,5 +623,6 @@ denodoc:
 	virtio-gpu-codex-benchmark virtio-gpu-codex-benchmark-accelerated \
 	virtio-gpu-3d-transport-test \
 	virtio-gpu-3d-triangle-test virtio-gpu-3d-shader-test \
-	virtio-gpu-webgpuvirt-triangle-test \
-	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image
+	virtio-gpu-webgpuvirt-triangle-test virtio-gpu-color-test \
+	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image \
+	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test

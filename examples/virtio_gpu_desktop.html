@@ -136,6 +136,11 @@ import {
 } from "../src/browser/ready_state_snapshot.js";
 
 const params = new URLSearchParams(location.search);
+// Experimental (XWAH-9): multi-core. cpus > 1 requires acpi; workers=1
+// runs one worker per vCPU over shared guest memory (needs COI + the
+// multimem artifacts), otherwise time-sliced on one thread.
+const cpus = Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
+const smp_workers = params.get("workers") === "1";
 const mode = params.get("desktop") === "wayland" ? "wayland" : "xorg";
 const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
 const benchmark = params.has("benchmark") ?
@@ -245,9 +250,17 @@ else
 
 const initial_state = restored_snapshot ? { buffer: restored_snapshot.state } : null;
 const emulator = new V86({
-    wasm_path: "../build/v86.wasm",
+    // the artifact directory (for gram.wasm too) derives from wasm_path,
+    // so name the matching artifact explicitly for both modes
+    wasm_path: smp_workers ? "../build/v86-multimem.wasm" : "../build/v86.wasm",
     memory_size,
     vga_memory_size,
+    cpus,
+    acpi: cpus > 1,
+    ...(smp_workers ? {
+        smp_workers: true,
+        smp_worker_url: "../src/browser/vcpu_worker.js",
+    } : {}),
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {

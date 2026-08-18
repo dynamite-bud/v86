@@ -1,0 +1,7 @@
+command = /usr/local/bin/v86-codex-session
+maximize = true
+window-decoration = false
+font-family = DejaVu Sans Mono
+font-size = 13
+background = 101216
+foreground = f1f3f5

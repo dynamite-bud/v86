@@ -7,6 +7,9 @@ edition = "2021"
 [features]
 default = []
 profiler = []
+# XWAH-9 Phase 3: guest RAM as an imported second wasm memory (Stage 4 flips
+# the runtime onto it; Stage 2's wasm_builder support is gated on it or test)
+guest-ram-import = []
 
 [lib]
 crate-type = ["cdylib"]

@@ -290,6 +290,10 @@ impl Pic {
     }
 }
 
+// Whether the master PIC is asserting INTR (an unmasked request is
+// pending); used to decide if a device IRQ needs to wake the BSP
+pub fn has_requested_irq() -> bool { get_pic().master.get_irq().is_some() }
+
 // called by the cpu
 pub fn pic_acknowledge_irq() -> Option<u8> {
     let mut pic = get_pic();

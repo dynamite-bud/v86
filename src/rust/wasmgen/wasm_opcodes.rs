@@ -219,3 +219,42 @@ c!(MEM_NO_ALIGN, 0);
 c!(MEM_ALIGN16, 1);
 c!(MEM_ALIGN32, 2);
 c!(MEM_ALIGN64, 3);
+
+// Multi-memory (https://github.com/WebAssembly/multi-memory): flag bit in the
+// memarg flags byte indicating that an explicit memory index follows.
+// Encoding order is flags|0x40, then memidx LEB, then offset LEB (the other
+// order does not validate; verified empirically in XWAH-9 spike S1)
+c!(MEM_MULTI_MEMORY, 0x40);
+
+// memory limits flags (https://webassembly.github.io/threads/core/binary/types.html#limits):
+// 0x01 = minimum and maximum present, 0x03 = minimum and maximum present + shared
+c!(MEM_LIMITS_HAS_MAX, 0x01);
+c!(MEM_LIMITS_SHARED_HAS_MAX, 0x03);
+
+// Threads proposal (https://webassembly.github.io/threads/core/binary/instructions.html):
+// atomic instructions are 0xFE-prefixed; the constants below are the second byte.
+// Cross-checked against the hand-assembled modules of XWAH-9 spike S1
+c!(OP_ATOMIC_PREFIX, 0xfe);
+c!(OP_ATOMICFENCE, 0x03);
+c!(OP_I32ATOMICRMWADD, 0x1e);
+c!(OP_I32ATOMICRMW8ADDU, 0x20);
+c!(OP_I32ATOMICRMW16ADDU, 0x21);
+c!(OP_I32ATOMICRMWSUB, 0x25);
+c!(OP_I32ATOMICRMW8SUBU, 0x27);
+c!(OP_I32ATOMICRMW16SUBU, 0x28);
+c!(OP_I32ATOMICRMWAND, 0x2c);
+c!(OP_I32ATOMICRMW8ANDU, 0x2e);
+c!(OP_I32ATOMICRMW16ANDU, 0x2f);
+c!(OP_I32ATOMICRMWOR, 0x33);
+c!(OP_I32ATOMICRMW8ORU, 0x35);
+c!(OP_I32ATOMICRMW16ORU, 0x36);
+c!(OP_I32ATOMICRMWXOR, 0x3a);
+c!(OP_I32ATOMICRMW8XORU, 0x3c);
+c!(OP_I32ATOMICRMW16XORU, 0x3d);
+c!(OP_I32ATOMICRMWXCHG, 0x41);
+c!(OP_I32ATOMICRMW8XCHGU, 0x43);
+c!(OP_I32ATOMICRMW16XCHGU, 0x44);
+c!(OP_I32ATOMICRMWCMPXCHG, 0x48);
+c!(OP_I32ATOMICRMW8CMPXCHGU, 0x4a);
+c!(OP_I32ATOMICRMW16CMPXCHGU, 0x4b);
+c!(OP_I64ATOMICRMWCMPXCHG, 0x49);

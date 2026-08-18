@@ -3,6 +3,11 @@ import { dbg_assert, dbg_log } from "./log.js";
 import { CPU } from "./cpu.js";
 
 const STATE_VERSION = 6;
+// Version written when the image carries the trailing per-vCPU slot
+// (cpu.smp_cpus > 1, XWAH-9): builds without SMP support then reject such
+// images cleanly at the version check instead of failing mid-restore.
+// cpus=1 images stay version 6 and byte-identical; restore accepts both.
+const STATE_VERSION_SMP = 7;
 const STATE_MAGIC = 0x86768676|0;
 const STATE_INDEX_MAGIC = 0;
 const STATE_INDEX_VERSION = 1;
@@ -13,7 +18,7 @@ const STATE_INFO_BLOCK_START = 16;
 const ZSTD_MAGIC = 0xFD2FB528;
 
 /** @constructor */
-function StateLoadError(msg)
+export function StateLoadError(msg)
 {
     this.message = msg;
 }
@@ -179,7 +184,7 @@ export function save_state(cpu)
     );
 
     header_block[STATE_INDEX_MAGIC] = STATE_MAGIC;
-    header_block[STATE_INDEX_VERSION] = STATE_VERSION;
+    header_block[STATE_INDEX_VERSION] = cpu.smp_cpus > 1 ? STATE_VERSION_SMP : STATE_VERSION;
     header_block[STATE_INDEX_TOTAL_LEN] = total_size;
     header_block[STATE_INDEX_INFO_LEN] = info_block.length;
 
@@ -217,11 +222,12 @@ export function restore_state(cpu, state)
             throw new StateLoadError("Invalid header: " + h(header_block[STATE_INDEX_MAGIC] >>> 0));
         }
 
-        if(header_block[STATE_INDEX_VERSION] !== STATE_VERSION)
+        if(header_block[STATE_INDEX_VERSION] !== STATE_VERSION &&
+            header_block[STATE_INDEX_VERSION] !== STATE_VERSION_SMP)
         {
             throw new StateLoadError(
                     "Version mismatch: dump=" + header_block[STATE_INDEX_VERSION] +
-                    " we=" + STATE_VERSION);
+                    " we=" + STATE_VERSION + " or " + STATE_VERSION_SMP);
         }
 
         if(check_length && header_block[STATE_INDEX_TOTAL_LEN] !== len)

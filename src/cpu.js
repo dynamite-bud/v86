@@ -13,6 +13,7 @@ import {
 } from "./const.js";
 import { h, view, pads, Bitmap, dump_file } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { StateLoadError } from "./state.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI } from "./acpi.js";
@@ -73,6 +74,44 @@ export function CPU(bus, wm, stop_idling)
     const memory = this.wm.exports.memory;
 
     this.wasm_memory = memory;
+
+    // XWAH-9 Phase 3 Stage 5: under guest_memory_backend "imported" guest
+    // RAM is a separate WebAssembly.Memory (created by starter.js before
+    // instantiation) rather than a region of the module's linear memory
+    this.guest_memory = this.wm.guest_memory || null;
+
+    // Whether the imported guest memory is SharedArrayBuffer-backed,
+    // plumbed by starter.js alongside guest_memory itself: the starter
+    // chose the shared-ness, so nothing here sniffs the buffer's type (the
+    // SharedArrayBuffer global can be hidden while shared memory still
+    // works). Consumers: set_guest_memory_shared below, the read_memory
+    // copy-first shim (starter.js) and the debug memory dump
+    // (browser/main.js).
+    this.guest_memory_shared = !!this.wm.guest_memory_shared;
+
+    if(this.guest_memory)
+    {
+        if(!this.wm.exports["set_guest_memory_shared"])
+        {
+            // only multimem builds export this; a default artifact would
+            // silently allocate guest RAM in its own linear memory instead
+            throw new Error("guest_memory_backend \"imported\" requires the multimem wasm artifact " +
+                "(build/v86-multimem[-debug].wasm), but the loaded module is a default build");
+        }
+        // global-hiding-proof cross-check of the plumbed flag against the
+        // actual backing
+        dbg_assert(
+            (Object.prototype.toString.call(this.guest_memory.buffer) ===
+                "[object SharedArrayBuffer]") === this.guest_memory_shared,
+            "guest_memory_shared flag must match the guest memory's backing");
+        if(this.guest_memory_shared)
+        {
+            // must precede the first JIT compile: generated modules declare
+            // their "e"."g" guest-memory import shared to match the actual
+            // memory (LinkError otherwise)
+            this.wm.exports["set_guest_memory_shared"](1);
+        }
+    }
 
     this.memory_size = view(Uint32Array, memory, 812, 1);
 
@@ -333,6 +372,14 @@ CPU.prototype.create_jit_imports = function()
 
     jit_imports["m"] = this.wm.exports["memory"];
 
+    if(this.wm.guest_memory)
+    {
+        // multimem build: JIT-generated modules are two-memory modules that
+        // import guest RAM as "e"."g" (memidx 1) next to the instance
+        // memory "e"."m" (src/rust/wasmgen/wasm_builder.rs)
+        jit_imports["g"] = this.wm.guest_memory;
+    }
+
     for(const name of Object.keys(this.wm.exports))
     {
         if(name.startsWith("_") || name.startsWith("zstd") || name.endsWith("_js"))
@@ -395,6 +442,21 @@ CPU.prototype.wasm_patch = function()
 
     this.set_cpuid_level = get_import("set_cpuid_level");
 
+    // SMP exports (XWAH-9): optional because wasm builds that predate
+    // set_smp_cpus legitimately lack them — every caller guards on
+    // presence and falls back to single-CPU behavior
+    this.set_smp_cpus = get_optional_import("set_smp_cpus");
+    this.get_firmware_cpus = get_optional_import("get_firmware_cpus");
+    this.rearm_cpu_event_halt = get_optional_import("rearm_cpu_event_halt");
+
+    // per-vCPU save/restore region (XWAH-9, docs/smp-phase2-design.md
+    // §JS-side impacts); missing on wasm builds that predate set_smp_cpus
+    this.get_vcpu_state_addr = get_optional_import("get_vcpu_state_addr");
+    this.get_vcpu_state_size = get_optional_import("get_vcpu_state_size");
+    this.get_current_vcpu = get_optional_import("get_current_vcpu");
+    this.vcpu_prepare_save = get_optional_import("vcpu_prepare_save");
+    this.vcpu_finish_restore = get_optional_import("vcpu_finish_restore");
+
     this.device_raise_irq = get_import("device_raise_irq");
     this.device_lower_irq = get_import("device_lower_irq");
 
@@ -421,6 +483,7 @@ CPU.prototype.wasm_patch = function()
     this.get_pic_addr_master = get_import("get_pic_addr_master");
     this.get_pic_addr_slave = get_import("get_pic_addr_slave");
     this.get_apic_addr = get_import("get_apic_addr");
+    this.reset_secondary_apics = get_import("reset_secondary_apics");
     this.get_ioapic_addr = get_import("get_ioapic_addr");
 
     this.zstd_create_ctx = get_import("zstd_create_ctx");
@@ -573,6 +636,28 @@ CPU.prototype.get_state = function()
     state[91] = this.devices.parallel1;
     state[92] = this.devices.virtio_gpu;
 
+    if(this.smp_cpus > 1)
+    {
+        // Trailing vcpu slot (XWAH-9, docs/smp-phase2-design.md §JS-side
+        // impacts): [u32 smp_cpus][u32 current_vcpu] header followed by
+        // the raw per-vCPU array (N × Vcpu: save area, run state, wake and
+        // INIT/SIPI latches; layout in vcpu.rs). Only assigned when
+        // smp_cpus > 1 so cpus=1 state images stay byte-identical. Built
+        // last: vcpu_prepare_save syncs the live block — including
+        // current_tsc, written by store_current_tsc above — into the
+        // current vCPU's save area, making the region agree with the
+        // per-field slots captured from the live block.
+        this.vcpu_prepare_save();
+        const region = new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.get_vcpu_state_size());
+        const vcpu_state = new Uint8Array(8 + region.length);
+        const header = new DataView(vcpu_state.buffer, 0, 8);
+        header.setUint32(0, this.smp_cpus, true);
+        header.setUint32(4, this.get_current_vcpu(), true);
+        vcpu_state.set(region, 8);
+        state[93] = vcpu_state;
+    }
+
     return state;
 };
 
@@ -619,7 +704,9 @@ CPU.prototype.get_state_pic = function()
 CPU.prototype.get_state_apic = function()
 {
     const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
-    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+    // one struct per vCPU LAPIC (XWAH-9); byte-identical to the old
+    // single-struct image when smp_cpus is 1
+    return new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), this.smp_cpus * APIC_STRUCT_SIZE);
 };
 
 CPU.prototype.get_state_ioapic = function()
@@ -630,6 +717,148 @@ CPU.prototype.get_state_ioapic = function()
 
 CPU.prototype.set_state = function(state)
 {
+    const VCPU_STATE_HEADER_SIZE = 8; // [u32 smp_cpus][u32 current_vcpu]
+    // Per-vCPU struct size and trailing-field offsets, derived from the
+    // wasm module when state[93] is present. The Rust layout (vcpu.rs,
+    // repr(C) Vcpu) is the authority: [u8; 1216] save_area, then the
+    // run_state/wake_pending/pending_init/pending_sipi bytes and the free
+    // pending_sipi_vector u8.
+    let vcpu_struct_size = 0;
+    let vcpu_run_state_offset = 0;
+
+    if(state[46] instanceof Uint8Array)
+    {
+        // validate before any state is applied: throwing mid-restore would
+        // leave a half-restored machine behind
+        const APIC_STRUCT_SIZE = 4 * 46; // keep in sync with apic.rs
+        if(state[46].length !== APIC_STRUCT_SIZE &&
+            state[46].length !== this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state[46].length +
+                " (expected " + APIC_STRUCT_SIZE + " or " +
+                this.smp_cpus * APIC_STRUCT_SIZE + "; was the state image " +
+                "saved with a different cpus setting?)");
+        }
+    }
+
+    // validate the trailing vcpu slot in the same pre-mutation block: a
+    // cpus mismatch in either direction must fail before anything is
+    // restored (XWAH-9, docs/smp-phase2-design.md §JS-side impacts)
+    let vcpu_current = -1; // >= 0 exactly when state[93] passed validation
+    if(state[93] === undefined || state[93] === null)
+    {
+        // note: an unset trailing array slot deserializes as undefined
+        // today, but would round-trip through JSON as null if a later
+        // slot is ever added behind it
+        if(this.smp_cpus > 1)
+        {
+            throw new StateLoadError(
+                "State image has no vcpu contexts (expected " +
+                this.smp_cpus + "); was it saved with cpus=1 or by an " +
+                "older version?");
+        }
+    }
+    else
+    {
+        if(!this.vcpu_finish_restore)
+        {
+            throw new StateLoadError(
+                "State image has vcpu contexts, but the wasm module " +
+                "predates vcpu save/restore");
+        }
+        if(!(state[93] instanceof Uint8Array) ||
+            state[93].length < VCPU_STATE_HEADER_SIZE)
+        {
+            throw new StateLoadError("Unexpected vcpu state: " + state[93]);
+        }
+        vcpu_struct_size = this.get_vcpu_state_size() / this.smp_cpus;
+        dbg_assert(Number.isInteger(vcpu_struct_size),
+            "vcpu state size not divisible by cpu count");
+        vcpu_run_state_offset = vcpu_struct_size - 5;
+        const header = new DataView(
+            state[93].buffer, state[93].byteOffset, VCPU_STATE_HEADER_SIZE);
+        const image_cpus = header.getUint32(0, true);
+        vcpu_current = header.getUint32(4, true);
+        if(image_cpus !== this.smp_cpus)
+        {
+            throw new StateLoadError(
+                "State image was saved with cpus=" + image_cpus +
+                ", but the machine has cpus=" + this.smp_cpus);
+        }
+        if(vcpu_current >= image_cpus ||
+            state[93].length !== VCPU_STATE_HEADER_SIZE + this.smp_cpus * vcpu_struct_size)
+        {
+            throw new StateLoadError(
+                "Unexpected vcpu state length " + state[93].length +
+                " or current vcpu " + vcpu_current);
+        }
+        for(let i = 0; i < this.smp_cpus; i++)
+        {
+            // an out-of-range run_state discriminant or a bool byte other
+            // than 0/1 would be undefined behavior once Rust reads the
+            // struct back (run_state, then the wake_pending/pending_init/
+            // pending_sipi bools; the trailing pending_sipi_vector is a
+            // free u8)
+            const struct_start = VCPU_STATE_HEADER_SIZE + i * vcpu_struct_size;
+            const run_state = state[93][struct_start + vcpu_run_state_offset];
+            if(run_state > 2)
+            {
+                throw new StateLoadError(
+                    "Unexpected run state " + run_state + " for vcpu " + i);
+            }
+            for(let offset = vcpu_run_state_offset + 1;
+                offset < vcpu_run_state_offset + 4; offset++)
+            {
+                const bool_byte = state[93][struct_start + offset];
+                if(bool_byte > 1)
+                {
+                    throw new StateLoadError(
+                        "Unexpected bool byte " + bool_byte + " at struct offset " +
+                        offset + " for vcpu " + i);
+                }
+            }
+        }
+    }
+
+    // same pre-mutation block (XWAH-9 Phase 3): under the imported backend
+    // guest RAM is a WebAssembly.Memory created with maximum == initial —
+    // it can never grow, so a state image with more RAM than the machine
+    // must fail before anything is restored (the linear backend's
+    // long-standing behavior is a console.warn further down)
+    if(this.guest_memory && state[0] > this.mem8.length)
+    {
+        throw new StateLoadError(
+            "State image memory size " + state[0] + " exceeds the allocated " +
+            "guest memory (" + this.mem8.length + "); the imported guest " +
+            "memory cannot grow");
+    }
+
+    // the restored machine may be live: allow a later full halt to fire
+    // the machine-dead event again
+    this.rearm_cpu_event_halt && this.rearm_cpu_event_halt();
+
+    if(vcpu_current >= 0)
+    {
+        // Canonical vcpu restore order: write the image's whole per-vCPU
+        // region first and make its current vCPU live again
+        // (vcpu_finish_restore loads that save area into the live block and
+        // resets the scheduler rotation), then let the per-field restores
+        // below overwrite the live block. The final live block equals the
+        // saved one either way — get_state ran vcpu_prepare_save, so the
+        // region's current save area and the per-field slots hold the same
+        // bytes — but region-first also restores live-block fields that
+        // have no individual state slot (e.g. apic_enabled) and keeps
+        // save_area[current] trivially consistent with the live block.
+        // The full_clear_tlb/update_state_flags calls at the end of this
+        // function cover the implicit vcpu switch.
+        dbg_assert(this.get_vcpu_state_size() === this.smp_cpus * vcpu_struct_size);
+        new Uint8Array(
+            this.wasm_memory.buffer, this.get_vcpu_state_addr(), this.smp_cpus * vcpu_struct_size)
+            .set(state[93].subarray(VCPU_STATE_HEADER_SIZE));
+        this.vcpu_finish_restore(vcpu_current);
+    }
+
     this.memory_size[0] = state[0];
 
     if(this.mem8.length !== this.memory_size[0])
@@ -838,7 +1067,7 @@ CPU.prototype.set_state_apic = function(state)
         apic[13] = state[11]; // tpr
         apic[14] = state[12]; // icr0
         apic[15] = state[13]; // icr1
-        apic.set(state[15], 16); // irr
+        apic.set(state[14], 16); // irr
         apic.set(state[15], 24); // isr
         apic.set(state[16], 32); // tmr
         apic[40] = state[17]; // spurious_vector
@@ -847,13 +1076,36 @@ CPU.prototype.set_state_apic = function(state)
         apic[43] = state[20]; // error
         apic[44] = state[21]; // read_error
         apic[45] = state[22] || IOAPIC_CONFIG_MASKED; // lvt_thermal_sensor
+
+        if(this.smp_cpus > 1)
+        {
+            // old images always hold a single LAPIC; it went into LAPIC 0
+            this.reset_secondary_apics();
+        }
     }
     else
     {
-        const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
         dbg_assert(state instanceof Uint8Array);
-        dbg_assert(state.length === apic.length); // later versions might need to handle state upgrades here
-        apic.set(state);
+
+        if(state.length === APIC_STRUCT_SIZE && this.smp_cpus > 1)
+        {
+            // single-LAPIC image restored into a multi-vCPU machine: LAPIC 0
+            // gets the image, the others return to power-on state
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), APIC_STRUCT_SIZE);
+            apic.set(state);
+            this.reset_secondary_apics();
+        }
+        else if(state.length === this.smp_cpus * APIC_STRUCT_SIZE)
+        {
+            const apic = new Uint8Array(this.wasm_memory.buffer, this.get_apic_addr(), state.length);
+            apic.set(state);
+        }
+        else
+        {
+            throw new StateLoadError(
+                "Unexpected apic state length: " + state.length +
+                " (expected " + this.smp_cpus * APIC_STRUCT_SIZE + ")");
+        }
     }
 };
 
@@ -890,11 +1142,43 @@ CPU.prototype.pack_memory = function()
 
     const page_count = this.mem8.length >> 12;
     const nonzero_pages = [];
-    for(let page = 0; page < page_count; page++)
+    if(this.guest_memory)
     {
-        if(!this.is_memory_zeroed(page << 12, 0x1000))
+        // imported backend: is_memory_zeroed would cross the wasm instance
+        // boundary once per page, and every 8-byte probe inside it crosses
+        // again into gram.wasm (memory.rs is_memory_zeroed via
+        // gram_read64_aligned) — millions of cross-instance calls per
+        // save. Scan the same pages in one tight JS loop over the guest
+        // memory instead; tests/api/multimem.js asserts this path agrees
+        // with the wasm export.
+        const mem32 = this.mem32s;
+        for(let page = 0; page < page_count; page++)
         {
-            nonzero_pages.push(page);
+            const start = page << 10;
+            const end = start + 1024;
+            let is_zero = true;
+            for(let i = start; i < end; i++)
+            {
+                if(mem32[i] !== 0)
+                {
+                    is_zero = false;
+                    break;
+                }
+            }
+            if(!is_zero)
+            {
+                nonzero_pages.push(page);
+            }
+        }
+    }
+    else
+    {
+        for(let page = 0; page < page_count; page++)
+        {
+            if(!this.is_memory_zeroed(page << 12, 0x1000))
+            {
+                nonzero_pages.push(page);
+            }
         }
     }
 
@@ -990,6 +1274,35 @@ CPU.prototype.create_memory = function(size, minimum_size)
 
     const memory_offset = this.allocate_memory(size);
 
+    if(this.guest_memory)
+    {
+        // imported backend: guest RAM is the imported guest memory and
+        // guest-physical addresses are 0-based offsets into it
+        dbg_assert(memory_offset === 0, "imported guest RAM is 0-based");
+
+        const buffer = this.guest_memory.buffer;
+        // starter.js created the memory one wasm page larger than the
+        // (identically normalised) memory size: the JIT slow-path scratch
+        // pages live at [size, size + 0x2000) (memory.rs
+        // gram_jit_scratch_base). Under smp_workers the shared control
+        // region follows (src/browser/smpctl.js ctl_pages; the page count
+        // is plumbed through wm alongside guest_memory itself).
+        if(size + 0x2000 > buffer.byteLength)
+        {
+            throw new Error("Imported guest memory too small: memory_size=" + size +
+                " + jit scratch does not fit in " + buffer.byteLength + " bytes");
+        }
+        const ctl_bytes = (this.wm.guest_memory_ctl_pages || 0) * 0x10000;
+        dbg_assert(size + 0x10000 + ctl_bytes === buffer.byteLength,
+            "starter.js and create_memory disagree about the guest memory size");
+
+        // direct views, not the view() proxy: the guest memory is created
+        // with maximum == initial, so its buffer can never grow or detach
+        this.mem8 = new Uint8Array(buffer, 0, size);
+        this.mem32s = new Uint32Array(buffer, 0, size >> 2);
+        return;
+    }
+
     this.mem8 = view(Uint8Array, this.wasm_memory, memory_offset, size);
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
 };
@@ -1010,6 +1323,19 @@ CPU.prototype.init = function(settings, device_bus)
     }
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
+
+    // An older v86.wasm without the export has exactly one LAPIC and no
+    // vcpu contexts: smp_cpus must then stay 1 everywhere on the JS side
+    // (fw_cfg, CMOS, APIC state views), not just skip the wasm call
+    this.smp_cpus = this.set_smp_cpus ? settings.cpus || 1 : 1;
+    if(this.set_smp_cpus)
+    {
+        this.set_smp_cpus(this.smp_cpus);
+    }
+    else if(settings.cpus > 1)
+    {
+        dbg_log("cpus option ignored: wasm module predates set_smp_cpus", LOG_CPU);
+    }
 
     this.acpi_enabled[0] = +settings.acpi;
 
@@ -1108,15 +1434,27 @@ CPU.prototype.init = function(settings, device_bus)
         }
         else if(value === FW_CFG_NB_CPUS)
         {
-            this.fw_value = i32(1);
+            // XWAH-9: the wasm module is the single authority for the
+            // firmware-visible CPU count — get_firmware_cpus reports
+            // smp_cpus exactly when startup IPIs actually start application
+            // processors, and 1 otherwise (SeaBIOS spins forever waiting
+            // for advertised CPUs that cannot come up, verified
+            // empirically). Older wasm without the export has no vcpu
+            // contexts and always boots one CPU.
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_MAX_CPUS)
         {
-            this.fw_value = i32(1);
+            // XWAH-9: see FW_CFG_NB_CPUS
+            this.fw_value = i32(this.get_firmware_cpus ? this.get_firmware_cpus() : 1);
         }
         else if(value === FW_CFG_NUMA)
         {
-            this.fw_value = new Uint8Array(16);
+            // u64 NUMA node count (0), then one u64 node id per CPU:
+            // SeaBIOS reads 8 * (1 + max_cpus) bytes when it builds the
+            // ACPI tables (all zero — no NUMA topology)
+            const max_cpus = this.get_firmware_cpus ? this.get_firmware_cpus() : 1;
+            this.fw_value = new Uint8Array(8 * (1 + max_cpus));
         }
         else if(value === FW_CFG_FILE_DIR)
         {
@@ -1690,7 +2028,13 @@ CPU.prototype.fill_cmos = function(rtc, settings)
 
     rtc.cmos_write(CMOS_EQUIPMENT_INFO, 0x2F);
 
-    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, 0);
+    // QEMU convention: CMOS 0x5F holds the number of additional (application)
+    // processors, i.e. smp_cpus - 1. XWAH-9: sourced from the wasm module
+    // like fw_cfg NB_CPUS/MAX_CPUS, the single authority that reports more
+    // than one CPU exactly when startup IPIs actually start application
+    // processors (SeaBIOS spins forever waiting for advertised CPUs that
+    // cannot come up, verified empirically).
+    rtc.cmos_write(CMOS_BIOS_SMP_COUNT, this.get_firmware_cpus ? this.get_firmware_cpus() - 1 : 0);
 
     // Used by bochs BIOS to skip the boot menu delay.
     if(settings.fastboot) rtc.cmos_write(0x3f, 0x01);
@@ -1761,6 +2105,91 @@ CPU.prototype.load_bios = function()
             addr &= 0xFFFFF;
             this.mem8[addr] = value;
         }.bind(this));
+};
+
+/**
+ * XWAH-9 Phase 4 Stage W2 (docs/smp-phase4-design.md §9): put this CPU
+ * object into device-host mode — the guest executes inside the machine
+ * worker (src/browser/vcpu_worker.js), so the calls that would touch guest
+ * execution state on THIS instance are rerouted to the host:
+ *
+ * - device_raise_irq/device_lower_irq (every JS device model calls these
+ *   through the cpu object) become ordered device-IRQ ring posts; the
+ *   main instance's wasm device_raise_irq must NOT run its handle_irqs —
+ *   there is no guest on the main thread;
+ * - jit_dirty_cache (write_blob during DMA/IDE transfers) posts the dirty
+ *   pages to the worker, whose JIT cache is the live one;
+ * - main_loop becomes the host's device tick (PIT/RTC/ACPI timers live
+ *   here; the worker keeps its own LAPIC deadline);
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park the worker, reset the main-side chipset/devices, then the
+ *   worker's reset command. Fire-and-forget — reboot_internal may run
+ *   inside a mailbox dispatch (guest reset port), where awaiting the
+ *   quiesce would deadlock the triggering worker's pending RPC.
+ *
+ * Everything else (io.js tables, device models, mmap handlers, save Rust
+ * chipset state) stays as constructed — the mailbox server dispatches onto
+ * it.
+ *
+ * @param {!Object} host an SMPWorkerHost (src/browser/smp_worker_host.js)
+ */
+CPU.prototype.attach_smp_worker_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.device_raise_irq = irq => host.post_irq(irq, true);
+    this.device_lower_irq = irq => host.post_irq(irq, false);
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
+    };
+};
+
+/**
+ * XWAH-9 Phase 4 Stage W3 (docs/smp-phase4-design.md §9 W3): put this CPU
+ * object into topology-(b) device-host mode — every vCPU executes in its
+ * own worker (src/browser/vcpu_worker.js per-vCPU mode). Unlike the (c)
+ * attach above, device_raise_irq/device_lower_irq KEEP their default wasm
+ * exports: this instance's Rust PIC/IOAPIC are the authoritative chipset,
+ * and apic::route's shared leg (set_worker_host) posts matched vectors to
+ * the right worker. Only the guest-execution-adjacent calls reroute:
+ *
+ * - jit_dirty_cache (write_blob during DMA/IDE) broadcasts dirty events
+ *   into every worker's jit inbox — the live JIT caches are theirs;
+ * - main_loop becomes the host's device tick;
+ * - reboot_internal becomes the host's quiesced reboot (Stage W4, design
+ *   §8): park all workers, reset the main-side chipset/devices, then
+ *   per-worker reset commands (APs return to WaitForSipi). Fire-and-forget
+ *   for the same mailbox-dispatch reason as the (c) attach above.
+ *
+ * @param {!Object} host an SMPVcpuHost (src/browser/smp_vcpu_host.js)
+ */
+CPU.prototype.attach_smp_vcpu_host = function(host)
+{
+    this.smp_worker_host = host;
+    this.jit_dirty_cache = (start_addr, end_addr) => host.post_jit_dirty(start_addr, end_addr);
+    this.main_loop = () => host.tick();
+    const reboot = CPU.prototype.reboot_internal.bind(this);
+    this.reboot_internal = () =>
+    {
+        // fire-and-forget (the caller may be inside a mailbox dispatch),
+        // so the promise needs an explicit terminal handler: a quiesce
+        // timeout or a worker dying mid-reboot would otherwise surface only
+        // as an unhandled rejection, leaving the machine wedged silently.
+        // host.fail is the established §8 error path (emulator-error +
+        // park + stop).
+        host.reboot(reboot).catch(
+            e => host.fail(e instanceof Error ? e : new Error(String(e))));
+    };
 };
 
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
@@ -1842,14 +2271,32 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
         }
     });
 
-    if(DEBUG)
-    {
-        result.catch(e => {
-            console.log(e);
+    // never silent (DEBUG or not): a swallowed rejection here would wedge
+    // the JIT — codegen_finalize_finished never runs, the page stays
+    // pending forever. The starter's multi-memory capability probe makes
+    // this near-unreachable for the imported-guest-memory build, but if it
+    // fires, log the module's import list (the usual failure shape is a
+    // LinkError on the "e"."g" guest-memory import) and rethrow
+    // asynchronously so the error surfaces as an uncaught exception.
+    result.catch(e => {
+        let import_list = "unavailable (module does not compile)";
+        try
+        {
+            import_list = WebAssembly.Module.imports(new WebAssembly.Module(code))
+                .map(i => i["module"] + "." + i["name"] + " (" + i["kind"] + ")")
+                .join(", ");
+        }
+        catch(_e) {}
+        console.error(
+            "Failed to instantiate JIT-generated module (wasm_table_index=" +
+            wasm_table_index + ", start=" + h(start >>> 0) + "), imports: " +
+            import_list, e);
+        if(DEBUG)
+        {
             debugger;
-            throw e;
-        });
-    }
+        }
+        setTimeout(() => { throw e; }, 0);
+    });
 };
 
 CPU.prototype.log_uncompiled_code = function(start, end)

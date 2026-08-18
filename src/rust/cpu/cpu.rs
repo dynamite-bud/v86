@@ -9,7 +9,7 @@ use crate::cpu::misc_instr::{
     push16, push32,
 };
 use crate::cpu::modrm::{resolve_modrm16, resolve_modrm32};
-use crate::cpu::{apic, ioapic, pic};
+use crate::cpu::{apic, ioapic, pic, vcpu};
 use crate::dbg::dbg_trace;
 use crate::gen;
 use crate::jit;
@@ -292,6 +292,12 @@ pub const LOOP_COUNTER: i32 = 100_003;
 pub const TSC_RATE: f64 = 1_000_000.0;
 
 pub static mut cpuid_level: u32 = 0x16;
+
+// XWAH-9: number of logical processors reported by CPUID (SMP groundwork).
+// 255 is the limit of xAPIC physical destination addressing (8-bit APIC IDs,
+// with 0xFF reserved for broadcast).
+pub const MAX_CPUS: u32 = 255;
+pub static mut smp_cpus: u32 = 1;
 
 pub static mut jit_block_boundary: bool = false;
 
@@ -1968,13 +1974,13 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
         entry = do_page_walk(address, true, user, true, true)?.get();
     }
     let has_code = entry & TLB_HAS_CODE != 0;
-    let phys_addr = (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32;
+    let phys_addr = crate::tag_to_phys!((entry & !0xFFF ^ address) as u32);
     let page = Page::page_of(phys_addr);
     if !has_code {
         return Ok(phys_addr);
     }
     let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
-    jit::jit_dirty_page(page);
+    crate::jit_dirty_page_for_store!(page);
     if !is_smc {
         return Ok(phys_addr);
     }
@@ -2012,7 +2018,7 @@ pub unsafe fn translate_address(
     {
         entry = do_page_walk(address, for_writing, user, jit, side_effects)?.get();
     }
-    Ok((entry & !0xFFF ^ address) as u32 - memory::mem8 as u32)
+    Ok(crate::tag_to_phys!((entry & !0xFFF ^ address) as u32))
 }
 
 pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
@@ -2022,7 +2028,7 @@ pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPage
         entry = do_page_walk(address, true, user, false, true)?.get();
     }
     Ok((
-        (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32,
+        crate::tag_to_phys!((entry & !0xFFF ^ address) as u32),
         entry & TLB_HAS_CODE == 0,
     ))
 }
@@ -2121,7 +2127,7 @@ pub unsafe fn do_page_walk(
                 | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
 
             if side_effects && page_dir_entry != new_page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
+                crate::write_pte_ad!(page_dir_addr, new_page_dir_entry);
             }
 
             high = if pae {
@@ -2173,13 +2179,13 @@ pub unsafe fn do_page_walk(
             // Note: dirty bit is only set on the page table entry
             let new_page_dir_entry = page_dir_entry | PAGE_TABLE_ACCESSED_MASK;
             if side_effects && new_page_dir_entry != page_dir_entry {
-                memory::write8(page_dir_addr, new_page_dir_entry);
+                crate::write_pte_ad!(page_dir_addr, new_page_dir_entry);
             }
             let new_page_table_entry = page_table_entry
                 | PAGE_TABLE_ACCESSED_MASK
                 | if for_writing { PAGE_TABLE_DIRTY_MASK } else { 0 };
             if side_effects && page_table_entry != new_page_table_entry {
-                memory::write8(page_table_addr, new_page_table_entry);
+                crate::write_pte_ad!(page_table_addr, new_page_table_entry);
             }
 
             high = page_table_entry as u32 & 0xFFFFF000;
@@ -2217,7 +2223,7 @@ pub unsafe fn do_page_walk(
 
     let is_in_mapped_range = memory::in_mapped_range(high);
     let has_code = if side_effects {
-        !is_in_mapped_range && jit::jit_page_has_code(Page::page_of(high))
+        !is_in_mapped_range && crate::page_has_code_hook!(high)
     }
     else {
         // If side_effects is false, don't call into jit::jit_page_has_code. This value is not used
@@ -2232,12 +2238,12 @@ pub unsafe fn do_page_walk(
         | if global && 0 != cr4 & CR4_PGE { TLB_GLOBAL } else { 0 }
         | if has_code { TLB_HAS_CODE } else { 0 };
 
-    let tlb_entry = (high + memory::mem8 as u32) as i32 ^ page << 12 | info_bits as i32;
+    let tlb_entry = crate::phys_to_tag!(high) as i32 ^ page << 12 | info_bits as i32;
 
     dbg_assert!((high ^ (page as u32) << 12) & 0xFFF == 0);
     if side_effects {
-        // bake in the addition with memory::mem8 to save an instruction from the fast path
-        // of memory accesses
+        // bake in the addition with gram_base_tag! (phys_to_tag!) to save an
+        // instruction from the fast path of memory accesses
         tlb_data[page as usize] = tlb_entry;
 
         jit::update_tlb_code(Page::page_of(addr as u32), Page::page_of(high));
@@ -2412,9 +2418,9 @@ pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             if physical_page == tlb_physical_page {
                 unsafe {
                     tlb_data[page as usize] =
@@ -2435,9 +2441,9 @@ pub fn tlb_set_has_code_multiple(physical_pages: &HashSet<Page>, has_code: bool)
         let page = unsafe { valid_tlb_entries[i as usize] };
         let entry = unsafe { tlb_data[page as usize] };
         if 0 != entry {
-            let tlb_physical_page = Page::of_u32(
-                (entry as u32 >> 12 ^ page as u32) - (unsafe { memory::mem8 } as u32 >> 12),
-            );
+            let tlb_physical_page = Page::of_u32(unsafe {
+                crate::tag_page_to_phys_page!(entry as u32 >> 12 ^ page as u32)
+            });
             if physical_pages.contains(&tlb_physical_page) {
                 unsafe {
                     tlb_data[page as usize] =
@@ -2464,7 +2470,7 @@ pub fn check_tlb_invariants() {
             continue;
         }
 
-        let target = (entry ^ page << 12) as u32 - unsafe { memory::mem8 } as u32;
+        let target = unsafe { crate::tag_to_phys!((entry ^ page << 12) as u32) };
         dbg_assert!(!memory::in_mapped_range(target));
 
         let entry_has_code = entry & TLB_HAS_CODE != 0;
@@ -2484,7 +2490,7 @@ pub unsafe fn read_imm8() -> OrPageFault<i32> {
         *last_virt_eip = eip & !0xFFF
     }
     dbg_assert!(!memory::in_mapped_range((*eip_phys ^ eip) as u32));
-    let data8 = *memory::mem8.offset((*eip_phys ^ eip) as isize) as i32;
+    let data8 = crate::gram_read8!(*eip_phys ^ eip);
     *instruction_pointer = eip + 1;
     return Ok(data8);
 }
@@ -3205,7 +3211,7 @@ unsafe fn jit_run_interpreted(mut phys_addr: u32) {
 
         i += 1;
         let start_eip = *instruction_pointer;
-        let opcode = *memory::mem8.offset(phys_addr as isize) as i32;
+        let opcode = crate::gram_read8!(phys_addr);
         *instruction_pointer += 1;
         dbg_assert!(*prefixes == 0);
         run_instruction(opcode | (*is_32 as i32) << 8);
@@ -3266,7 +3272,13 @@ pub unsafe fn segment_prefix_op(seg: i32) {
 
 #[no_mangle]
 pub unsafe fn main_loop() -> f64 {
-    profiler::stat_increment(stat::MAIN_LOOP);
+    crate::main_loop_stat_or_worker!();
+
+    if vcpu::count() > 1 {
+        return main_loop_smp();
+    }
+
+    // Single-vCPU fast path: today's loop, unchanged.
 
     let start = js::microtick();
 
@@ -3301,6 +3313,164 @@ pub unsafe fn main_loop() -> f64 {
     }
 
     return 0.0;
+}
+
+// Round-robin rotation pointer of the SMP scheduler. Persists across
+// main_loop invocations so a vCPU running when the frame budget expires
+// cannot starve the others (docs/smp-phase2-design.md §Scheduler).
+static mut VCPU_ROTATION: usize = 0;
+
+/// Restart the round-robin at the BSP. Any value would be schedulable
+/// (pick_vcpu reduces modulo the vCPU count), but a snapshot restore
+/// (vcpu::vcpu_finish_restore) resets it so the pre-restore rotation does
+/// not leak into the restored machine's scheduling.
+pub unsafe fn reset_vcpu_rotation() { VCPU_ROTATION = 0 }
+// The machine-dead event has been delivered to JS; rearmed by reset_cpu
+static mut HALT_EVENT_SENT: bool = false;
+
+// Time-sliced SMP scheduler, used when vcpu::count() > 1
+// (docs/smp-phase2-design.md §Scheduler, §AP startup): round-robin over the
+// schedulable vCPUs, one do_many_cycles_native slice each, until the frame
+// budget is spent. When nobody is schedulable, yield the min hardware-timer
+// deadline while a halted vCPU could still wake; the machine is dead only
+// when every vCPU is Parked or WaitForSipi.
+unsafe fn main_loop_smp() -> f64 {
+    let start = js::microtick();
+
+    loop {
+        // INIT/SIPI latched by the LAPIC are applied here, at a slice
+        // boundary: no vCPU is mid-instruction and no APIC lock is held
+        process_pending_init_sipi();
+
+        match pick_vcpu() {
+            Some(i) => {
+                if i != vcpu::current() {
+                    vcpu::switch_to(i);
+                    // switch_to contract: tlb_data/tlb_code still cache the
+                    // outgoing vCPU's mappings
+                    full_clear_tlb();
+                }
+                VCPU_ROTATION = i + 1;
+                // Deliver pending interrupts into this context. A halted
+                // vCPU picked because of wake_pending either receives its
+                // interrupt here (pic_call_irq clears in_hlt) or the wake
+                // was spurious; the wake is consumed either way.
+                handle_irqs();
+                vcpu::clear_wake_pending(i);
+                if !*in_hlt {
+                    do_many_cycles_native();
+                }
+            },
+            None => {
+                // Nobody is schedulable right now: give the hardware
+                // timers a chance to deliver an interrupt that wakes a
+                // halted vCPU before yielding to the host
+                let t = js::run_hardware_timers(*acpi_enabled, js::microtick());
+                handle_irqs();
+                if pick_vcpu().is_none() {
+                    if (0..vcpu::count()).all(|i| vcpu::run_state(i) != vcpu::RunState::Runnable) {
+                        // dead: every vCPU is Parked or WaitForSipi, and
+                        // only an INIT/SIPI from a running vCPU (or an
+                        // NMI, unsupported) could revive one
+                        if !HALT_EVENT_SENT {
+                            HALT_EVENT_SENT = true;
+                            js::cpu_event_halt();
+                        }
+                        return 100.0;
+                    }
+                    profiler::stat_increment(stat::MAIN_LOOP_IDLE);
+                    return t;
+                }
+                // a timer interrupt made a vCPU schedulable; keep going
+            },
+        }
+
+        let now = js::microtick();
+        js::run_hardware_timers(*acpi_enabled, now);
+        handle_irqs();
+
+        if now - start > TIME_PER_FRAME {
+            break;
+        }
+    }
+
+    return 0.0;
+}
+
+// A vCPU is schedulable when Runnable and not halted, or halted with a wake
+// pending (handle_irqs on its context then either delivers the interrupt or
+// proves the wake spurious). Runnable-and-halted implies IF=1: hlt with
+// IF=0 becomes Parked in instr_F4. Parked and WaitForSipi vCPUs only leave
+// those states through INIT/SIPI, never through the scheduler.
+unsafe fn pick_vcpu() -> Option<usize> {
+    let count = vcpu::count();
+    for offset in 0..count {
+        let i = (VCPU_ROTATION + offset) % count;
+        if vcpu::run_state(i) == vcpu::RunState::Runnable
+            && (!vcpu_in_hlt(i) || vcpu::wake_pending(i))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+// in_hlt of any vCPU: the live block for the current one, the save area for
+// the others
+unsafe fn vcpu_in_hlt(i: usize) -> bool {
+    if i == vcpu::current() {
+        *in_hlt
+    }
+    else {
+        vcpu::saved_in_hlt(i)
+    }
+}
+
+// Apply latched INIT/SIPI IPIs (docs/smp-phase2-design.md §AP startup).
+// INIT resets the target's save area to power-on values via the live block
+// and parks it in WaitForSipi; a SIPI then patches the real-mode entry
+// point into the save area and makes the target Runnable. An INIT latch's
+// target may be the current vCPU (an AP that INIT'd itself): switch_to(i)
+// is then a no-op and reset_vcpu_block resets the live block, which is
+// exactly the target's own state. A SIPI latch is never consumed with its
+// target current: apic::deliver ignores self-SIPI, so the latch was set
+// while another vCPU ran, and that vCPU (not the WaitForSipi target) is
+// still current at the next slice boundary — apply_sipi may assert this.
+unsafe fn process_pending_init_sipi() {
+    let count = vcpu::count();
+    let resume = vcpu::current();
+    let mut switched = false;
+    for i in 0..count {
+        if vcpu::take_pending_init(i) {
+            vcpu::switch_to(i);
+            reset_vcpu_block();
+            // per the SDM, INIT also returns the target's LAPIC to its
+            // power-up state except the APIC ID. reset_one locks the APIC
+            // table internally; no APIC lock is held here.
+            apic::reset_one(i);
+            vcpu::set_run_state(i, vcpu::RunState::WaitForSipi);
+            vcpu::clear_wake_pending(i);
+            switched = true;
+        }
+    }
+    if switched {
+        // park the power-on image in the target's save area again; the TLB
+        // is empty (reset_vcpu_block flushed), so the flush below only
+        // upholds the switch_to contract
+        vcpu::switch_to(resume);
+        full_clear_tlb();
+    }
+    for i in 0..count {
+        if let Some(vector) = vcpu::take_pending_sipi(i) {
+            if vcpu::run_state(i) == vcpu::RunState::WaitForSipi {
+                vcpu::apply_sipi(i, vector);
+                vcpu::set_run_state(i, vcpu::RunState::Runnable);
+                vcpu::note_interrupt(i);
+            }
+            // else: the target left WaitForSipi since the SIPI was
+            // latched; dropped like a SIPI to a running vCPU
+        }
+    }
 }
 
 pub unsafe fn do_many_cycles_native() {
@@ -3517,7 +3687,6 @@ pub fn report_safe_write_jit_slow(address: u32, entry: i32) {
         dbg_assert!(false);
     }
 }
-
 #[no_mangle]
 #[cfg(feature = "profiler")]
 pub fn report_safe_read_write_jit_slow(address: u32, entry: i32) {
@@ -3543,11 +3712,12 @@ pub fn report_safe_read_write_jit_slow(address: u32, entry: i32) {
         dbg_assert!(false);
     }
 }
-
+#[cfg(not(feature = "guest-ram-import"))]
 #[repr(align(0x1000))]
 struct ScratchBuffer([u8; 0x1000 * 2]);
+#[cfg(not(feature = "guest-ram-import"))]
 static mut jit_paging_scratch_buffer: ScratchBuffer = ScratchBuffer([0; 2 * 0x1000]);
-
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn safe_read_slow_jit(
     addr: i32,
     bitsize: i32,
@@ -3633,7 +3803,7 @@ pub unsafe fn safe_read_slow_jit(
         ((scratch as i32) ^ addr) & !0xFFF
     }
     else {
-        ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
 }
 
@@ -3664,7 +3834,7 @@ pub unsafe fn get_phys_eip_slow_jit(addr: i32) -> i32 {
         Err(()) => 1,
         Ok(addr_low) => {
             dbg_assert!(!memory::in_mapped_range(addr_low as u32)); // same assumption as in read_imm8
-            ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+            (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
         },
     }
 }
@@ -3699,7 +3869,7 @@ pub unsafe fn readable_or_pagefault_jit(addr: i32, size: i32, eip_offset_in_page
     }
     0
 }
-
+#[cfg(not(feature = "guest-ram-import"))]
 pub unsafe fn safe_write_slow_jit(
     addr: i32,
     bitsize: i32,
@@ -3776,7 +3946,7 @@ pub unsafe fn safe_write_slow_jit(
         ((scratch as i32) ^ addr) & !0xFFF
     }
     else {
-        ((addr_low as i32 + memory::mem8 as i32) ^ addr) & !0xFFF
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
     }
 }
 
@@ -3835,12 +4005,12 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -3856,12 +4026,12 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -3880,12 +4050,12 @@ pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
     };
     Ok(())
 }
@@ -3903,12 +4073,12 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write64_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write64_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -3927,12 +4097,12 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write128_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write128_no_mmap_or_dirty_check(phys_addr, value));
         }
     };
     Ok(())
@@ -3950,12 +4120,12 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     }
     else {
         if !can_skip_dirty_page {
-            jit::jit_dirty_page(Page::page_of(phys_addr));
+            crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
         }
         else {
             dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
         }
-        memory::write8_no_mmap_or_dirty_check(phys_addr, value);
+        crate::store_then_flush!(memory::write8_no_mmap_or_dirty_check(phys_addr, value));
     }
 }
 
@@ -3977,12 +4147,12 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write16_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write16_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }
@@ -4005,12 +4175,12 @@ pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
         }
         else {
             if !can_skip_dirty_page {
-                jit::jit_dirty_page(Page::page_of(phys_addr));
+                crate::jit_dirty_page_for_store!(Page::page_of(phys_addr));
             }
             else {
                 dbg_assert!(!jit::jit_page_has_code(Page::page_of(phys_addr as u32)));
             }
-            memory::write32_no_mmap_or_dirty_check(phys_addr, value);
+            crate::store_then_flush!(memory::write32_no_mmap_or_dirty_check(phys_addr, value));
         };
     }
 }
@@ -4462,10 +4632,15 @@ pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 #[no_mangle]
 pub unsafe fn handle_irqs() {
     if *flags & FLAG_INTERRUPT != 0 {
-        if let Some(irq) = pic::pic_acknowledge_irq() {
-            pic_call_irq(irq)
+        // the 8259's ExtINT line wires to the BSP (vCPU 0) only; the APIC
+        // leg acknowledges from the current vCPU's LAPIC context
+        if vcpu::current() == 0 {
+            if let Some(irq) = crate::pic_acknowledge_hook!() {
+                pic_call_irq(irq);
+                return;
+            }
         }
-        else if *acpi_enabled {
+        if *acpi_enabled {
             if let Some(irq) = apic::acknowledge_irq() {
                 pic_call_irq(irq)
             }
@@ -4482,12 +4657,30 @@ unsafe fn pic_call_irq(interrupt_nr: u8) {
     call_interrupt_vector(interrupt_nr as i32, false, None);
 }
 
+// Wake the BSP after any PIC state change that may newly assert INTR —
+// device IRQ raise, but also port writes (OCW1 unmask included): the
+// 8259's ExtINT line wires to the BSP (vCPU 0), which may not be the
+// current vCPU, and the machine may be idling in the host with the BSP
+// halted, so mirror apic::deliver's cross-vCPU wake. Waking only when the
+// 8259 is actually asserting INTR avoids two context switches and TLB
+// flushes per masked device IRQ for nothing; spurious wakes are harmless,
+// missed wakes hang the guest.
+unsafe fn wake_bsp_if_pic_requested() {
+    if crate::wake_bsp_hook!() {
+        vcpu::note_interrupt(0);
+        if vcpu_in_hlt(0) {
+            js::stop_idling();
+        }
+    }
+}
+
 #[no_mangle]
 unsafe fn device_raise_irq(i: u8) {
     pic::set_irq(i);
     if *acpi_enabled {
         ioapic::set_irq(i);
     }
+    wake_bsp_if_pic_requested();
     handle_irqs()
 }
 
@@ -4502,7 +4695,7 @@ unsafe fn device_lower_irq(i: u8) {
 
 pub fn io_port_read8(port: i32) -> i32 {
     unsafe {
-        match port {
+        match crate::pic_port_forward_read8!(port) {
             0x20 => pic::port20_read() as i32,
             0x21 => pic::port21_read() as i32,
             0xA0 => pic::portA0_read() as i32,
@@ -4518,7 +4711,7 @@ pub fn io_port_read32(port: i32) -> i32 { unsafe { js::io_port_read32(port) } }
 
 pub fn io_port_write8(port: i32, value: i32) {
     unsafe {
-        match port {
+        match crate::pic_port_forward_write8!(port, value) {
             0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1 => {
                 match port {
                     0x20 => pic::port20_write(value as u8),
@@ -4529,6 +4722,9 @@ pub fn io_port_write8(port: i32, value: i32) {
                     0x4D1 => pic::port4D1_write(value as u8),
                     _ => dbg_assert!(false),
                 };
+                // covers every port-driven PIC state change, e.g. an AP
+                // unmasking an already-requested line via OCW1
+                wake_bsp_if_pic_requested();
                 handle_irqs()
             },
             _ => js::io_port_write8(port, value),
@@ -4559,6 +4755,61 @@ pub unsafe fn check_page_switch(block_addr: u32, next_block_addr: u32) {
 
 #[no_mangle]
 pub unsafe fn reset_cpu() {
+    // Reset every vCPU's state block through the live block: switch it in,
+    // reset it, mark APs as waiting for INIT+SIPI. With one vCPU this
+    // degenerates to a single reset_vcpu_block with no-op switches.
+    let vcpu_count = vcpu::count();
+    if vcpu_count == 0 {
+        // set_smp_cpus has not sized the vCPU table; plain single-CPU reset
+        reset_vcpu_block();
+    }
+    else {
+        for i in 0..vcpu_count {
+            vcpu::switch_to(i);
+            reset_vcpu_block();
+            vcpu::set_run_state(
+                i,
+                if i == 0 { vcpu::RunState::Runnable } else { vcpu::RunState::WaitForSipi },
+            );
+            vcpu::clear_wake_pending(i);
+            vcpu::clear_pending(i);
+        }
+        vcpu::switch_to(0);
+        if vcpu_count > 1 {
+            // switch_to contract: flush after a real switch (the last
+            // reset_vcpu_block flushed while another vCPU was live)
+            full_clear_tlb();
+        }
+    }
+
+    // machine-global state, reset exactly once:
+
+    // machine-shared per vcpu.rs SHARED_FIELDS: zeroing it in
+    // reset_vcpu_block would snap the global counter back mid-run when a
+    // latched INIT resets an AP
+    *instruction_counter = 0;
+
+    // guest-writable interrupt-controller state (APIC ID, LDR/DFR, pending
+    // interrupts) must return to power-on values on reboot; stale values
+    // would misroute interrupts now that destinations are matched honestly
+    apic::reset();
+    ioapic::reset();
+
+    set_tsc(0, 0);
+
+    // scheduler state: restart the rotation at the BSP and rearm the
+    // machine-dead event
+    VCPU_ROTATION = 0;
+    HALT_EVENT_SENT = false;
+
+    jit::jit_clear_cache_js();
+}
+
+/// Reset the current vCPU's state block (and the TLB caching its mappings)
+/// to power-on values with the real-mode entry point at F000:FFF0.
+/// Machine-global state (APIC/IOAPIC, TSC, JIT cache) is reset once by
+/// reset_cpu, not here.
+pub unsafe fn reset_vcpu_block() {
     for i in 0..8 {
         *segment_is_null.offset(i) = false;
         *segment_limits.offset(i) = 0;
@@ -4617,7 +4868,6 @@ pub unsafe fn reset_cpu() {
 
     *last_virt_eip = -1;
 
-    *instruction_counter = 0;
     *previous_ip = 0;
     *in_hlt = false;
 
@@ -4631,8 +4881,6 @@ pub unsafe fn reset_cpu() {
     *last_op1 = 0;
     *last_op_size = 0;
 
-    set_tsc(0, 0);
-
     *instruction_pointer = 0xFFFF0;
     switch_cs_real_mode(0xF000);
 
@@ -4640,9 +4888,375 @@ pub unsafe fn reset_cpu() {
     write_reg32(ESP, 0x100);
 
     update_state_flags();
-
-    jit::jit_clear_cache_js();
 }
+
+// Called by CPU.set_state after a snapshot restore: the restored machine
+// may be live again, so the one-shot machine-dead event must be able to
+// fire for a later full halt
+#[no_mangle]
+pub unsafe fn rearm_cpu_event_halt() { HALT_EVENT_SENT = false }
 
 #[no_mangle]
 pub unsafe fn set_cpuid_level(level: u32) { cpuid_level = level }
+
+#[no_mangle]
+pub unsafe fn set_smp_cpus(n: u32) {
+    dbg_assert!(n >= 1 && n <= MAX_CPUS);
+    smp_cpus = n;
+    vcpu::init(n as usize);
+    apic::init(n as usize)
+}
+
+/// Firmware-visible CPU count, read by cpu.js for fw_cfg NB_CPUS/MAX_CPUS
+/// and CMOS 0x5F. The wasm module is the single authority for "SMP
+/// enabled": vcpu::init arms Startup IPIs exactly when it sizes the table
+/// with more than one vCPU, so a count above 1 is advertised if and only
+/// if a SIPI is honored — JavaScript can never half-update the two
+/// (XWAH-9 stage 4; see vcpu::AP_STARTUP_ENABLED).
+#[no_mangle]
+pub unsafe fn get_firmware_cpus() -> u32 {
+    if vcpu::ap_startup_enabled() {
+        smp_cpus
+    }
+    else {
+        1
+    }
+}
+
+// ---- guest-ram-import twins of the JIT slow paths (XWAH-9 Phase 3 Stage 4) ----
+//
+// Under `guest-ram-import` the JIT fast path loads/stores the imported guest
+// memory (memidx 1), so the scratch area that page-crossing and mmap accesses
+// are redirected to must itself be addressable there: the module-linear
+// `jit_paging_scratch_buffer` is unreachable from a memidx-1 access. These
+// twins mirror the default `safe_read_slow_jit`/`safe_write_slow_jit` above
+// exactly, except that the scratch pages live in the guest memory directly
+// after guest RAM (memory::gram_jit_scratch_base; JS creates the guest memory
+// one wasm page larger than memory_size) and are filled through the gram
+// accessors. Keep them in sync with the default bodies.
+
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn safe_read_slow_jit(
+    addr: i32,
+    bitsize: i32,
+    is_write: bool,
+    eip_offset_in_page_and_wasm_table_index: i32,
+) -> i32 {
+    let wasm_table_index = (eip_offset_in_page_and_wasm_table_index >> 16) as u16;
+    let eip_offset_in_page = eip_offset_in_page_and_wasm_table_index & 0xFFFF;
+    dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
+    dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
+
+    let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
+    let addr_low = match if is_write {
+        translate_address_write_jit(addr, wasm_table_index)
+    }
+    else {
+        translate_address_read_jit(addr)
+    } {
+        Err(()) => {
+            *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+            return 1;
+        },
+        Ok(addr) => addr,
+    };
+    if crosses_page {
+        let boundary_addr = (addr | 0xFFF) + 1;
+        let addr_high = match if is_write {
+            translate_address_write_jit(boundary_addr, wasm_table_index)
+        }
+        else {
+            translate_address_read_jit(boundary_addr)
+        } {
+            Err(()) => {
+                *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+                return 1;
+            },
+            Ok(addr) => addr,
+        };
+        // do read, write into the guest-memory scratch pages
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+
+        // Scratch and guest data both live in the guest memory, so each
+        // contiguous non-mmap half is a single gram_memcpy instead of two
+        // cross-module calls per byte; only mmap halves (device reads) keep
+        // the byte loop. Each half stays within one 4K page and mmap
+        // ranges are MMAP_BLOCK_SIZE-aligned, so in_mapped_range is
+        // uniform across a half.
+        if memory::in_mapped_range(addr_low) {
+            for s in addr_low..((addr_low | 0xFFF) + 1) {
+                memory::gram_write8(scratch + (s & 0xFFF), memory::read8(s))
+            }
+        }
+        else {
+            memory::gram_memcpy(
+                addr_low,
+                scratch + (addr_low & 0xFFF),
+                0x1000 - (addr_low & 0xFFF),
+            );
+        }
+        let high_count = (addr + bitsize / 8 & 0xFFF) as u32;
+        if memory::in_mapped_range(addr_high) {
+            for s in addr_high..(addr_high + high_count) {
+                memory::gram_write8(scratch + (0x1000 | s & 0xFFF), memory::read8(s))
+            }
+        }
+        else {
+            dbg_assert!(addr_high & 0xFFF == 0);
+            memory::gram_memcpy(addr_high, scratch + 0x1000, high_count);
+        }
+
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else if memory::in_mapped_range(addr_low) {
+        let scratch = memory::gram_jit_scratch_base();
+
+        match bitsize {
+            128 => memory::gram_write128(scratch + (addr_low & 0xFFF), memory::read128(addr_low)),
+            64 => memory::gram_write64(
+                scratch + (addr_low & 0xFFF),
+                memory::read64s(addr_low) as u64,
+            ),
+            32 => memory::gram_write32(scratch + (addr_low & 0xFFF), memory::read32s(addr_low)),
+            16 => memory::gram_write16(scratch + (addr_low & 0xFFF), memory::read16(addr_low)),
+            8 => memory::gram_write8(scratch + (addr_low & 0xFFF), memory::read8(addr_low)),
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else {
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
+    }
+}
+
+#[cfg(feature = "guest-ram-import")]
+pub unsafe fn safe_write_slow_jit(
+    addr: i32,
+    bitsize: i32,
+    value_low: u64,
+    value_high: u64,
+    eip_offset_in_page_and_wasm_table_index: i32,
+) -> i32 {
+    let wasm_table_index = (eip_offset_in_page_and_wasm_table_index >> 16) as u16;
+    let eip_offset_in_page = eip_offset_in_page_and_wasm_table_index & 0xFFFF;
+    dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
+    dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
+
+    let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
+    let addr_low = match translate_address_write_jit(addr, wasm_table_index) {
+        Err(()) => {
+            *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+            return 1;
+        },
+        Ok(x) => x,
+    };
+    if crosses_page {
+        let addr_high = match translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index) {
+            Err(()) => {
+                *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
+                return 1;
+            },
+            Ok(x) => x,
+        };
+        // do write, return a guest-memory scratch tag for the fast path's
+        // (discarded) store
+
+        match bitsize {
+            128 => safe_write128(
+                addr,
+                reg128 {
+                    u64: [value_low, value_high],
+                },
+            )
+            .unwrap(),
+            64 => safe_write64(addr, value_low).unwrap(),
+            32 => virt_boundary_write32(
+                addr_low,
+                addr_high | (addr as u32 + 3 & 3),
+                value_low as i32,
+            ),
+            16 => virt_boundary_write16(addr_low, addr_high, value_low as i32),
+            8 => {
+                dbg_assert!(false);
+            },
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else if memory::in_mapped_range(addr_low) {
+        match bitsize {
+            128 => memory::mmap_write128(addr_low, value_low, value_high),
+            64 => memory::mmap_write64(addr_low, value_low),
+            32 => memory::mmap_write32(addr_low, value_low as i32),
+            16 => memory::mmap_write16(addr_low, (value_low & 0xFFFF) as i32),
+            8 => memory::mmap_write8(addr_low, (value_low & 0xFF) as i32),
+            _ => {
+                dbg_assert!(false);
+            },
+        }
+
+        let scratch = memory::gram_jit_scratch_base();
+        dbg_assert!(scratch & 0xFFF == 0);
+        ((scratch as i32) ^ addr) & !0xFFF
+    }
+    else {
+        (crate::phys_to_tag!(addr_low) as i32 ^ addr) & !0xFFF
+    }
+}
+
+// ---- XWAH-9 Phase 4 Stage W3: worker-topology seams ----
+//
+// Appended at the end of the file so the default build's panic-Location
+// line numbers above stay put; every in-body hook replaces exactly one
+// line at its call site (the write_pte_ad!/cmpxchg8b_prologue! pattern).
+// The default arms expand to the historical code; the feature arms route
+// into cpu::worker (src/rust/cpu/worker.rs).
+
+/// main_loop's first statement: the MAIN_LOOP profiler stat, plus — in a
+/// per-vCPU worker (topology (b)) — the dispatch into the worker loop
+/// (design §3): worker_vcpu set -> main_loop_worker; else the smp/fast
+/// paths below run unchanged.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! main_loop_stat_or_worker {
+    () => {
+        profiler::stat_increment(stat::MAIN_LOOP)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! main_loop_stat_or_worker {
+    () => {
+        profiler::stat_increment(stat::MAIN_LOOP);
+        if let Some(i) = $crate::cpu::worker::vcpu_index() {
+            return $crate::cpu::worker::main_loop_worker(i);
+        }
+    };
+}
+
+/// TLB fill's has-code test: in a per-vCPU worker a page is treated as
+/// containing code when ANY worker's code bitmap says so, so writes to it
+/// take the dirty-notify slow path (design §9 W3 note).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! page_has_code_hook {
+    ($high:expr) => {
+        jit::jit_page_has_code(Page::page_of($high))
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! page_has_code_hook {
+    ($high:expr) => {
+        (jit::jit_page_has_code(Page::page_of($high))
+            || $crate::cpu::worker::remote_page_has_code($high))
+    };
+}
+
+/// handle_irqs' 8259 acknowledge: the BSP worker services the PIC flag
+/// through the pic_acknowledge mailbox RPC; the device host never
+/// acknowledges (design §4).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_acknowledge_hook {
+    () => {
+        pic::pic_acknowledge_irq()
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_acknowledge_hook {
+    () => {
+        $crate::cpu::worker::pic_acknowledge()
+    };
+}
+
+/// wake_bsp_if_pic_requested's condition: on the (b) device host an
+/// asserting 8259 posts the PIC flag + doorbell[0] instead of the local
+/// note_interrupt/stop_idling wake.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! wake_bsp_hook {
+    () => {
+        vcpu::count() > 1 && pic::has_requested_irq()
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! wake_bsp_hook {
+    () => {
+        $crate::cpu::worker::wake_bsp_filter()
+    };
+}
+
+/// io_port_read8's scrutinee: a per-vCPU worker forwards the 8259/ELCR
+/// ports to the device host (whose host_io_port_read8 export reaches the
+/// authoritative PIC through this same intercept on the main instance).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_port_forward_read8 {
+    ($port:expr) => {
+        $port
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_port_forward_read8 {
+    ($port:expr) => {{
+        if $crate::cpu::worker::in_vcpu_worker()
+            && matches!($port, 0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1)
+        {
+            return js::io_port_read8($port);
+        }
+        $port
+    }};
+}
+
+/// io_port_write8's scrutinee: the write twin of pic_port_forward_read8.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! pic_port_forward_write8 {
+    ($port:expr, $value:expr) => {
+        $port
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! pic_port_forward_write8 {
+    ($port:expr, $value:expr) => {{
+        if $crate::cpu::worker::in_vcpu_worker()
+            && matches!($port, 0x20 | 0x21 | 0xA0 | 0xA1 | 0x4D0 | 0x4D1)
+        {
+            return js::io_port_write8($port, $value);
+        }
+        $port
+    }};
+}
+
+/// instr_F4's park leg (hlt with IF=0 under SMP): a per-vCPU worker
+/// additionally publishes the parked state to the control region.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! vcpu_park_hook {
+    () => {
+        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! vcpu_park_hook {
+    () => {
+        vcpu::set_run_state(vcpu::current(), vcpu::RunState::Parked);
+        $crate::cpu::worker::publish_parked();
+    };
+}

@@ -313,7 +313,18 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                         }
                     ],
                     else_block: {
-                        body: [gen_call(`${instruction_name}_reg`, reg_args)],
+                        // XWAH-9 Phase 4 Stage L1: LOCK on a register-
+                        // destination form of a LOCKable instruction is #UD
+                        // (multimem build only; the guard macro expands to
+                        // nothing in the default build). Emitted on the
+                        // same line as the call so the generated file's
+                        // line count — and with it the panic-Location
+                        // records of the default build's trailing
+                        // assert!(false) — stays byte-identical.
+                        body: [
+                            (encoding.lock ? "crate::ud_if_lock_prefix!(); " : "") +
+                                gen_call(`${instruction_name}_reg`, reg_args),
+                        ],
                     },
                 },
                 instruction_postfix

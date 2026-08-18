@@ -62,7 +62,9 @@ jobs:
         id: cache-kvm-unit-test
         with:
           path: tests/kvm-unit-tests/
-          key: ${{ runner.os }}-kvm-unit-test
+          # build.sh names the .flat set; hashing it invalidates caches
+          # built before a new test (e.g. smptest.flat) was added.
+          key: ${{ runner.os }}-kvm-unit-test-${{ hashFiles('tests/kvm-unit-tests/build.sh') }}
 
       - name: Build kvm-unit-test
         if: steps.cache-kvm-unit-test.outputs.cache-hit != 'true'
@@ -73,6 +75,7 @@ jobs:
           tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
           tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
           tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
+          CPUS=2 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/smptest.flat
 
       - name: Fetch namsmtests cache
         uses: actions/cache@v5
@@ -89,6 +92,9 @@ jobs:
 
       - name: Run rust-test
         run: make rust-test
+
+      - name: Run threads tests
+        run: make threads-test
 
       - name: Fetch image cache
         uses: actions/cache@v5
@@ -144,6 +150,15 @@ jobs:
             build/libv86*.js.map
             build/v86*.wasm
             build/*.mjs
+
+      # Runs after the artifact upload on purpose: build/v86-multimem-debug.wasm
+      # matches the build/v86*.wasm globs above and in the release job, and the
+      # multimem cargo build shares the cargo artifact path with the default
+      # build (see Makefile), so it runs last where invalidating that cache
+      # costs nothing. A failure here still fails the job and blocks the
+      # release job via `needs: test`.
+      - name: Run multimem tests
+        run: make multimem-tests
 
   upload:
     name: Upload release

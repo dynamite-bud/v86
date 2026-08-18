@@ -142,6 +142,11 @@ const benchmark_runner = benchmark_enabled ?
             machine: params.get("benchmark_machine"),
         }) :
     null;
+// Experimental (XWAH-9): the SMP topology is visible to the guest through
+// cpuid only; the guest still boots and runs on a single CPU
+const cpus = Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
+const smp_workers = params.get("workers") === "1";
+const smp_memory_model = params.get("mm") === "fenced" ? "fenced" : "relaxed";
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -188,9 +193,18 @@ const gpu_cmdline = gpu_modes.map(mode => ` ${mode}`).join("");
 const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
 
 const emulator = new V86({
-    wasm_path: "../build/v86.wasm",
+    wasm_path: smp_workers ? "../build/v86-multimem.wasm" : "../build/v86.wasm",
     memory_size,
     vga_memory_size,
+    cpus,
+    ...(smp_workers ? {
+        smp_workers: true,
+        smp_worker_url: "../src/browser/vcpu_worker.js",
+        smp_memory_model,
+    } : {}),
+    // cpus > 1 requires acpi (the LAPIC MMIO window is gated on it);
+    // keep the appliance's historical acpi-less setup for one CPU
+    acpi: cpus > 1,
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {
@@ -223,17 +237,18 @@ window.emulator = emulator;
 window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
 window.virtioGpuBenchmark = benchmark_runner;
+const boot_label = `${renderer_label}, ${cpus} cpu${cpus > 1 ? "s" : ""}`;
 status.textContent = accelerated ?
-    `Booting accelerated Alpine Openbox, Ghostty, and Codex (${renderer_label})…` :
+    `Booting accelerated Alpine Openbox, Ghostty, and Codex (${boot_label})…` :
     benchmark_enabled ?
-        `Booting the deterministic Ghostty benchmark (${renderer_label})…` :
+        `Booting the deterministic Ghostty benchmark (${boot_label})…` :
         resources ?
-            `Booting the capset-7 llvmpipe/resource triangle (${renderer_label})…` :
+            `Booting the capset-7 llvmpipe/resource triangle (${boot_label})…` :
             shader ?
-                `Booting the capset-7 version-2 guest shader (${renderer_label})…` :
+                `Booting the capset-7 version-2 guest shader (${boot_label})…` :
                 triangle ?
-                    `Booting the capset-7 reference triangle (${renderer_label})…` :
-                    `Booting Alpine Openbox, Ghostty, and Codex (${renderer_label})…`;
+                    `Booting the capset-7 reference triangle (${boot_label})…` :
+                    `Booting Alpine Openbox, Ghostty, and Codex (${boot_label})…`;
 if(benchmark_runner)
 {
     benchmark_runner.run(emulator);

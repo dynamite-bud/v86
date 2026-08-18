@@ -102,7 +102,7 @@ pub fn gen_page_switch_check(
     ctx.builder.free_local(address_local);
 
     ctx.builder
-        .const_i32(next_block_addr as i32 + unsafe { memory::mem8 } as i32);
+        .const_i32(unsafe { crate::phys_to_tag!(next_block_addr) } as i32);
     ctx.builder.ne_i32();
 
     if cfg!(debug_assertions) {
@@ -747,28 +747,28 @@ fn gen_safe_read(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.load_u8(0);
+            crate::jit_gram_load8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.load_unaligned_u16(0);
+            crate::jit_gram_load16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.load_unaligned_i32(0);
+            crate::jit_gram_load32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {
             let where_to_write = where_to_write.unwrap();
             let virt_address_local = ctx.builder.set_new_local();
             ctx.builder.const_i32(0);
             ctx.builder.get_local(&virt_address_local);
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
             ctx.builder.store_unaligned_i64(where_to_write);
 
             ctx.builder.const_i32(0);
             ctx.builder.get_local(&virt_address_local);
-            ctx.builder.load_unaligned_i64(8);
+            crate::jit_gram_load64!(ctx.builder, 8);
             ctx.builder.store_unaligned_i64(where_to_write + 8);
 
             ctx.builder.free_local(virt_address_local);
@@ -783,7 +783,7 @@ pub fn gen_get_phys_eip_plus_mem(ctx: &mut JitContext, address_local: &WasmLocal
     // In functions that need to use this value we need to fix it by substracting memory::mem
     // this is done in order to remove one instruction from the fast path of memory accesses (no need to add
     // memory::mem anymore ).
-    // We need to account for this in gen_page_switch_check and we compare with next_block_addr + memory::mem8
+    // We need to account for this in gen_page_switch_check and we compare with phys_to_tag!(next_block_addr)
     // We cannot the same while processing an AbsoluteEip flow control change so there we need to fix the value
     // by subscracting memory::mem. Overall, since AbsoluteEip is encountered less often than memory accesses so
     // this ends up improving perf.
@@ -976,26 +976,26 @@ fn gen_safe_write(
 
             let virt_address_local = ctx.builder.tee_new_local();
             ctx.builder.get_local_i64(local1);
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
 
             ctx.builder.get_local(&virt_address_local);
             ctx.builder.get_local_i64(local2);
-            ctx.builder.store_unaligned_i64(8);
+            crate::jit_gram_store64!(ctx.builder, 8);
             ctx.builder.free_local(virt_address_local);
         },
     }
     match bits {
         BitSize::BYTE => {
-            ctx.builder.store_u8(0);
+            crate::jit_gram_store8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.store_unaligned_u16(0);
+            crate::jit_gram_store16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.store_unaligned_i32(0);
+            crate::jit_gram_store32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {}, // handled above
     }
@@ -1009,9 +1009,9 @@ pub fn gen_safe_read_write(
     address_local: &WasmLocal,
     f: &dyn Fn(&mut JitContext),
 ) {
-    // Execute a virtual memory read+write. All slow paths (memory-mapped IO, tlb miss, page fault,
-    // write across page boundary and page containing jitted code are handled in
-    // safe_read_write_jit_slow
+    // LOCK (Stage L2 seam): locked instructions divert to codegen_locked.rs
+    crate::jit_locked_read_write!(ctx, bits, address_local, f);
+    // Execute a virtual memory read+write. All slow paths handled in safe_read_write_jit_slow
 
     //   entry <- tlb_data[addr >> 12 << 2]
     //   can_use_fast_path <- entry & MASK == TLB_VALID && (addr & 0xFFF) <= 0x1000 - bytes
@@ -1116,16 +1116,16 @@ pub fn gen_safe_read_write(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.load_u8(0);
+            crate::jit_gram_load8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.load_unaligned_u16(0);
+            crate::jit_gram_load16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.load_unaligned_i32(0);
+            crate::jit_gram_load32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.load_unaligned_i64(0);
+            crate::jit_gram_load64!(ctx.builder, 0);
         },
         BitSize::DQWORD => assert!(false), // not used
     }
@@ -1215,16 +1215,16 @@ pub fn gen_safe_read_write(
 
     match bits {
         BitSize::BYTE => {
-            ctx.builder.store_u8(0);
+            crate::jit_gram_store8!(ctx.builder, 0);
         },
         BitSize::WORD => {
-            ctx.builder.store_unaligned_u16(0);
+            crate::jit_gram_store16!(ctx.builder, 0);
         },
         BitSize::DWORD => {
-            ctx.builder.store_unaligned_i32(0);
+            crate::jit_gram_store32!(ctx.builder, 0);
         },
         BitSize::QWORD => {
-            ctx.builder.store_unaligned_i64(0);
+            crate::jit_gram_store64!(ctx.builder, 0);
         },
         BitSize::DQWORD => {
             dbg_assert!(false);
@@ -2703,3 +2703,92 @@ pub fn gen_debug_track_jit_exit(builder: &mut WasmBuilder, address: u32) {
         gen_fn1_const(builder, "track_jit_exit", address);
     }
 }
+
+// ---- XWAH-9 Phase 4 Stage L2: LOCK-prefix JIT lowering ----
+//
+// Appended at the end of the file (the emission itself lives in the
+// codegen_locked.rs submodule) so the default build's panic-Location line
+// numbers above stay put; the only in-body hook is the line-neutral
+// `jit_locked_read_write!` seam at the top of gen_safe_read_write.
+
+/// Stage L2 seam at the top of `gen_safe_read_write`: under the multimem
+/// build an instruction decoded with the LOCK prefix (or the implicitly
+/// locked XCHG mem forms, see `jit_locked_xchg_read_write!`) is emitted by
+/// `codegen::locked::gen_safe_read_write_locked` instead of the plain
+/// read/compute/write sequence. Expands to nothing in the default build.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_locked_read_write {
+    ($ctx:expr, $bits:expr, $addr:expr, $f:expr) => {};
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_locked_read_write {
+    ($ctx:expr, $bits:expr, $addr:expr, $f:expr) => {
+        if $ctx.cpu.prefixes & $crate::prefix::PREFIX_LOCK != 0 {
+            return $crate::codegen::locked::gen_safe_read_write_locked($ctx, $bits, $addr, $f);
+        }
+    };
+}
+
+/// XCHG mem (86/87) is architecturally locked regardless of prefix: the
+/// jit_instructions.rs mem call sites invoke this macro instead of
+/// `gen_safe_read_write` directly. The default arm is exactly the
+/// historical call; the multimem arm sets the compile-time LOCK bit first
+/// (`ctx.cpu.prefixes` is reset at the start of every jitted instruction,
+/// so no restore is needed).
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_locked_xchg_read_write {
+    ($ctx:expr, $bits:expr, $addr:expr, $f:expr) => {
+        $crate::codegen::gen_safe_read_write($ctx, $bits, $addr, $f)
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_locked_xchg_read_write {
+    ($ctx:expr, $bits:expr, $addr:expr, $f:expr) => {{
+        $ctx.cpu.prefixes |= $crate::prefix::PREFIX_LOCK;
+        $crate::codegen::gen_safe_read_write($ctx, $bits, $addr, $f)
+    }};
+}
+
+/// Non-custom lockable instructions (CMPXCHG r/m8 0FB0, XADD r/m8 0FC0 —
+/// the only `lock: 1` entries without `custom: 1`) are emitted by the
+/// generated dispatch as interpreter calls, but the runtime `*prefixes`
+/// global is always 0 during compiled execution, so the multimem build's
+/// locked interpreter lowering (cpu/lock.rs `safe_read_write8`) would
+/// never see the LOCK prefix. This wrapper — spliced line-neutrally into
+/// the generated dispatch by generate_jit.js — brackets the interpreter
+/// call of a LOCK-decoded instruction with stores materializing the
+/// compile-time prefixes into the runtime global and clearing them again
+/// afterwards (the clearing store is emitted straight-line, so it also
+/// runs on the body's page-fault return path, upholding the interpreter's
+/// `*prefixes == 0` boundary invariant). The default arm expands to
+/// exactly the historical call.
+#[cfg(not(feature = "guest-ram-import"))]
+#[macro_export]
+macro_rules! jit_lock_interp_mem_call {
+    ($ctx:expr, $call:expr) => {
+        $call
+    };
+}
+#[cfg(feature = "guest-ram-import")]
+#[macro_export]
+macro_rules! jit_lock_interp_mem_call {
+    ($ctx:expr, $call:expr) => {{
+        let locked = $ctx.cpu.prefixes & $crate::prefix::PREFIX_LOCK != 0;
+        if locked {
+            let prefixes = $ctx.cpu.prefixes;
+            $crate::codegen::locked::gen_store_runtime_prefixes($ctx, prefixes);
+        }
+        $call;
+        if locked {
+            $crate::codegen::locked::gen_store_runtime_prefixes($ctx, 0);
+        }
+    }};
+}
+
+#[cfg(feature = "guest-ram-import")]
+#[path = "codegen_locked.rs"]
+pub mod locked;

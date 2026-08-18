@@ -360,7 +360,16 @@ function gen_instruction_body_after_fixed_g(encoding, size)
                             "let addr = modrm::decode(ctx.cpu, modrm_byte);",
                             gen_call(`codegen::gen_modrm_resolve`, ["ctx", "addr"]),
                             imm_read_bindings,
-                            gen_call(`codegen::gen_modrm_fn${mem_args.length - 2}`, mem_args),
+                            // interpreter-called lockable forms (0FB0/0FC0): the
+                            // runtime prefixes global is 0 during compiled
+                            // execution, so a LOCK-decoded instruction must
+                            // materialize its compile-time prefixes around the
+                            // call for the multimem build's locked interpreter
+                            // lowering to engage (XWAH-9 Stage L2; expands to
+                            // exactly the historical call in the default build)
+                            encoding.lock ?
+                                `crate::jit_lock_interp_mem_call!(ctx, ${gen_call(`codegen::gen_modrm_fn${mem_args.length - 2}`, mem_args).slice(0, -1)});` :
+                                gen_call(`codegen::gen_modrm_fn${mem_args.length - 2}`, mem_args),
                             mem_postfix
                         ),
                     }],

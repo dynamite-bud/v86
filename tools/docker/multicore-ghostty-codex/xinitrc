@@ -1,0 +1,41 @@
+#!/bin/sh
+
+openbox --sm-disable >/tmp/v86-openbox.log 2>&1 &
+openbox_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    pidof openbox >/dev/null && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+if glxinfo -B >/tmp/v86-glxinfo.log 2>&1 && grep -qi llvmpipe /tmp/v86-glxinfo.log; then
+    touch /tmp/v86-appliance-gl-ready
+else
+    cat /tmp/v86-openbox.log >>/tmp/v86-appliance.log
+    kill "$openbox_pid" 2>/dev/null || true
+    exit 1
+fi
+
+xrandr --output Virtual-1 --mode 1024x768 >/tmp/v86-xrandr.log 2>&1 || true
+ghostty >/tmp/v86-ghostty.log 2>&1 &
+ghostty_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 900 ]; do
+    kill -0 "$ghostty_pid" 2>/dev/null || break
+    if pidof codex >/dev/null; then
+        touch /tmp/v86-appliance-ui-ready
+        wait "$ghostty_pid"
+        status=$?
+        kill "$openbox_pid" 2>/dev/null || true
+        exit "$status"
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+cat /tmp/v86-ghostty.log >>/tmp/v86-appliance.log
+kill "$openbox_pid" 2>/dev/null || true
+exit 1

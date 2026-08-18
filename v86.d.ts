@@ -200,6 +200,7 @@ export interface Event {
         total: number,
         loaded: number,
     };
+    "emulator-error": Error;
     "emulator-loaded": void;
     "emulator-ready": void;
     "emulator-started": void;
@@ -439,6 +440,91 @@ export interface V86Options {
     wasm_path?: string;
 
     /**
+     * NOTE: Experimental (XWAH-9). Guest RAM backing:
+     * - "linear" (default): guest RAM lives inside the wasm module's own
+     *   linear memory, exactly as before.
+     * - "imported": guest RAM is a separate `WebAssembly.Memory` created
+     *   before instantiation and imported by the wasm side. The default
+     *   loader then loads `v86-multimem.wasm`/`v86-multimem-debug.wasm` and
+     *   the matching `gram.wasm`/`gram-shared.wasm` accessor module from the
+     *   same directory. `wasm_path` still overrides the main artifact path,
+     *   but must then point at a multimem-compatible artifact (the gram
+     *   artifacts are expected next to it). Requires WebAssembly
+     *   multi-memory support; the constructor probes for it and throws
+     *   synchronously on engines without it. Failures after construction
+     *   (e.g. a missing gram artifact) are reported via the
+     *   `"emulator-error"` event. See docs/multicore.md.
+     * @default "linear"
+     */
+    guest_memory_backend?: "linear" | "imported";
+
+    /**
+     * NOTE: Experimental (XWAH-9). Only meaningful with
+     * `guest_memory_backend: "imported"`: whether the imported guest memory
+     * is created shared (SharedArrayBuffer-backed, usable from workers).
+     * "auto" follows `crossOriginIsolated` in browsers and SharedArrayBuffer
+     * availability in Node. When the backing is shared, `read_memory`
+     * returns a copy instead of a live view.
+     * @default "auto"
+     */
+    guest_memory_shared?: "auto" | boolean;
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4). Requests worker execution
+     * (docs/smp-phase4-design.md §8/§9): guest vCPUs run in dedicated
+     * workers over the shared imported guest memory while the main thread
+     * serves devices — one worker per vCPU for `cpus > 1` (real host
+     * parallelism), the whole machine in one worker otherwise; see
+     * `smp_worker_topology`. Forces `guest_memory_backend: "imported"`
+     * with a shared memory. `true` is a hard requirement — the
+     * constructor throws synchronously naming the missing capability
+     * (multi-memory, SharedArrayBuffer/COI, Worker) or unsupported option
+     * combination (`multiboot`, `wasm_fn`), and spawn failures surface as
+     * `"emulator-error"`; `"auto"` degrades down the ladder (workers →
+     * time-sliced over imported memory → time-sliced) with a debug log.
+     * The resolved mode is reported through the `"smp-mode"` event and
+     * the `smp_mode` property. Worker failures after boot are fail-stop:
+     * remaining workers park, `"emulator-error"` fires, the machine
+     * stops. See docs/multicore.md.
+     * @default false
+     */
+    smp_workers?: boolean | "auto";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W3). Worker-execution
+     * topology: `"auto"` resolves to one worker per vCPU (`"percpu"`) for
+     * `cpus > 1` and the whole machine in one worker (`"machine"`) for
+     * `cpus == 1`; the explicit values force a topology.
+     * @default "auto"
+     */
+    smp_worker_topology?: "auto" | "percpu" | "machine";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W5). Memory-ordering
+     * posture for worker execution (docs/smp-phase4-design.md §5).
+     * `"relaxed"` (default): plain guest accesses stay plain wasm
+     * accesses — on weakly ordered hosts (ARM) racing plain guest
+     * accesses can observe x86-forbidden orderings at ppm rates (locked
+     * ops are always sequentially consistent). `"fenced"`: every JIT
+     * guest-RAM fast-path access carries a seq-cst fence, restoring
+     * x86-TSO at a substantial per-access cost (interpreter and slow-path
+     * accesses stay unfenced — see docs/multicore.md known limitations).
+     * @default "relaxed"
+     */
+    smp_memory_model?: "relaxed" | "fenced";
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4 Stage W2). URL (or Node path/URL)
+     * of the machine-worker entry point, `src/browser/vcpu_worker.js` — a
+     * standalone module deliberately outside the bundled library. Defaults
+     * to `"src/browser/vcpu_worker.js"` relative to the document (browsers)
+     * or `"./src/browser/vcpu_worker.js"` relative to the working directory
+     * (Node); embedders with a different layout must set it for
+     * `smp_workers` to spawn.
+     */
+    smp_worker_url?: string | URL;
+
+    /**
      * The memory size in bytes, should be a power of 2.
      * @example 16 * 1024 * 1024
      * @default 64 * 1024 * 1024
@@ -672,6 +758,18 @@ export interface V86Options {
     cpuid_level?: number;
 
     /**
+     * Number of emulated CPUs (1 to 255). Experimental time-sliced SMP
+     * (XWAH-9): the firmware advertises all CPUs and secondary CPUs boot,
+     * multiplexed on a single host thread (no parallelism). Values above 1
+     * require `acpi: true` — the local APIC is gated on acpi — and are
+     * clamped to 1 without it. State images saved with `cpus > 1` use state
+     * format version 7 and only restore into a machine constructed with the
+     * same `cpus` value. See docs/multicore.md.
+     * @default 1
+     */
+    cpus?: number;
+
+    /**
      * Turn off the x86-to-wasm jit
      * @default false
      */
@@ -717,6 +815,22 @@ export interface V86Options {
 
 export class V86 {
     constructor(options: V86Options);
+
+    /**
+     * NOTE: Experimental (XWAH-9 Phase 4). The resolved SMP execution
+     * mode, set at init-complete (also delivered as the `"smp-mode"` bus
+     * event): where guest code executes, the worker topology and memory
+     * model (both `null` off workers), the effective vCPU count after
+     * option clamping, and the guest-memory backing. `null` until
+     * initialization completes.
+     */
+    smp_mode: {
+        execution: "workers" | "time-sliced",
+        topology: "percpu" | "machine" | null,
+        memory_model: "relaxed" | "fenced" | null,
+        cpus_effective: number,
+        guest_memory: { backend: "linear" | "imported", shared: boolean },
+    } | null;
 
     /**
      * Start emulation. Do nothing if emulator is running already. Can be asynchronous.
@@ -976,6 +1090,11 @@ export class V86 {
 
     /**
      * Reads data from memory at specified offset.
+     *
+     * Returns a live view of guest RAM, except when guest RAM is backed by
+     * a SharedArrayBuffer (guest_memory_backend "imported" with a shared
+     * memory), where a copy is returned instead: browsers reject SAB-backed
+     * views in APIs like TextDecoder, Blob and fetch.
      *
      * @param offset
      * @param length
