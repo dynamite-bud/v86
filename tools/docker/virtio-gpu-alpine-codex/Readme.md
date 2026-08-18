@@ -180,6 +180,31 @@ for real credentials; a public relay is suitable only for disposable testing
 and can observe connection metadata even though application HTTPS remains
 encrypted.
 
+## Browser Display, Input, and Rootfs Cache
+
+The guest owns a fixed 1920x1080 scanout. The page presents it at a 16:9
+aspect ratio, up to its native size, and hides both the host cursor and the
+VirtIO GPU cursor overlay. Narrow browser viewports therefore downsample the
+scanout instead of changing the guest mode. Browser-native canvas filtering
+and the 16-point Ghostty font avoid the uneven glyph edges produced by
+nearest-neighbor scaling at a non-integer ratio. A hard refresh is required
+after rebuilding the image or browser bundle.
+
+Outside pointer lock, the mouse adapter derives movement from `clientX` and
+`clientY`, whose units match CSS layout pixels. It then maps those deltas
+through the current canvas-to-scanout scale. This avoids the roughly 2x cursor
+acceleration seen on HiDPI hosts where `movementX` and `movementY` may use
+physical pixels. Pointer lock continues to consume unbounded movement deltas.
+
+The browser's in-memory immutable-file cache is a 256 MiB byte-bounded LRU.
+Closing a guest file releases its active owner but retains recently used data
+until cache pressure evicts it; explicit invalidation still removes data
+immediately, and objects larger than the complete cache are not retained. This
+avoids repeated HTTP fetch and zstd decompression when Codex reopens executable
+or library chunks. Browser acceptance rejects duplicate `.bin.zst` requests
+during the complete boot and configuration interaction.
+
+
 ## Manual Codex Launch and Permissions
 
 Normal boots intentionally stop at a shell prompt in

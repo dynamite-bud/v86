@@ -77,6 +77,15 @@ The work followed a gated, reproducible path rather than modifying the existing 
 
 This structure keeps downloaded application artifacts, guest assembly, emulator presentation, and browser acceptance independently reviewable.
 
+The browser host contract is equally explicit: a fixed 1920x1080 guest
+scanout is responsively downsampled with browser-native filtering; the
+16-point terminal font remains legible at non-integer fit ratios; hidden
+host/guest cursor overlays leave the terminal pointerless; CSS-pixel mouse
+deltas prevent HiDPI acceleration outside pointer lock; and a byte-bounded
+256 MiB LRU retains recently closed immutable rootfs chunks. Acceptance rejects
+duplicate compressed-chunk requests during its boot and interaction sequence.
+
+
 ## Manual Codex Session
 
 Normal boot stops at `/home/codex/workspace` in Ghostty. Codex is installed but
