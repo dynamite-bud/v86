@@ -87,6 +87,19 @@ make all-debug
 make virtio-gpu-wgpu
 ```
 
+The combined four-vCPU accelerated variant reuses the same locked guest inputs
+and custom Mesa build, adds the multicore readiness probe, and writes a distinct
+artifact namespace:
+
+```sh
+make virtio-gpu-multi-core-alpine-codex-image
+make virtio-gpu-multi-core-alpine-codex-browser-test
+```
+
+Its generated artifacts use the
+`virtio-gpu-multi-core-alpine-codex-*` prefix, so they cannot silently collide
+with either the single-core or multicore-only appliance.
+
 The image target writes ignored build products under `images/`:
 
 - `alpine-virtio-gpu-codex-rootfs.tar`
@@ -112,8 +125,10 @@ Do not commit generated images or Docker exports. An intentional input change re
 Serve the repository root:
 
 ```sh
-python3 -m http.server 8082 --bind 127.0.0.1
+python3 tools/coi-server.py 8082
 ```
+
+The cross-origin-isolated server is required by worker-per-vCPU execution.
 
 Offline direct-JavaScript launch:
 
@@ -140,6 +155,20 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?renderer=wgpu&accelerated=1
 For this mode, require `V86_APPLIANCE_RENDERER=webgpuvirt (v86 WebGPU)`,
 `V86_APPLIANCE_LOOPBACK=PASS`, `V86_APPLIANCE_NETWORK=PASS`, and
 `V86_APPLIANCE_CODEX_APPS=DISABLED`; do not accept llvmpipe fallback.
+
+The combined accelerated multicore launch fixes the Rust/Wasm `wgpu` backend,
+guest `webgpuvirt` rendering, four worker-backed vCPUs, and the relaxed SMP
+memory model:
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?preset=multi-core-accelerated
+```
+
+Append the same percent-encoded `relay=` parameter when guest networking is
+required. The corresponding acceptance target requires all four vCPUs online,
+worker execution, at least `1.30x` in-guest parallel speedup, non-llvmpipe
+rendering, accelerated 3D command submission, and the complete Ghostty/Codex
+readiness contract.
 
 The page deliberately does not hardcode a relay. Without `relay=`, it reports
 `VirtIO NIC relay: unconfigured`, passes `v86_relay=unconfigured` to the guest,

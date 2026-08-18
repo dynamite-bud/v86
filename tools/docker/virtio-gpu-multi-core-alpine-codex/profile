@@ -1,0 +1,4 @@
+if [ "$(tty)" = /dev/tty1 ]; then
+    /usr/local/sbin/v86-multicore-probe || exit 1
+    exec /usr/local/sbin/v86-appliance-session
+fi

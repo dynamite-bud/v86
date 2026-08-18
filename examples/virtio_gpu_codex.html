@@ -126,12 +126,16 @@
 import { V86 } from "../build/libv86.mjs";
 
 const params = new URLSearchParams(location.search);
-const renderer = params.get("renderer") === "wgpu" ? "wgpu" : "webgpu-js";
+const preset = params.get("preset");
+const multi_core_accelerated = preset === "multi-core-accelerated";
+const renderer = multi_core_accelerated || params.get("renderer") === "wgpu" ?
+    "wgpu" : "webgpu-js";
 const relay_url = params.get("relay");
 const shader = params.get("shader") === "1";
 const resources = params.get("resources") === "1";
 const mesa = params.get("mesa") === "1";
-const accelerated = renderer === "wgpu" && params.get("accelerated") === "1";
+const accelerated = renderer === "wgpu" &&
+    (multi_core_accelerated || params.get("accelerated") === "1");
 const triangle = params.get("triangle") === "1" || shader || resources || mesa || accelerated;
 const benchmark_enabled = params.get("benchmark") === "1";
 const benchmark_runner = benchmark_enabled ?
@@ -142,11 +146,11 @@ const benchmark_runner = benchmark_enabled ?
             machine: params.get("benchmark_machine"),
         }) :
     null;
-// Experimental (XWAH-9): the SMP topology is visible to the guest through
-// cpuid only; the guest still boots and runs on a single CPU
-const cpus = Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
-const smp_workers = params.get("workers") === "1";
-const smp_memory_model = params.get("mm") === "fenced" ? "fenced" : "relaxed";
+const cpus = multi_core_accelerated ? 4 :
+    Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
+const smp_workers = multi_core_accelerated || params.get("workers") === "1";
+const smp_memory_model = multi_core_accelerated ? "relaxed" :
+    params.get("mm") === "fenced" ? "fenced" : "relaxed";
 const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
@@ -159,6 +163,10 @@ for(const name of ["webgpu-js", "wgpu"])
 {
     const link = document.getElementById(`${name}-link`);
     const url = new URL(location.href);
+    if(multi_core_accelerated)
+    {
+        url.searchParams.delete("preset");
+    }
     url.searchParams.set("renderer", name);
     if(params.has("relay"))
     {
@@ -182,6 +190,8 @@ const filesystem_size = 2 * 1024 * 1024 * 1024;
 const width = 1024;
 const height = 768;
 const relay_state = relay_url ? "configured" : "unconfigured";
+const filesystem_prefix = multi_core_accelerated ?
+    "virtio-gpu-multi-core-alpine-codex" : "alpine-virtio-gpu-codex";
 const gpu_modes = [];
 if(benchmark_enabled) gpu_modes.push("v86_gpu_benchmark=1");
 if(accelerated) gpu_modes.push("v86_gpu_accelerated=1");
@@ -189,6 +199,7 @@ else if(mesa) gpu_modes.push("v86_gpu_mesa=1");
 else if(resources) gpu_modes.push("v86_gpu_resources=1");
 else if(shader) gpu_modes.push("v86_gpu_shader=1");
 else if(triangle) gpu_modes.push("v86_gpu_triangle=1");
+if(multi_core_accelerated) gpu_modes.push(`v86_cpus=${cpus}`);
 const gpu_cmdline = gpu_modes.map(mode => ` ${mode}`).join("");
 const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
 
@@ -208,8 +219,8 @@ const emulator = new V86({
     bios: { url: "../bios/seabios.bin" },
     vga_bios: { url: "../bios/vgabios.bin" },
     filesystem: {
-        baseurl: "../images/alpine-virtio-gpu-codex-rootfs-flat",
-        basefs: "../images/alpine-virtio-gpu-codex-fs.json",
+        baseurl: `../images/${filesystem_prefix}-rootfs-flat`,
+        basefs: `../images/${filesystem_prefix}-fs.json`,
         total_size: filesystem_size,
     },
     screen_container: document.getElementById("screen_container"),
@@ -237,18 +248,21 @@ window.emulator = emulator;
 window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
 window.virtioGpuBenchmark = benchmark_runner;
+window.appliancePreset = preset;
 const boot_label = `${renderer_label}, ${cpus} cpu${cpus > 1 ? "s" : ""}`;
-status.textContent = accelerated ?
-    `Booting accelerated Alpine Openbox, Ghostty, and Codex (${boot_label})…` :
-    benchmark_enabled ?
-        `Booting the deterministic Ghostty benchmark (${boot_label})…` :
-        resources ?
-            `Booting the capset-7 llvmpipe/resource triangle (${boot_label})…` :
-            shader ?
-                `Booting the capset-7 version-2 guest shader (${boot_label})…` :
-                triangle ?
-                    `Booting the capset-7 reference triangle (${boot_label})…` :
-                    `Booting Alpine Openbox, Ghostty, and Codex (${boot_label})…`;
+status.textContent = multi_core_accelerated ?
+    `Booting accelerated four-vCPU Alpine Ghostty (${boot_label})…` :
+    accelerated ?
+        `Booting accelerated Alpine Openbox, Ghostty, and Codex (${boot_label})…` :
+        benchmark_enabled ?
+            `Booting the deterministic Ghostty benchmark (${boot_label})…` :
+            resources ?
+                `Booting the capset-7 llvmpipe/resource triangle (${boot_label})…` :
+                shader ?
+                    `Booting the capset-7 version-2 guest shader (${boot_label})…` :
+                    triangle ?
+                        `Booting the capset-7 reference triangle (${boot_label})…` :
+                        `Booting Alpine Openbox, Ghostty, and Codex (${boot_label})…`;
 if(benchmark_runner)
 {
     benchmark_runner.run(emulator);

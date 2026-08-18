@@ -470,6 +470,16 @@ virtio-gpu-codex-benchmark-accelerated: build/libv86.mjs build/v86.wasm virtio-g
 multicore-ghostty-codex-browser-test: build/libv86.mjs build/v86-multimem.wasm \
 		build/gram.wasm build/gram-shared.wasm
 	./tests/browser/multicore_ghostty_codex_acceptance.js
+
+# Four worker vCPUs plus the pinned webgpuvirt guest and Rust/Wasm wgpu host.
+# This is the combined high-performance CPU/GPU appliance, not either
+# single-axis regression fixture.
+virtio-gpu-multi-core-alpine-codex-browser-test: build/libv86.mjs \
+		build/v86-multimem.wasm build/gram.wasm build/gram-shared.wasm \
+		virtio-gpu-wgpu virtio-gpu-multi-core-alpine-codex-image
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
+		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
@@ -604,6 +614,9 @@ virtio-gpu-codex-image:
 multicore-ghostty-codex-image:
 	tools/docker/multicore-ghostty-codex/build.sh
 
+virtio-gpu-multi-core-alpine-codex-image:
+	tools/docker/virtio-gpu-multi-core-alpine-codex/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -625,4 +638,6 @@ denodoc:
 	virtio-gpu-3d-triangle-test virtio-gpu-3d-shader-test \
 	virtio-gpu-webgpuvirt-triangle-test virtio-gpu-color-test \
 	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image \
-	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test
+	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test \
+	virtio-gpu-multi-core-alpine-codex-image \
+	virtio-gpu-multi-core-alpine-codex-browser-test

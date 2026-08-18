@@ -1,0 +1,55 @@
+#!/bin/sh
+
+exec 3>/dev/ttyS0
+
+fail()
+{
+    printf 'V86_APPLIANCE_FAILURE=%s\n' "$1" >&3
+    printf 'V86_APPLIANCE_READY=FAIL\nV86_APPLIANCE_END\n' >&3
+    exit 1
+}
+
+now()
+{
+    cut -d' ' -f1 /proc/uptime
+}
+
+busy()
+{
+    awk 'BEGIN { s = 0; for(i = 0; i < 300000; i++) { s += i % 7 } }' >/dev/null
+}
+
+printf 'V86_APPLIANCE_IMAGE=virtio-gpu-multi-core-alpine-codex\n' >&3
+
+online_cpus=$(nproc) || fail cpu-count-unavailable
+expected_cpus=$(sed -n 's/.*v86_cpus=\([0-9][0-9]*\).*/\1/p' /proc/cmdline)
+printf 'V86_APPLIANCE_CPUS=%s\n' "$online_cpus" >&3
+printf 'V86_APPLIANCE_CPUS_EXPECTED=%s\n' "$expected_cpus" >&3
+[ "$expected_cpus" = 4 ] || fail expected-cpu-count
+[ "$online_cpus" = "$expected_cpus" ] || fail cpu-count-mismatch
+
+serial_start=$(now)
+busy
+serial_end=$(now)
+
+parallel_start=$(now)
+i=0
+while [ "$i" -lt "$online_cpus" ]; do
+    busy &
+    i=$((i + 1))
+done
+wait
+parallel_end=$(now)
+
+speedup=$(awk -v s="$serial_start" -v se="$serial_end" \
+              -v p="$parallel_start" -v pe="$parallel_end" \
+              -v n="$online_cpus" \
+    'BEGIN { st = se - s; pt = pe - p;
+             if(st <= 0 || pt <= 0) { print "0.00" }
+             else { printf "%.2f", n * st / pt } }')
+printf 'V86_APPLIANCE_PARALLEL_SPEEDUP=%s\n' "$speedup" >&3
+if awk -v v="$speedup" 'BEGIN { exit !(v >= 1.30) }'; then
+    printf 'V86_APPLIANCE_PARALLEL=PASS\n' >&3
+else
+    printf 'V86_APPLIANCE_PARALLEL=WEAK\n' >&3
+fi

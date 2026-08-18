@@ -13,13 +13,15 @@ const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 3000
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
+const MULTICORE_ACCELERATED = SCENARIO === "multi-core-accelerated";
+const ACCELERATED = SCENARIO === "accelerated" || MULTICORE_ACCELERATED;
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
 const LLVMPipe_BENCHMARK_PATH =
     path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
 assert.ok(
-    ["appliance", "accelerated", "triangle", "shader", "resources", "mesa", "benchmark",
-        "benchmark-accelerated"].includes(SCENARIO),
+    ["appliance", "accelerated", "multi-core-accelerated", "triangle", "shader",
+        "resources", "mesa", "benchmark", "benchmark-accelerated"].includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
@@ -33,11 +35,18 @@ for(const renderer of renderers)
         `Invalid renderer in V86_CODEX_BROWSER_RENDERERS: ${renderer}`);
 }
 
-for(const relative of [
+const required = [
     "build/libv86.mjs",
-    "build/v86.wasm",
-    "images/alpine-virtio-gpu-codex-fs.json",
-])
+    MULTICORE_ACCELERATED ? "build/v86-multimem.wasm" : "build/v86.wasm",
+    MULTICORE_ACCELERATED ?
+        "images/virtio-gpu-multi-core-alpine-codex-fs.json" :
+        "images/alpine-virtio-gpu-codex-fs.json",
+];
+if(MULTICORE_ACCELERATED)
+{
+    required.push("build/gram.wasm", "build/gram-shared.wasm");
+}
+for(const relative of required)
 {
     if(!fs.existsSync(path.join(ROOT, relative)))
     {
@@ -103,6 +112,9 @@ function serve_file(request, response)
             return;
         }
         response.setHeader("Content-Type", content_type(filename));
+        response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+        response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+        response.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
         response.setHeader("Cache-Control", "no-store");
         const stream = fs.createReadStream(filename);
         stream.on("error", () => response.destroy());
@@ -176,11 +188,12 @@ async function run_scenario(browser_ws, base_url, renderer)
         const started = performance.now();
         const url = new URL(
             `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
+        if(MULTICORE_ACCELERATED) url.searchParams.set("preset", "multi-core-accelerated");
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
         if(SCENARIO === "shader") url.searchParams.set("shader", "1");
         else if(SCENARIO === "resources") url.searchParams.set("resources", "1");
         else if(SCENARIO === "mesa") url.searchParams.set("mesa", "1");
-        else if(SCENARIO === "accelerated") url.searchParams.set("accelerated", "1");
+        else if(ACCELERATED) url.searchParams.set("accelerated", "1");
         else if(SCENARIO === "triangle") url.searchParams.set("triangle", "1");
         else if(SCENARIO === "benchmark" || SCENARIO === "benchmark-accelerated")
         {
@@ -235,7 +248,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             return state.result === "pass";
         }, READY_TIMEOUT_MS, `${renderer} appliance readiness`);
         const ready_ms = performance.now() - started;
-        if(SCENARIO === "appliance" || SCENARIO === "accelerated")
+        if(SCENARIO === "appliance" || ACCELERATED)
         {
             await new Promise(resolve => setTimeout(resolve, 3000));
             const stable = await evaluate(cdp,
@@ -271,6 +284,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             return {
                 session_id: window.applianceSessionId,
                 serial,
+                cross_origin_isolated: crossOriginIsolated,
+                smp_mode: window.emulator.smp_mode || null,
                 memory_size: window.emulator.v86.cpu.memory_size[0],
                 storage_size: window.emulator.fs9p.total_size,
                 scanout: device.scanouts[0],
@@ -625,8 +640,29 @@ async function run_scenario(browser_ws, base_url, renderer)
         {
             assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
         }
-        const accelerated = SCENARIO === "accelerated";
+        let parallel_speedup = null;
+        if(MULTICORE_ACCELERATED)
+        {
+            for(const marker of [
+                "V86_APPLIANCE_IMAGE=virtio-gpu-multi-core-alpine-codex",
+                "V86_APPLIANCE_CPUS=4",
+                "V86_APPLIANCE_CPUS_EXPECTED=4",
+            ])
+            {
+                assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
+            }
+            parallel_speedup = Number(
+                /V86_APPLIANCE_PARALLEL_SPEEDUP=([0-9.]+)/.exec(state.serial)?.[1]);
+            assert.ok(parallel_speedup >= 1.2,
+                `Parallel speedup ${parallel_speedup} is below the worker execution gate`);
+            assert.equal(state.cross_origin_isolated, true);
+            assert.equal(state.smp_mode?.execution, "workers");
+            assert.equal(state.smp_mode?.topology, "percpu");
+            assert.equal(state.smp_mode?.memory_model, "relaxed");
+        }
+        const accelerated = ACCELERATED;
         let accelerated_screenshot = null;
+        let accelerated_submit_3d_commands = null;
         assert.match(state.serial, accelerated ?
             /V86_APPLIANCE_RENDERER=.*webgpuvirt/i :
             /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
@@ -652,6 +688,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             assert.equal(gpu.stats.backend_errors, 0);
             assert.ok((gpu.stats.command_counts["0x207"] || 0) >= 1,
                 "Accelerated Ghostty did not submit a standard VirGL command stream");
+            accelerated_submit_3d_commands = gpu.stats.command_counts["0x207"];
             assert.equal(gpu.last_invalid_3d_error, null);
             accelerated_screenshot = await sample_canvas_screenshot(cdp, state);
             assert.ok(accelerated_screenshot.nonblack,
@@ -771,6 +808,11 @@ async function run_scenario(browser_ws, base_url, renderer)
             uid: 1000,
             llvmpipe: !accelerated,
             accelerated_3d: accelerated,
+            preset: MULTICORE_ACCELERATED ? "multi-core-accelerated" : null,
+            vcpus: MULTICORE_ACCELERATED ? 4 : 1,
+            worker_execution: MULTICORE_ACCELERATED,
+            parallel_speedup,
+            submit_3d_commands: accelerated_submit_3d_commands,
             tls_relay: Boolean(RELAY_URL),
             codex_apps_disabled: true,
             codex_autostart: false,
