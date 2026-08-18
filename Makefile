@@ -529,7 +529,7 @@ threads-test: build/gram.wasm build/gram-shared.wasm
 # invalidates a previous default build's cargo cache and vice versa — the
 # copied build/*.wasm artifacts stay distinct.
 .PHONY: multimem-tests
-multimem-tests: build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
+multimem-tests: build/v86-debug.wasm build/v86-multimem-debug.wasm build/gram.wasm build/gram-shared.wasm
 	./tests/api/multimem-negative.js
 	./tests/api/multimem.js
 	./tests/threads/guest-lock-exactness.js
