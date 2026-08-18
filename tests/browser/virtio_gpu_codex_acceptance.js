@@ -771,6 +771,38 @@ async function run_scenario(browser_ws, base_url, renderer)
         });
         await wait_for(async() => (await evaluate(cdp, "window.applianceKeyboardEvents")) > 0,
             5000, "guest keyboard input");
+        const hidpi_pointer = await evaluate(cdp, `(() => {
+            window.applianceHiDpiMouseDeltas = [];
+            window.emulator.emulator_bus.register(
+                "mouse-delta", data => window.applianceHiDpiMouseDeltas.push(data));
+            const canvas = document.querySelector(".v86-virtio-gpu-canvas");
+            const rect = canvas.getBoundingClientRect();
+            const dispatch = (client_x, client_y, movement_x, movement_y) => {
+                const event = new MouseEvent("mousemove", {
+                    bubbles: true,
+                    clientX: client_x,
+                    clientY: client_y,
+                });
+                Object.defineProperties(event, {
+                    movementX: { value: movement_x },
+                    movementY: { value: movement_y },
+                });
+                canvas.dispatchEvent(event);
+            };
+            dispatch(rect.left + 100, rect.top + 100, 0, 0);
+            dispatch(rect.left + 112, rect.top + 107, 24, 14);
+            return {
+                emitted: window.applianceHiDpiMouseDeltas.at(-1),
+                expected: [
+                    12 * canvas.width / rect.width,
+                    -7 * canvas.height / rect.height,
+                ],
+            };
+        })()`);
+        assert.ok(Math.abs(hidpi_pointer.emitted[0] - hidpi_pointer.expected[0]) < 0.01,
+            `HiDPI pointer x drifted: ${JSON.stringify(hidpi_pointer)}`);
+        assert.ok(Math.abs(hidpi_pointer.emitted[1] - hidpi_pointer.expected[1]) < 0.01,
+            `HiDPI pointer y drifted: ${JSON.stringify(hidpi_pointer)}`);
 
         const pointer_points = await evaluate(cdp, `(() => {
             window.applianceMouseDeltas = [];

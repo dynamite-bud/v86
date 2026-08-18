@@ -18,6 +18,9 @@ export function MouseAdapter(bus, screen_container)
 
         last_x = 0,
         last_y = 0,
+        last_client_x = 0,
+        last_client_y = 0,
+        has_last_client_position = false,
 
         mouse = this;
 
@@ -103,6 +106,7 @@ export function MouseAdapter(bus, screen_container)
 
     function pointerlockchange_handler()
     {
+        has_last_client_position = false;
         mouse.bus.send("mouse-pointer-lock", !!document.pointerLockElement);
     }
 
@@ -222,6 +226,18 @@ export function MouseAdapter(bus, screen_container)
         {
             return;
         }
+        const has_client_position =
+            typeof e.clientX === "number" && typeof e.clientY === "number";
+        const had_client_position = has_last_client_position;
+        const client_delta_x = e.clientX - last_client_x;
+        const client_delta_y = e.clientY - last_client_y;
+        if(has_client_position)
+        {
+            last_client_x = e.clientX;
+            last_client_y = e.clientY;
+            has_last_client_position = true;
+        }
+
 
         if(!may_handle(e))
         {
@@ -254,7 +270,15 @@ export function MouseAdapter(bus, screen_container)
         }
         else
         {
-            if(typeof e["movementX"] === "number")
+            if(!document.pointerLockElement && has_client_position)
+            {
+                // movementX/Y may use physical pixels on HiDPI hosts while
+                // clientX/Y always use CSS pixels. The latter keeps the host
+                // and guest pointers synchronized outside pointer lock.
+                delta_x = had_client_position ? client_delta_x : 0;
+                delta_y = had_client_position ? client_delta_y : 0;
+            }
+            else if(typeof e["movementX"] === "number")
             {
                 delta_x = e["movementX"];
                 delta_y = e["movementY"];
@@ -268,15 +292,6 @@ export function MouseAdapter(bus, screen_container)
             {
                 delta_x = e["mozMovementX"];
                 delta_y = e["mozMovementY"];
-            }
-            else
-            {
-                // Fallback for other browsers?
-                delta_x = e.clientX - last_x;
-                delta_y = e.clientY - last_y;
-
-                last_x = e.clientX;
-                last_y = e.clientY;
             }
         }
 

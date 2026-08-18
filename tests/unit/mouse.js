@@ -69,8 +69,9 @@ try
         test_window.dispatchEvent(event);
     }
 
+    move(0, 0, 98, 63);
     bus.messages.length = 0;
-    move(12, 7, 110, 70);
+    move(24, 14, 110, 70);
     assert.deepEqual(
         bus.messages.find(message => message[0] === "mouse-delta"),
         ["mouse-delta", [24, -14]],
@@ -87,6 +88,15 @@ try
         bus.messages.some(message => message[0] === "mouse-delta"),
         false,
         "absolute guests do not also receive a PS/2 relative delta");
+
+    bus.send("vmware-absolute-mouse", false);
+    test_document.pointerLockElement = test_window;
+    bus.messages.length = 0;
+    move(4, 3, 110, 70);
+    assert.deepEqual(
+        bus.messages.find(message => message[0] === "mouse-delta"),
+        ["mouse-delta", [8, -6]],
+        "pointer lock continues to use unbounded movement deltas");
 }
 finally
 {
