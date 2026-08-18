@@ -224,14 +224,14 @@ function read_devtools_url(child)
     });
 }
 
-/** Parse the guest's KEY=VALUE readiness markers out of the serial log. */
+/** Parse readiness markers even when serial diagnostics prefix the line. */
 function parse_markers(serial_text)
 {
     const markers = new Map();
-    for(const line of serial_text.split(/\r?\n/))
+    for(const match of serial_text.matchAll(
+        /(V86_APPLIANCE_[A-Z0-9_]+)=([^\r\n]*)/g))
     {
-        const match = line.match(/^(V86_APPLIANCE_[A-Z0-9_]+)=(.*)$/);
-        if(match) markers.set(match[1], match[2].trim());
+        markers.set(match[1], match[2].trim());
     }
     return markers;
 }
