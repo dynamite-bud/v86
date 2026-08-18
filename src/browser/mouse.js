@@ -182,6 +182,40 @@ export function MouseAdapter(bus, screen_container)
         }
     }
 
+    /**
+     * @return {{rect: !DOMRect, scale_x: number, scale_y: number}}
+     */
+    function get_mouse_target_geometry()
+    {
+        let rect = screen_container.getBoundingClientRect();
+        let intrinsic_width = rect.width;
+        let intrinsic_height = rect.height;
+        let largest_area = 0;
+
+        for(const canvas of screen_container.getElementsByTagName("canvas"))
+        {
+            if(canvas.hidden)
+            {
+                continue;
+            }
+            const candidate = canvas.getBoundingClientRect();
+            const area = candidate.width * candidate.height;
+            if(area > largest_area)
+            {
+                rect = candidate;
+                intrinsic_width = canvas.width || candidate.width;
+                intrinsic_height = canvas.height || candidate.height;
+                largest_area = area;
+            }
+        }
+
+        return {
+            rect,
+            scale_x: rect.width ? intrinsic_width / rect.width : 1,
+            scale_y: rect.height ? intrinsic_height / rect.height : 1,
+        };
+    }
+
     function mousemove_handler(e)
     {
         if(!mouse.bus)
@@ -246,8 +280,9 @@ export function MouseAdapter(bus, screen_container)
             }
         }
 
-        delta_x *= SPEED_FACTOR;
-        delta_y *= SPEED_FACTOR;
+        const geometry = screen_container ? get_mouse_target_geometry() : null;
+        delta_x *= SPEED_FACTOR * (geometry ? geometry.scale_x : 1);
+        delta_y *= SPEED_FACTOR * (geometry ? geometry.scale_y : 1);
 
         //if(Math.abs(delta_x) > 100 || Math.abs(delta_y) > 100)
         //{
@@ -259,13 +294,17 @@ export function MouseAdapter(bus, screen_container)
         // NOTE: affected by https://issues.chromium.org/issues/40737979
         //       Causes cursor jumps on multi-monitor and/or 120+ HZ monitors
 
-        mouse.bus.send("mouse-delta", [delta_x, delta_y]);
+        // Absolute and relative guest devices can feed the same core pointer.
+        if(!mouse.absolute_mouse || document.pointerLockElement)
+        {
+            mouse.bus.send("mouse-delta", [delta_x, delta_y]);
+        }
 
         // Under pointer lock the page coordinates don't change, so no
         // meaningful absolute position can be reported
-        if(screen_container && !document.pointerLockElement)
+        if(geometry && !document.pointerLockElement)
         {
-            const rect = screen_container.getBoundingClientRect();
+            const rect = geometry.rect;
             mouse.bus.send("mouse-absolute", [
                 e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height]);
         }

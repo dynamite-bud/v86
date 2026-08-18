@@ -431,6 +431,9 @@ filesystem-unit-test:
 	./tests/unit/filesystem_capacity.js
 	./tests/unit/filestorage.js
 
+mouse-unit-test:
+	./tests/unit/mouse.js
+
 virtio-gpu-unit-test:
 	node tools/docker/virtio-gpu-color/generate-fixtures.js --check
 	./tests/unit/virtio_gpu_protocol.js
@@ -568,7 +571,7 @@ api-tests: build/v86-debug.wasm filesystem-unit-test
 	./tests/api/smp.js
 	./tests/api/smp-state.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test virtio-gpu-unit-test multimem-tests
+all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test threads-test tests expect-tests acpi-unit-test pci-unit-test mouse-unit-test virtio-gpu-unit-test multimem-tests
 	# Skipping:
 	# - devices-test (hangs)
 	# multimem-tests runs last: its build/v86-multimem-debug.wasm dependency
@@ -630,8 +633,8 @@ doc:
 denodoc:
 	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
 
-.PHONY: tests acpi-unit-test pci-unit-test virtio-gpu-unit-test virtio-gpu-test virtio-gpu-test-release \
-	virtio-gpu-capset-probe-test virtio-gpu-browser-test virtio-gpu-ready-snapshot-test \
+.PHONY: tests acpi-unit-test pci-unit-test mouse-unit-test virtio-gpu-unit-test \
+	virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-codex-browser-test virtio-gpu-codex-accelerated-test \
 	virtio-gpu-codex-benchmark virtio-gpu-codex-benchmark-accelerated \
 	virtio-gpu-3d-transport-test \

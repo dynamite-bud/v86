@@ -30,16 +30,31 @@ FileStorageInterface.prototype.cache = function(sha256sum, data) {};
 FileStorageInterface.prototype.uncache = function(sha256sum) {};
 
 /**
+ * Call this when a file closes. Storage implementations may keep the immutable
+ * data cached until they need the space.
+ * @param {string} sha256sum
+ */
+FileStorageInterface.prototype.release = function(sha256sum) {};
+
+/**
  * @constructor
  * @implements {FileStorageInterface}
+ * @param {number=} max_bytes Maximum cached immutable data in bytes. Defaults to 256 MiB.
  */
-export function MemoryFileStorage()
+export function MemoryFileStorage(max_bytes = 256 * 1024 * 1024)
 {
+    if(!Number.isSafeInteger(max_bytes) || max_bytes < 0)
+    {
+        throw new TypeError("MemoryFileStorage max_bytes must be a non-negative safe integer");
+    }
+
     /**
-     * From sha256sum to file data.
+     * From sha256sum to file data, in least-to-most-recently-used order.
      * @type {Map<string,Uint8Array>}
      */
     this.filedata = new Map();
+    this.max_bytes = max_bytes;
+    this.total_bytes = 0;
 }
 
 /**
@@ -58,6 +73,9 @@ MemoryFileStorage.prototype.read = async function(sha256sum, offset, count)
         return null;
     }
 
+    // Refresh insertion order so cache pressure evicts the coldest file.
+    this.filedata.delete(sha256sum);
+    this.filedata.set(sha256sum, data);
     return data.subarray(offset, offset + count);
 };
 
@@ -68,7 +86,32 @@ MemoryFileStorage.prototype.read = async function(sha256sum, offset, count)
 MemoryFileStorage.prototype.cache = async function(sha256sum, data)
 {
     dbg_assert(sha256sum, "MemoryFileStorage cache: sha256sum should be a non-empty string");
+    if(data.byteLength > this.max_bytes)
+    {
+        return;
+    }
+    const previous = this.filedata.get(sha256sum);
+    if(previous)
+    {
+        this.total_bytes -= previous.byteLength;
+        this.filedata.delete(sha256sum);
+    }
+
     this.filedata.set(sha256sum, data);
+    this.total_bytes += data.byteLength;
+
+    while(this.total_bytes > this.max_bytes)
+    {
+        const oldest_sha256sum = this.filedata.keys().next().value;
+        if(oldest_sha256sum === undefined)
+        {
+            throw new Error("MemoryFileStorage cache size accounting is inconsistent");
+        }
+        const oldest_data = this.filedata.get(oldest_sha256sum);
+        dbg_assert(oldest_data);
+        this.filedata.delete(oldest_sha256sum);
+        this.total_bytes -= oldest_data.byteLength;
+    }
 };
 
 /**
@@ -76,7 +119,21 @@ MemoryFileStorage.prototype.cache = async function(sha256sum, data)
  */
 MemoryFileStorage.prototype.uncache = function(sha256sum)
 {
-    this.filedata.delete(sha256sum);
+    const data = this.filedata.get(sha256sum);
+    if(data)
+    {
+        this.filedata.delete(sha256sum);
+        this.total_bytes -= data.byteLength;
+    }
+};
+
+/**
+ * @param {string} sha256sum
+ */
+MemoryFileStorage.prototype.release = function(sha256sum)
+{
+    // The bounded LRU owns eviction. Retaining recently closed executables
+    // avoids refetching and decompressing them on every guest exec.
 };
 
 /**
@@ -98,6 +155,8 @@ export function ServerFileStorageWrapper(file_storage, baseurl, zstd_decompress)
     this.storage = file_storage;
     this.baseurl = baseurl;
     this.zstd_decompress = zstd_decompress;
+    /** @type {Map<string,!Promise<Uint8Array>>} */
+    this.pending_loads = new Map();
 }
 
 /**
@@ -107,21 +166,44 @@ export function ServerFileStorageWrapper(file_storage, baseurl, zstd_decompress)
  */
 ServerFileStorageWrapper.prototype.load_from_server = function(sha256sum, file_size)
 {
-    return new Promise((resolve, reject) =>
+    const pending = this.pending_loads.get(sha256sum);
+    if(pending)
+    {
+        return pending;
+    }
+
+    const load = new Promise((resolve, reject) =>
     {
         load_file(this.baseurl + sha256sum, { done: async buffer =>
         {
-            let data = new Uint8Array(buffer);
-            if(sha256sum.endsWith(".zst"))
+            try
             {
-                data = new Uint8Array(
-                    await this.zstd_decompress(file_size, data)
-                );
+                let data = new Uint8Array(buffer);
+                if(sha256sum.endsWith(".zst"))
+                {
+                    data = new Uint8Array(
+                        await this.zstd_decompress(file_size, data)
+                    );
+                }
+                await this.cache(sha256sum, data);
+                resolve(data);
             }
-            await this.cache(sha256sum, data);
-            resolve(data);
+            catch(error)
+            {
+                reject(error);
+            }
         }});
     });
+    this.pending_loads.set(sha256sum, load);
+    const clear_pending = () =>
+    {
+        if(this.pending_loads.get(sha256sum) === load)
+        {
+            this.pending_loads.delete(sha256sum);
+        }
+    };
+    load.then(clear_pending, clear_pending);
+    return load;
 };
 
 /**
@@ -157,4 +239,12 @@ ServerFileStorageWrapper.prototype.cache = async function(sha256sum, data)
 ServerFileStorageWrapper.prototype.uncache = function(sha256sum)
 {
     this.storage.uncache(sha256sum);
+};
+
+/**
+ * @param {string} sha256sum
+ */
+ServerFileStorageWrapper.prototype.release = function(sha256sum)
+{
+    this.storage.release(sha256sum);
 };

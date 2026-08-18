@@ -182,6 +182,9 @@ async function run_scenario(browser_ws, base_url, renderer)
     await cdp.call("Runtime.enable");
     await cdp.call("Log.enable");
     await cdp.call("Page.enable");
+    await cdp.call("Page.addScriptToEvaluateOnNewDocument", {
+        source: "performance.setResourceTimingBufferSize(10000);",
+    });
 
     try
     {
@@ -731,6 +734,23 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_CODEX_CONFIG_WRITE=PASS",
             "V86_APPLIANCE_CODEX_CONFIG_WRITE=FAIL", 30000);
 
+        const duplicate_file_requests = await evaluate(cdp, `(() => {
+            const counts = new Map();
+            for(const entry of performance.getEntriesByType("resource"))
+            {
+                const pathname = new URL(entry.name).pathname;
+                if(!/\\/[^/]+\\.bin\\.zst$/.test(pathname))
+                {
+                    continue;
+                }
+                counts.set(pathname, (counts.get(pathname) || 0) + 1);
+            }
+            return Array.from(counts).filter(([, count]) => count > 1);
+        })()`);
+        assert.deepEqual(duplicate_file_requests, [],
+            `Root filesystem chunks were fetched repeatedly: ${
+                JSON.stringify(duplicate_file_requests)}`);
+
         await evaluate(cdp, `(() => {
             window.applianceKeyboardEvents = 0;
             window.emulator.emulator_bus.register(
@@ -751,6 +771,80 @@ async function run_scenario(browser_ws, base_url, renderer)
         });
         await wait_for(async() => (await evaluate(cdp, "window.applianceKeyboardEvents")) > 0,
             5000, "guest keyboard input");
+
+        const pointer_points = await evaluate(cdp, `(() => {
+            window.applianceMouseDeltas = [];
+            window.emulator.emulator_bus.register(
+                "mouse-delta", data => window.applianceMouseDeltas.push(data));
+            const canvas = document.querySelector(".v86-virtio-gpu-canvas");
+            const rect = canvas.getBoundingClientRect();
+            return {
+                first: { x: rect.left + 240, y: rect.top + 220 },
+                canvas: {
+                    width: canvas.width,
+                    height: canvas.height,
+                    css_width: rect.width,
+                    css_height: rect.height,
+                },
+            };
+        })()`);
+        await cdp.call("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: pointer_points.first.x,
+            y: pointer_points.first.y,
+            button: "none",
+            pointerType: "mouse",
+        });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const first_guest_pointer = await evaluate(cdp, `(() => {
+            const cursor = document.querySelector(".v86-virtio-gpu-cursor");
+            return { x: parseFloat(cursor.style.left), y: parseFloat(cursor.style.top) };
+        })()`);
+        pointer_points.second = {
+            x: pointer_points.first.x +
+                (first_guest_pointer.x < pointer_points.canvas.css_width / 2 ? 120 : -120),
+            y: pointer_points.first.y +
+                (first_guest_pointer.y < pointer_points.canvas.css_height / 2 ? 80 : -80),
+        };
+        const pointer_steps = 8;
+        for(let step = 1; step <= pointer_steps; step++)
+        {
+            await cdp.call("Input.dispatchMouseEvent", {
+                type: "mouseMoved",
+                x: pointer_points.first.x +
+                    (pointer_points.second.x - pointer_points.first.x) * step / pointer_steps,
+                y: pointer_points.first.y +
+                    (pointer_points.second.y - pointer_points.first.y) * step / pointer_steps,
+                button: "none",
+                pointerType: "mouse",
+            });
+        }
+        await new Promise(resolve => setTimeout(resolve, 700));
+        const second_guest_pointer = await evaluate(cdp, `(() => {
+            const cursor = document.querySelector(".v86-virtio-gpu-cursor");
+            return { x: parseFloat(cursor.style.left), y: parseFloat(cursor.style.top) };
+        })()`);
+        const pointer_deltas = await evaluate(cdp, "window.applianceMouseDeltas");
+        const pointer_tracking = {
+            host_dx: pointer_points.second.x - pointer_points.first.x,
+            host_dy: pointer_points.second.y - pointer_points.first.y,
+            guest_dx: second_guest_pointer.x - first_guest_pointer.x,
+            guest_dy: second_guest_pointer.y - first_guest_pointer.y,
+            canvas: pointer_points.canvas,
+            emitted_deltas: pointer_deltas,
+            first_guest_pointer,
+            second_guest_pointer,
+        };
+        pointer_tracking.speed_ratio =
+            Math.hypot(pointer_tracking.guest_dx, pointer_tracking.guest_dy) /
+            Math.hypot(pointer_tracking.host_dx, pointer_tracking.host_dy);
+        assert.ok(pointer_tracking.speed_ratio >= 0.9 &&
+            pointer_tracking.speed_ratio <= 1.1,
+            `Guest pointer speed drifted: ${JSON.stringify(pointer_tracking)}`);
+        assert.equal(Math.sign(pointer_tracking.guest_dx),
+            Math.sign(pointer_tracking.host_dx), "Guest pointer x direction changed");
+        assert.equal(Math.sign(pointer_tracking.guest_dy),
+            Math.sign(pointer_tracking.host_dy), "Guest pointer y direction changed");
 
         await cdp.call("Emulation.setDeviceMetricsOverride", {
             width: 640,
@@ -830,6 +924,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             accelerated_scanout_pixel: accelerated_screenshot?.nonblack || null,
             accelerated_background_probe: accelerated_screenshot?.background || null,
             cursor_alpha: state.cursor_alpha,
+            pointer_tracking,
             fresh_reset,
         };
     }
