@@ -62,7 +62,7 @@ else
     exit 1
 fi
 
-xrandr --output Virtual-1 --mode 1024x768 >/tmp/v86-xrandr.log 2>&1 || true
+xrandr --output Virtual-1 --mode 1920x1080 >/tmp/v86-xrandr.log 2>&1 || true
 if $accelerated_mode; then
     run_accelerated ghostty >/tmp/v86-ghostty.log 2>&1 &
 else

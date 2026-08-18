@@ -13,7 +13,7 @@ Alpine OpenRC
   -> v86-networking (hostname, runtime directory, optional DHCP)
   -> automatic unprivileged codex login on tty1
   -> v86-appliance-session
-  -> Xorg modesetting on /dev/dri/card0 at 1024x768x24
+  -> Xorg modesetting on /dev/dri/card0 at 1920x1080x24
   -> Openbox
   -> Mesa llvmpipe (default) or targeted webgpuvirt Gallium (opt-in)
   -> maximized undecorated Ghostty with an interactive /bin/sh
@@ -54,7 +54,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `ghostty-terminal-benchmark.c` | Offline fixed ANSI/scroll workload, guest CPU accounting, keyboard synchronization, and serial run markers for the XWAH-5 baseline. |
 | `probe-world.lock` | Exact direct build-only packages for the probes and triangle workloads. |
 | `probe-packages.lock` | Complete sorted probe/triangle builder package closure; the build rejects drift. |
-| `xinitrc` | Openbox, selected renderer check, 1024x768 mode, and Ghostty process startup. |
+| `xinitrc` | Openbox, selected renderer check, 1920x1080 mode, and Ghostty process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
 | `ghostty-config` | Undecorated maximized window and the interactive shell-session command. |
 | `ghostty-session` | Benchmark selection or a ready-marked interactive `/bin/sh` in `/home/codex/workspace`. |
@@ -251,11 +251,12 @@ V86_APPLIANCE_END
 ```
 
 The browser declares success only after both the final guest marker and a
-visible dedicated WebGPU canvas. Accelerated acceptance also requires matching
-dominant colors in opposite interior triangles and both transparent and opaque
-cursor pixels. Startup failure copies bounded Xorg, Openbox, Ghostty, and GL
-diagnostics to serial, emits a precise `V86_APPLIANCE_FAILURE=...`, and leaves
-the serial console available.
+visible dedicated 1920x1080 WebGPU canvas. The appliance page hides both the
+host pointer and the guest cursor overlay. Accelerated acceptance still
+validates the cursor resource's transparent and opaque pixels before proving
+that its overlay remains hidden. Startup failure copies bounded Xorg, Openbox,
+Ghostty, and GL diagnostics to serial, emits a precise
+`V86_APPLIANCE_FAILURE=...`, and leaves the serial console available.
 
 ## Capset-7 Transport Gate
 

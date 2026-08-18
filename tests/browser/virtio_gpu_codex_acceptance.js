@@ -297,6 +297,10 @@ async function run_scenario(browser_ws, base_url, renderer)
                 canvas_height: canvas.height,
                 rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
                 cursor_alpha,
+                cursor_hidden: !cursor_canvas || cursor_canvas.hidden ||
+                    getComputedStyle(cursor_canvas).display === "none",
+                host_cursor_hidden:
+                    getComputedStyle(document.getElementById("screen_container")).cursor === "none",
             };
         })()`);
         if(SCENARIO === "mesa")
@@ -677,6 +681,10 @@ async function run_scenario(browser_ws, base_url, renderer)
         assert.equal(state.canvas_visible, true);
         assert.equal(state.canvas_width, state.scanout.width);
         assert.equal(state.canvas_height, state.scanout.height);
+        assert.equal(state.scanout.width, 1920);
+        assert.equal(state.scanout.height, 1080);
+        assert.equal(state.cursor_hidden, true);
+        assert.equal(state.host_cursor_hidden, true);
         if(accelerated)
         {
             const gpu = await evaluate(cdp, `(() => {

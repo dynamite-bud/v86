@@ -43,7 +43,7 @@
         border-color: #74a4eb;
     }
     main {
-        width: min(1024px, 100%);
+        width: min(1920px, 100%);
         margin: 16px auto;
     }
     #status, #network-status {
@@ -59,12 +59,17 @@
     }
     #screen_container {
         position: relative;
-        width: 1024px;
-        height: 768px;
+        width: 1920px;
+        height: auto;
+        aspect-ratio: 16 / 9;
         max-width: 100%;
         overflow: hidden;
         background: #000;
         box-shadow: 0 8px 32px #0009;
+        cursor: none !important;
+    }
+    #screen_container .v86-virtio-gpu-cursor {
+        display: none !important;
     }
     #screen_container > div {
         white-space: pre;
@@ -187,8 +192,8 @@ network_status.textContent = relay_url ?
 const memory_size = 2 * 1024 * 1024 * 1024;
 const vga_memory_size = 8 * 1024 * 1024;
 const filesystem_size = 2 * 1024 * 1024 * 1024;
-const width = 1024;
-const height = 768;
+const width = 1920;
+const height = 1080;
 const relay_state = relay_url ? "configured" : "unconfigured";
 const filesystem_prefix = multi_core_accelerated ?
     "virtio-gpu-multi-core-alpine-codex" : "alpine-virtio-gpu-codex";

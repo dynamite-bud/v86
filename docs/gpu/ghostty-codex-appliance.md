@@ -28,7 +28,7 @@ The boot chain is:
 ```text
 Alpine OpenRC
   -> unprivileged codex user on tty1
-  -> Xorg modesetting driver at 1024x768x24
+  -> Xorg modesetting driver at 1920x1080x24
   -> Openbox
   -> Mesa llvmpipe (default) or targeted webgpuvirt (explicit acceleration)
   -> maximized undecorated Ghostty
@@ -157,7 +157,7 @@ The acceptance harness verifies:
 
 - i686 guest and UID 1000 session;
 - exact application versions;
-- llvmpipe OpenGL plus visible 1024x768 scanout;
+- llvmpipe OpenGL plus visible 1920x1080 scanout;
 - live Xorg, Openbox, Ghostty, and interactive shell processes, with Codex installed but not started;
 - configured IPv4 loopback plus an actual localhost socket bind, and
   supplied-relay DHCP or an honest unconfigured network state;
@@ -177,8 +177,8 @@ The acceptance harness verifies:
 - verified absence of the external Code Mode host and its V8 runtime;
 - an actual `codex mcp add`/`list`/`remove` cycle proving that the manual
   full-access launcher can write `~/.codex/config.toml`;
-- a uniform accelerated terminal background and a non-rectangular,
-  alpha-masked hardware cursor.
+- a uniform accelerated terminal background, a valid alpha-masked hardware
+  cursor resource, and hidden host/guest pointer overlays.
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
 
