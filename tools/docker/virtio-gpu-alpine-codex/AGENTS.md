@@ -21,8 +21,10 @@ Read `Readme.md`, `../../../docs/gpu/ghostty-codex-appliance.md`, and `../../../
 ## Runtime Contract
 
 The normal chain is OpenRC -> unprivileged tty1 login -> Xorg -> Openbox ->
-Ghostty -> interactive `/bin/sh`. Codex is installed but MUST NOT start
-automatically. The default renderer is llvmpipe. The integrated accelerated
+Ghostty -> supervised interactive `/bin/sh`. A shell exit MUST start a fresh
+login shell without tearing down Ghostty, Openbox, or Xorg. Codex is installed
+but MUST NOT start automatically. The default renderer is llvmpipe. The
+integrated accelerated
 mode requires `renderer=wgpu&accelerated=1`: `wgpu` is the browser-side
 Rust/Wasm backend and `accelerated=1` selects checksum-locked Mesa
 `webgpuvirt` inside the guest. Failure must not silently fall back.

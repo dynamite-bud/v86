@@ -103,6 +103,11 @@ shell commands are not dropped. The button reads the host clipboard only from
 its click handler; unavailable access or permission denial is visible and
 non-fatal.
 
+The Ghostty command supervises its interactive login shell. If that shell
+exits, it reports `V86_APPLIANCE_GHOSTTY_SHELL_RESTART=<status>` and starts a
+fresh login shell without tearing down Ghostty, Openbox, or Xorg. Closing the
+Ghostty window still ends the graphical session.
+
 This is not guest-to-host copy. Canvas pixels do not retain Ghostty's selected
 text, so [XWAH-38](https://github.com/dynamite-bud/v86/issues/38) deliberately
 does not use OCR or claim that selecting text in the guest can populate the
@@ -190,7 +195,8 @@ The acceptance harness verifies:
 - unconfigured Codex login with no baked home credential;
 - browser keyboard delivery, display-scoped Cmd/Ctrl+V, the explicit Paste
   button, exact-once multiline text with spaces and punctuation, non-fatal
-  clipboard denial, and responsive narrow layout;
+  clipboard denial, clean shell-exit recovery with keyboard input into the
+  replacement shell, and responsive narrow layout;
 - a writable workspace and pristine fresh-session reset on the direct
   JavaScript backend;
 - manual launcher policy that disables Code Mode, its absent host, and
@@ -384,7 +390,7 @@ fixture. Python and jq add files, so flat-file count is no longer lower:
 |Artifact|Codex appliance|XFCE fixture|Delta|Reduction|
 |---|---:|---:|---:|---:|
 |Rootfs tar|736,215,040|794,818,560|-58,603,520 bytes|7.37%|
-|Compressed flat files|293,076,455|295,224,610|-2,148,155 bytes|0.73%|
+|Compressed flat files|293,077,098|295,224,610|-2,147,512 bytes|0.73%|
 |Filesystem JSON|661,972|695,517|-33,545 bytes|4.82%|
 |Flat-file count|9,222|9,175|+47|-0.51%|
 |Package closure|321|420|-99|23.57%|
@@ -396,15 +402,15 @@ boots keep Alpine's system Gallium file in place; accelerated boot replaces it
 once, so the image carries no duplicate system backup. Recompute this evidence
 after any image, package, or artifact change.
 
-The reproducible loopback/Python/jq rebuild produced these SHA-256 values
+The reproducible shell-supervision rebuild produced these SHA-256 values
 identically on consecutive builds:
 
 |Artifact|SHA-256|
 |---|---|
-|Rootfs tar|`680d4d4fc271f4b773b2dabe3e0ac11f89132942610c1cba2c52a450b0e37c2a`|
-|Filesystem JSON|`8d7cb5e8bd142067f6f7c6e255e8f78a65d68c8db04f4b1ceb4743cbe051b46e`|
-|Flat-file manifest|`aa7886167d2f72ab03a3ffc016fdd37bc55f1cf2a39be9d35de196efa7ef88b2`|
-|Image contract|`94341efeb0431ab67f8b9faded6f76d3b1ef8ff2e679bcef6850718fa69ccd93`|
+|Rootfs tar|`ca0051b8c50723097cc1f6269126a30616cc5879f9fd873d8749883a6b800907`|
+|Filesystem JSON|`4e5cc749870135b7f8ad3876fef588fb6b03cbe043ee9b3972fac042a69f10e3`|
+|Flat-file manifest|`5e9a550765746a7038ad310a8c3dc27405236444a3ae1448e0aa2c7960a0126d`|
+|Image contract|`8f533189efdd0529ecb748a0d5ea9f3d23f2945487c105b342ebd2c99fbf7694`|
 
 ## Original OMP Gate
 

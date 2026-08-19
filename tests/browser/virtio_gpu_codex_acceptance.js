@@ -317,6 +317,36 @@ async function run_scenario(browser_ws, base_url, renderer)
             };
         }
 
+        let shell_restart = null;
+        if(SCENARIO === "appliance" || ACCELERATED)
+        {
+            await evaluate(cdp,
+                `window.emulator.keyboard_send_text(${JSON.stringify("exit\n")}, 1)`);
+            await wait_for(async() => {
+                const serial = await evaluate(cdp, "window.applianceSerialText || ''");
+                return serial.includes("V86_APPLIANCE_GHOSTTY_SHELL_RESTART=0");
+            }, 30000, "Ghostty shell restart after a clean exit");
+            const post_restart_command =
+                "printf 'V86_APPLIANCE_GHOSTTY_SHELL_RECOVERY=PASS\\n' >/dev/ttyS0\n";
+            await evaluate(cdp,
+                `window.emulator.keyboard_send_text(${JSON.stringify(post_restart_command)}, 1)`);
+            await wait_for(async() => {
+                const serial = await evaluate(cdp, "window.applianceSerialText || ''");
+                return serial.includes("V86_APPLIANCE_GHOSTTY_SHELL_RECOVERY=PASS");
+            }, 30000, "keyboard input after Ghostty shell restart");
+            const recovered = await evaluate(cdp,
+                `({ result: document.body?.dataset?.result || null, ` +
+                `serial: window.applianceSerialText || "" })`);
+            assert.equal(recovered.result, "pass",
+                `Shell restart changed appliance readiness:\n${recovered.serial.slice(-12000)}`);
+            assert.doesNotMatch(recovered.serial, /V86_APPLIANCE_READY=FAIL/,
+                "Shell restart reported a post-readiness failure");
+            shell_restart = {
+                clean_exit: true,
+                keyboard_input_after_restart: true,
+            };
+        }
+
 
         const state = await evaluate(cdp, `(() => {
             const serial = window.applianceSerialText || "";
@@ -1017,6 +1047,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             login_unconfigured: true,
             keyboard_input: true,
             clipboard_paste,
+            shell_restart,
             responsive_layout: true,
             accelerated_scanout_pixel: accelerated_screenshot?.nonblack || null,
             accelerated_background_probe: accelerated_screenshot?.background || null,

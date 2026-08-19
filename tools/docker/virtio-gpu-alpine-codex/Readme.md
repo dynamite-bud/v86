@@ -57,7 +57,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `xinitrc` | Openbox, selected renderer check, 1920x1080 mode, and Ghostty process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
 | `ghostty-config` | Undecorated maximized window, 16-point text tuned for responsive 1080p downscaling, and the interactive shell-session command. |
-| `ghostty-session` | Benchmark selection or a ready-marked interactive `/bin/sh` in `/home/codex/workspace`. |
+| `ghostty-session` | Benchmark selection or a ready-marked, supervised interactive `/bin/sh` that restarts shell exits without tearing down the graphical session. |
 | `codex-launcher` | Manual `codex` command, exact full-access bypass, unsupported feature disablement, supported direct tools, and user-owned MCP configuration. |
 
 Docker assembles and exports the root filesystem; it is not part of the browser runtime. `normalize_rootfs.py --preserve-owners` sorts archive members, clears timestamps and owner names, removes Docker metadata, and retains numeric UID/GID ownership for the unprivileged home and workspace.
@@ -635,7 +635,7 @@ server, or start Codex without an explicit user command.
 
 ## Troubleshooting
 
-- **`V86_APPLIANCE_FAILURE=session-exited-after-readiness:0`:** Ghostty exited cleanly because its `/bin/sh` child ended or its window was closed; the GTK, systemd-scope, and on-screen-keyboard warnings are non-fatal. The tty1 session is intentionally one-shot, so use **Reset fresh session** to boot Ghostty again. Avoid `Ctrl+D`, `exit`, or `Alt+F4` when the shell should remain open.
+- **`V86_APPLIANCE_FAILURE=session-exited-after-readiness:0`:** current images restart an exited `/bin/sh` inside the existing Ghostty window. Seeing this failure therefore means either the Ghostty window/X session closed or the browser loaded a stale image. The GTK, systemd-scope, and on-screen-keyboard warnings are non-fatal. Rebuild and replace all four ignored image outputs together; use **Reset fresh session** after a window close.
 - **`V86_APPLIANCE_FAILURE=network-unavailable` or `udhcpc` obtains no lease:** the configured public relay may be unavailable even though the page can parse its URL. Use **Reset fresh session** to retry or provide a trusted relay; inspect the bounded `/var/log/v86-networking.log` output for missing `eth0` versus exhausted DHCP discovery.
 - **`VirtIO NIC relay: unconfigured`:** add a percent-encoded `relay=wss://.../` query parameter, then reload. This status is intentional when no relay was supplied.
 - **MCP OAuth reports `Address not available (os error 99)`:** rebuild the image and require `V86_APPLIANCE_LOOPBACK=PASS`; the current boot service configures `127.0.0.1/8` before Codex can start. Host-browser redirects to guest localhost still require an explicit callback bridge.

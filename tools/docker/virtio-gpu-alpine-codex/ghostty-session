@@ -9,4 +9,17 @@ pid_file=/tmp/v86-ghostty-shell.pid
 printf '%s\n' "$$" > "$pid_file.tmp"
 mv "$pid_file.tmp" "$pid_file"
 touch /tmp/v86-appliance-ui-ready
-exec /bin/sh -l
+trap ':' INT QUIT
+trap 'exit 0' HUP TERM
+shell_status=
+while :; do
+    if [ -n "$shell_status" ]; then
+        printf '\r\nShell exited with status %s; starting a fresh shell.\r\n' \
+            "$shell_status"
+        printf 'V86_APPLIANCE_GHOSTTY_SHELL_RESTART=%s\n' \
+            "$shell_status" >/dev/ttyS0
+        sleep 1
+    fi
+    /bin/sh -l
+    shell_status=$?
+done
