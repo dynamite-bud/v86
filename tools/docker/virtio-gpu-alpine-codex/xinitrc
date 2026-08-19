@@ -30,7 +30,7 @@ if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
 fi
 run_accelerated()
 {
-    env -u LIBGL_ALWAYS_SOFTWARE \
+    env -u LIBGL_ALWAYS_SOFTWARE -u GALLIUM_DRIVER \
         LD_LIBRARY_PATH=/opt/webgpuvirt/lib \
         LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri \
         MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu \
@@ -44,11 +44,45 @@ run_accelerated()
 
 attempt=0
 while [ "$attempt" -lt 100 ]; do
-    kill -0 "$openbox_pid" 2>/dev/null && break
+    openbox --reconfigure >/tmp/v86-openbox-root.log 2>&1 && break
+    kill -0 "$openbox_pid" 2>/dev/null || break
     wait_tick
     attempt=$((attempt + 1))
 done
+if ! openbox --reconfigure >/tmp/v86-openbox-root.log 2>&1; then
+    cat /tmp/v86-openbox.log >>/tmp/v86-appliance.log
+    kill "$openbox_pid" 2>/dev/null || true
+    exit 1
+fi
+if [ -e /tmp/v86-appliance-snapshot-post-restore ]; then
+    printf 'V86_APPLIANCE_SNAPSHOT_XORG_RESTART=PASS\n' >/dev/ttyS0
+fi
 
+
+xrandr --output Virtual-1 --mode 1920x1080 >/tmp/v86-xrandr.log 2>&1 || true
+if grep -qw 'v86_snapshot_capture=1' /proc/cmdline &&
+   [ ! -e /tmp/v86-appliance-snapshot-post-restore ]; then
+    release_file=/tmp/v86-appliance-snapshot-release
+    rm -f "$release_file"
+    touch /tmp/v86-appliance-snapshot-ready
+    attempt=0
+    while [ "$attempt" -lt 900 ]; do
+        kill -0 "$openbox_pid" 2>/dev/null || break
+        [ ! -e "$release_file" ] || break
+        wait_tick
+        attempt=$((attempt + 1))
+    done
+    if [ ! -e "$release_file" ]; then
+        printf '%s\n' 'snapshot checkpoint was not released' >>/tmp/v86-appliance.log
+        kill "$openbox_pid" 2>/dev/null || true
+        exit 1
+    fi
+    printf 'V86_APPLIANCE_SNAPSHOT_RELEASE=PASS\n' >/dev/ttyS0
+    rm -f /tmp/v86-appliance-snapshot-ready "$release_file"
+    touch /tmp/v86-appliance-snapshot-post-restore
+    kill "$openbox_pid" 2>/dev/null || true
+    exit 0
+fi
 if $accelerated_mode; then
     run_accelerated glxinfo -B >/tmp/v86-glxinfo.log 2>&1
 else
@@ -62,7 +96,6 @@ else
     exit 1
 fi
 
-xrandr --output Virtual-1 --mode 1920x1080 >/tmp/v86-xrandr.log 2>&1 || true
 if $accelerated_mode; then
     run_accelerated ghostty >/tmp/v86-ghostty.log 2>&1 &
 else

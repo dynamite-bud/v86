@@ -149,18 +149,31 @@ export XDG_RUNTIME_DIR=/run/user/1000
 export XDG_CURRENT_DESKTOP=OPENBOX
 export XDG_SESSION_DESKTOP=openbox
 export XDG_SESSION_TYPE=x11
+snapshot_capture=false
+if grep -qw 'v86_snapshot_capture=1' /proc/cmdline; then
+    snapshot_capture=true
+fi
 if grep -qw 'v86_gpu_accelerated=1' /proc/cmdline; then
     printf '%s\n' '<driconf><device><application name="Ghostty webgpuvirt" executable="ghostty"><option name="always_have_depth_buffer" value="false"/></application></device></driconf>' > "$HOME/.drirc"
-    # startx launches Xorg before xinitrc. Select the appliance-owned Mesa
-    # install here so both glamor and Ghostty use webgpuvirt.
-    export LD_LIBRARY_PATH=/opt/webgpuvirt/lib
-    export LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri
-    export MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu
-    unset LIBGL_ALWAYS_SOFTWARE
+    if $snapshot_capture; then
+        # Avoid creating VirtIO GPU 3D state before the hosted checkpoint.
+        export LD_LIBRARY_PATH=/usr/lib
+        export LIBGL_DRIVERS_PATH=/usr/lib/dri
+        export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
+        export GALLIUM_DRIVER=llvmpipe
+        export LIBGL_ALWAYS_SOFTWARE=1
+    else
+        export LD_LIBRARY_PATH=/opt/webgpuvirt/lib
+        export LIBGL_DRIVERS_PATH=/opt/webgpuvirt/lib/dri
+        export MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu
+        unset GALLIUM_DRIVER
+        unset LIBGL_ALWAYS_SOFTWARE
+    fi
 else
     export LD_LIBRARY_PATH=/usr/lib
     export LIBGL_DRIVERS_PATH=/usr/lib/dri
     unset MESA_LOADER_DRIVER_OVERRIDE
+    unset GALLIUM_DRIVER
     export LIBGL_ALWAYS_SOFTWARE=1
 fi
 export GSK_RENDERER=gl
@@ -170,14 +183,54 @@ if grep -qw 'v86_gpu_benchmark=1' /proc/cmdline; then
     benchmark_mode=true
 fi
 rm -f /tmp/v86-appliance-ui-ready /tmp/v86-appliance-gl-ready \
-    /tmp/v86-appliance-benchmark-ready /tmp/v86-openbox.pid \
+    /tmp/v86-appliance-benchmark-ready /tmp/v86-appliance-snapshot-ready \
+    /tmp/v86-appliance-snapshot-release \
+    /tmp/v86-appliance-snapshot-post-restore /tmp/v86-openbox.pid \
     /tmp/v86-ghostty.pid /tmp/v86-ghostty-shell.pid
-startx -- :0 vt1 -keeptty -nolisten tcp >/tmp/v86-appliance.log 2>&1 &
-session_pid=$!
+start_appliance_x()
+{
+    if $snapshot_capture &&
+       [ ! -e /tmp/v86-appliance-snapshot-post-restore ]; then
+        startx -- :0 vt1 -keeptty -nolisten tcp \
+            -configdir xorg-snapshot.conf.d \
+            >/tmp/v86-appliance.log 2>&1 &
+    else
+        startx -- :0 vt1 -keeptty -nolisten tcp \
+            >/tmp/v86-appliance.log 2>&1 &
+    fi
+    session_pid=$!
+}
+start_appliance_x
 
 attempt=0
+snapshot_ready_reported=false
+snapshot_session_restarted=false
 while [ "$attempt" -lt 900 ]; do
-    kill -0 "$session_pid" 2>/dev/null || break
+    if ! kill -0 "$session_pid" 2>/dev/null; then
+        session_status=0
+        wait "$session_pid" || session_status=$?
+        if $snapshot_capture &&
+           ! $snapshot_session_restarted &&
+           [ -e /tmp/v86-appliance-snapshot-post-restore ] &&
+           [ "$session_status" -eq 0 ]; then
+            snapshot_session_restarted=true
+            attempt=0
+            start_appliance_x
+            continue
+        fi
+        break
+    fi
+    if ! $snapshot_ready_reported &&
+       [ -e /tmp/v86-appliance-snapshot-ready ] &&
+       [ -S /tmp/.X11-unix/X0 ] &&
+       pid_file_alive /tmp/v86-openbox.pid &&
+       [ ! -e /tmp/v86-ghostty.pid ]; then
+        printf 'V86_APPLIANCE_SNAPSHOT_XORG=PASS\n' >&3
+        printf 'V86_APPLIANCE_SNAPSHOT_OPENBOX=PASS\n' >&3
+        printf 'V86_APPLIANCE_SNAPSHOT_GHOSTTY=STOPPED\n' >&3
+        printf 'V86_APPLIANCE_SNAPSHOT_READY=PASS\n' >&3
+        snapshot_ready_reported=true
+    fi
     application_ready=false
     if $benchmark_mode && [ -e /tmp/v86-appliance-benchmark-ready ]; then
         application_ready=true

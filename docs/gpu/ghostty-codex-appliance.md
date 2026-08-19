@@ -215,6 +215,53 @@ The acceptance harness verifies:
 
 The fresh-session reset is intentionally ephemeral: it discards guest changes. This appliance does not persist API credentials or workspace data across reloads.
 
+## Hosted Pre-Ghostty Snapshot
+
+XWAH-45 adds an opt-in static hosted state for the four-worker-vCPU accelerated
+appliance. The capture checkpoint is deliberately earlier than normal
+readiness:
+
+1. boot the exact image and multimemory browser build;
+2. establish Xorg, Openbox, and the 1920x1080 mode with capture-only,
+   non-glamor Xorg configuration;
+3. require zero live VirtIO GPU 3D contexts, resources, and context
+   attachments;
+4. save and zstd-compress state before Ghostty starts;
+5. after restore, release the checkpoint, restart Xorg with the normal
+   accelerated configuration, and launch Ghostty.
+
+This two-stage lifecycle avoids serializing unsupported live `webgpuvirt`
+state while retaining the expensive kernel, OpenRC, networking, SMP probe,
+Xorg, and Openbox work. The JSON metadata binds the state to the exact machine
+configuration and image assets, records the state SHA-256 and v86 state
+version, and points to a content-addressed `.bin.zst`. The page restores only
+after every check passes; otherwise it reports the reason and cold boots.
+Relay selection remains runtime-specific, and restore acceptance proves that
+guest networking reconnects.
+
+Create and verify the ignored local artifacts on port 8082:
+
+```sh
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test
+```
+
+Static deployment consists of the metadata JSON and its named state file under
+`images/`, served beside the exact matching browser/Wasm and guest image
+artifacts with cross-origin isolation enabled. Users opt in with
+`snapshot=hosted`; neither ordinary cold boots nor other appliance modes load
+the state. Generated states remain ignored because a state captured after
+interactive use could contain credentials or workspace data.
+
+The Apple M4/Chrome 151 capture used 197,546,168 raw bytes and compressed to
+53,978,374 bytes (51.5 MiB). Two acceptance restores reached complete
+Ghostty/Codex readiness in 39,673-43,929 ms versus 105,083 ms from cold boot,
+a 2.39-2.65x speedup. They also proved four worker vCPUs, `webgpuvirt`,
+post-restore network access, shell restart and input, a uniform background,
+mixed cursor alpha, and zero browser/WebGPU/backend errors.
+
 ## XWAH-5 Rendering Benchmark
 
 The opt-in benchmark launches a fixed ANSI stream inside the same maximized

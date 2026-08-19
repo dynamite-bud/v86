@@ -119,6 +119,7 @@ COPY profile /home/codex/.profile
 COPY xinitrc /home/codex/.xinitrc
 COPY ghostty-config /home/codex/.config/ghostty/config.ghostty
 COPY 20-virtio-gpu.conf /etc/X11/xorg.conf.d/20-virtio-gpu.conf
+COPY 20-virtio-gpu-snapshot.conf /etc/X11/xorg-snapshot.conf.d/20-virtio-gpu.conf
 
 RUN chmod 0755 /usr/local/sbin/v86-appliance-session \
         /usr/local/bin/codex /usr/local/bin/v86-ghostty-session \

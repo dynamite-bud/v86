@@ -486,6 +486,29 @@ virtio-gpu-multi-core-alpine-codex-browser-test: build/libv86.mjs \
 	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
 		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
 		V86_CODEX_BROWSER_RENDERERS=wgpu ./tests/browser/virtio_gpu_codex_acceptance.js
+
+# XWAH-45: capture a credential-free, compatibility-bound state after Xorg
+# and Openbox are ready but before Ghostty owns live webgpuvirt 3D state.
+# The ignored zstd state and manifest are served only when snapshot=hosted.
+virtio-gpu-multi-core-alpine-codex-hosted-snapshot: build/libv86.mjs \
+		build/v86-multimem.wasm build/gram.wasm build/gram-shared.wasm \
+		virtio-gpu-wgpu virtio-gpu-multi-core-alpine-codex-image
+	@test -n "$$V86_CODEX_RELAY_URL" || \
+		(echo "V86_CODEX_RELAY_URL is required to capture a reconnectable snapshot" >&2; exit 1)
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
+		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=capture \
+		./tests/browser/virtio_gpu_codex_acceptance.js
+
+virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test: build/libv86.mjs \
+		build/v86-multimem.wasm build/gram.wasm build/gram-shared.wasm \
+		virtio-gpu-wgpu
+	@test -n "$$V86_CODEX_RELAY_URL" || \
+		(echo "V86_CODEX_RELAY_URL is required to verify restored networking" >&2; exit 1)
+	V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
+		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=restore \
+		./tests/browser/virtio_gpu_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
@@ -646,4 +669,6 @@ denodoc:
 	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image \
 	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test \
 	virtio-gpu-multi-core-alpine-codex-image \
-	virtio-gpu-multi-core-alpine-codex-browser-test
+	virtio-gpu-multi-core-alpine-codex-browser-test \
+	virtio-gpu-multi-core-alpine-codex-hosted-snapshot \
+	virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test
