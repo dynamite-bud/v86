@@ -181,6 +181,17 @@ const reset_button = document.getElementById("reset-session");
 const screen_container = document.getElementById("screen_container");
 const renderer_link = document.getElementById(`${renderer}-link`);
 renderer_link.setAttribute("aria-current", "page");
+screen_container.addEventListener("v86-clipboard-paste", event => {
+    const length = event.detail && event.detail.length || 0;
+    clipboard_status.textContent =
+        `Pasted ${length} character${length === 1 ? "" : "s"} with Cmd/Ctrl+V.`;
+});
+screen_container.addEventListener("v86-clipboard-error", event => {
+    const error = event.detail && event.detail.error;
+    const reason = error && error.name === "NotAllowedError" ?
+        "Clipboard permission was denied." : "Clipboard access failed.";
+    clipboard_status.textContent = `${reason} Click Paste to retry.`;
+});
 
 for(const name of ["webgpu-js", "wgpu"])
 {

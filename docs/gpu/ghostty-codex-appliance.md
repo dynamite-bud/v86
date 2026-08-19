@@ -82,7 +82,7 @@ scanout is responsively downsampled with browser-native filtering; the
 16-point terminal font remains legible at non-integer fit ratios; hidden
 host/guest cursor overlays leave the terminal pointerless; CSS-pixel mouse
 deltas prevent HiDPI acceleration outside pointer lock; and a byte-bounded
-256 MiB LRU retains recently closed immutable rootfs chunks. Acceptance rejects
+512 MiB LRU retains recently closed immutable rootfs chunks. Acceptance rejects
 duplicate compressed-chunk requests during its boot and interaction sequence.
 
 
@@ -95,13 +95,16 @@ uses the pinned real binary and always passes
 Code Mode host and Codex Apps, keeps direct shell/unified execution enabled,
 and leaves every ordinary MCP server to user configuration.
 
-Host-to-guest clipboard input is available on the browser page. Focus the
-emulator display and press Cmd/Ctrl+V, or click **Paste** when the browser
-suppresses paste on the canvas. Both paths inject only `text/plain`, cap one
-paste at 65,536 UTF-16 code units, and pace keyboard delivery so multiline
-shell commands are not dropped. The button reads the host clipboard only from
-its click handler; unavailable access or permission denial is visible and
-non-fatal.
+Host-to-guest clipboard input is available on the browser page. A pointer press
+inside the emulator focuses its display-scoped clipboard target. Focused
+Cmd/Ctrl+V reads `navigator.clipboard.readText()` directly from the trusted key
+event, allowing Chromium to request clipboard permission even though its
+non-editable canvas does not produce a native paste event. Native `text/plain`
+paste events remain supported and cancel the API fallback so guest input is
+never duplicated. Both shortcut and **Paste** button paths cap one paste at
+65,536 UTF-16 code units and pace keyboard delivery so multiline shell commands
+are not dropped. Unavailable access or permission denial is visible and
+non-fatal; the button provides an explicit retry gesture.
 
 The Ghostty command supervises its interactive login shell. If that shell
 exits, it reports `V86_APPLIANCE_GHOSTTY_SHELL_RESTART=<status>` and starts a
@@ -193,10 +196,11 @@ The acceptance harness verifies:
 - absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`,
   Tumbler, Garcon, and Exo;
 - unconfigured Codex login with no baked home credential;
-- browser keyboard delivery, display-scoped Cmd/Ctrl+V, the explicit Paste
-  button, exact-once multiline text with spaces and punctuation, non-fatal
-  clipboard denial, clean shell-exit recovery with keyboard input into the
-  replacement shell, and responsive narrow layout;
+- browser keyboard delivery, click-to-focus plus a browser-generated trusted
+  Cmd/Ctrl+V, native-paste deduplication, the explicit Paste button, exact-once
+  multiline text with spaces and punctuation, visible non-fatal clipboard
+  denial, clean shell-exit recovery with keyboard input into the replacement
+  shell, and responsive narrow layout;
 - a writable workspace and pristine fresh-session reset on the direct
   JavaScript backend;
 - manual launcher policy that disables Code Mode, its absent host, and
@@ -255,10 +259,10 @@ artifacts with cross-origin isolation enabled. Users opt in with
 the state. Generated states remain ignored because a state captured after
 interactive use could contain credentials or workspace data.
 
-The Apple M4/Chrome 151 capture used 197,546,168 raw bytes and compressed to
-53,978,374 bytes (51.5 MiB). Two acceptance restores reached complete
-Ghostty/Codex readiness in 39,673-43,929 ms versus 105,083 ms from cold boot,
-a 2.39-2.65x speedup. They also proved four worker vCPUs, `webgpuvirt`,
+The Apple M4/Chrome 151 capture used 200,119,724 raw bytes and compressed to
+53,726,075 bytes (51.2 MiB). The acceptance restore reached complete
+Ghostty/Codex readiness in 41,252 ms versus 97,129 ms from cold boot, a 2.35x
+speedup. It also proved four worker vCPUs, `webgpuvirt`, trusted Cmd+V,
 post-restore network access, shell restart and input, a uniform background,
 mixed cursor alpha, and zero browser/WebGPU/backend errors.
 

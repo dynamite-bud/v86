@@ -70,6 +70,18 @@ sandbox, Codex remains UID 1000, root remains locked, and authentication stays
 user-provided and ephemeral. Fresh reset must discard credentials,
 configuration, and workspace mutations.
 
+## Browser Input and Cache Invariants
+
+- Clicking the emulator canvas MUST focus the display-scoped clipboard target.
+- Focused Cmd/Ctrl+V MUST call `navigator.clipboard.readText()` while the
+  trusted key event owns user activation, because Chromium does not emit a
+  native paste event for the non-editable canvas. Native paste events remain
+  supported and MUST cancel the pending API fallback to prevent duplicates.
+- Clipboard input remains plain text, bounded to 64 KiB, and permission
+  failure is visible and non-fatal. The Paste button is the explicit retry.
+- Immutable rootfs files use a byte-bounded 512 MiB LRU. The limit is retention,
+  not an eager allocation.
+
 ## Graphics Invariants
 
 - The whole-window Ghostty background is a uniform full-screen program, not a cell-background instance. A diagonal color split is a renderer regression.
