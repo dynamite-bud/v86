@@ -138,10 +138,16 @@
 </main>
 <script type="module">
 import { V86 } from "../build/libv86.mjs";
+import { create_ready_state_fingerprint } from "../src/browser/ready_state_snapshot.js";
 
 const params = new URLSearchParams(location.search);
 const preset = params.get("preset");
-const multi_core_accelerated = preset === "multi-core-accelerated";
+const snapshot_mode = params.get("snapshot") || "off";
+const hosted_snapshot_requested = snapshot_mode === "hosted";
+const hosted_snapshot_capture = snapshot_mode === "capture";
+const hosted_snapshot_flow = hosted_snapshot_requested || hosted_snapshot_capture;
+const multi_core_accelerated =
+    preset === "multi-core-accelerated" || hosted_snapshot_flow;
 const renderer = multi_core_accelerated || params.get("renderer") === "wgpu" ?
     "wgpu" : "webgpu-js";
 const relay_url = params.get("relay");
@@ -183,6 +189,7 @@ for(const name of ["webgpu-js", "wgpu"])
     if(multi_core_accelerated)
     {
         url.searchParams.delete("preset");
+        url.searchParams.delete("snapshot");
     }
     url.searchParams.set("renderer", name);
     if(params.has("relay"))
@@ -196,7 +203,11 @@ for(const name of ["webgpu-js", "wgpu"])
     link.href = url.search;
 }
 
-reset_button.addEventListener("click", () => location.reload());
+reset_button.addEventListener("click", () => {
+    const url = new URL(location.href);
+    url.searchParams.set("snapshot", "off");
+    location.href = url.href;
+});
 const clipboard_text_limit = 64 * 1024;
 paste_button.addEventListener("click", async () => {
     clipboard_status.textContent = "";
@@ -253,7 +264,100 @@ else if(shader) gpu_modes.push("v86_gpu_shader=1");
 else if(triangle) gpu_modes.push("v86_gpu_triangle=1");
 if(multi_core_accelerated) gpu_modes.push(`v86_cpus=${cpus}`);
 const gpu_cmdline = gpu_modes.map(mode => ` ${mode}`).join("");
-const cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
+const cold_cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=loose modules=virtio_pci console=ttyS0,115200 tsc=reliable v86_relay=${relay_state}${gpu_cmdline}`;
+const snapshot_cmdline = `${cold_cmdline} v86_snapshot_capture=1`;
+const hosted_snapshot_schema = 1;
+const hosted_snapshot_manifest_url =
+    "../images/virtio-gpu-multi-core-alpine-codex-ready-state.json";
+const hosted_snapshot_configuration = {
+    schema: hosted_snapshot_schema,
+    protocol: "pre-ghostty-v1",
+    variant: "virtio-gpu-multi-core-alpine-codex",
+    renderer,
+    relay_state,
+    memory_size,
+    vga_memory_size,
+    filesystem_size,
+    width,
+    height,
+    cpus,
+    smp_workers,
+    smp_memory_model,
+    acpi: cpus > 1,
+    cmdline: snapshot_cmdline,
+    wasm_path: "../build/v86-multimem.wasm",
+    smp_worker_url: "../src/browser/vcpu_worker.js",
+    filesystem_prefix,
+    experimental_3d: triangle,
+};
+const hosted_snapshot_assets = [
+    "../build/libv86.mjs",
+    "../build/v86-multimem.wasm",
+    "../build/gram.wasm",
+    "../build/gram-shared.wasm",
+    "../src/browser/vcpu_worker.js",
+    "../bios/seabios.bin",
+    "../bios/vgabios.bin",
+    `../images/${filesystem_prefix}-fs.json`,
+    `../images/${filesystem_prefix}-image-contract.json`,
+    "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
+    "../build/virtio-gpu-wgpu/virtio_gpu_wgpu_bg.wasm",
+];
+let hosted_snapshot_fingerprint = null;
+let hosted_snapshot_manifest = null;
+let hosted_snapshot_state = null;
+let hosted_snapshot_fallback_reason = null;
+if(hosted_snapshot_flow)
+{
+    status.textContent = hosted_snapshot_capture ?
+        "Preparing the accelerated pre-Ghostty snapshot checkpoint…" :
+        "Checking the local accelerated ready-state snapshot…";
+    hosted_snapshot_fingerprint = await create_ready_state_fingerprint(
+        hosted_snapshot_configuration, hosted_snapshot_assets);
+}
+if(hosted_snapshot_requested)
+{
+    try
+    {
+        const manifest_response = await fetch(hosted_snapshot_manifest_url, {
+            cache: "no-cache",
+        });
+        if(!manifest_response.ok)
+        {
+            throw new Error(`manifest HTTP ${manifest_response.status}`);
+        }
+        hosted_snapshot_manifest = await manifest_response.json();
+        if(hosted_snapshot_manifest.schema !== hosted_snapshot_schema ||
+           hosted_snapshot_manifest.fingerprint !== hosted_snapshot_fingerprint ||
+           !hosted_snapshot_manifest.state ||
+           typeof hosted_snapshot_manifest.state.url !== "string" ||
+           typeof hosted_snapshot_manifest.state.sha256 !== "string")
+        {
+            throw new Error("manifest is incompatible with this appliance build");
+        }
+        const state_response = await fetch(hosted_snapshot_manifest.state.url, {
+            cache: "force-cache",
+        });
+        if(!state_response.ok)
+        {
+            throw new Error(`state HTTP ${state_response.status}`);
+        }
+        hosted_snapshot_state = await state_response.arrayBuffer();
+        const state_sha256 = await sha256_hex(hosted_snapshot_state);
+        if(state_sha256 !== hosted_snapshot_manifest.state.sha256)
+        {
+            throw new Error("state checksum does not match its manifest");
+        }
+    }
+    catch(error)
+    {
+        hosted_snapshot_state = null;
+        hosted_snapshot_fallback_reason = error_message(error);
+    }
+}
+const hosted_snapshot_restored = hosted_snapshot_state !== null;
+const cmdline = hosted_snapshot_capture || hosted_snapshot_restored ?
+    snapshot_cmdline : cold_cmdline;
 
 const emulator = new V86({
     wasm_path: smp_workers ? "../build/v86-multimem.wasm" : "../build/v86.wasm",
@@ -279,6 +383,9 @@ const emulator = new V86({
     autostart: true,
     bzimage_initrd_from_filesystem: true,
     cmdline,
+    ...(hosted_snapshot_restored ? {
+        initial_state: { buffer: hosted_snapshot_state },
+    } : {}),
     ...(relay_url ? {
         net_device: {
             type: "virtio",
@@ -301,24 +408,144 @@ window.webgpuBackend = renderer;
 window.applianceSessionId = crypto.randomUUID();
 window.virtioGpuBenchmark = benchmark_runner;
 window.appliancePreset = preset;
+const snapshot_started = performance.now();
+window.applianceHostedSnapshot = {
+    capture: capture_hosted_snapshot,
+    release: release_hosted_snapshot,
+    mode: snapshot_mode,
+    requested: hosted_snapshot_requested,
+    restored: hosted_snapshot_restored,
+    checkpoint_ready: false,
+    release_sent: false,
+    fallback_reason: hosted_snapshot_fallback_reason,
+    fingerprint: hosted_snapshot_fingerprint,
+    manifest: hosted_snapshot_manifest,
+    capture_metadata: null,
+    ready_ms: null,
+};
 const boot_label = `${renderer_label}, ${cpus} cpu${cpus > 1 ? "s" : ""}`;
-status.textContent = multi_core_accelerated ?
-    `Booting accelerated four-vCPU Alpine Ghostty (${boot_label})…` :
-    accelerated ?
-        `Booting accelerated Alpine Openbox, Ghostty, and Codex (${boot_label})…` :
-        benchmark_enabled ?
-            `Booting the deterministic Ghostty benchmark (${boot_label})…` :
-            resources ?
-                `Booting the capset-7 llvmpipe/resource triangle (${boot_label})…` :
-                shader ?
-                    `Booting the capset-7 version-2 guest shader (${boot_label})…` :
-                    triangle ?
-                        `Booting the capset-7 reference triangle (${boot_label})…` :
-                        `Booting Alpine Openbox, Ghostty, and Codex (${boot_label})…`;
+status.textContent = hosted_snapshot_restored ?
+    `Restoring the accelerated four-vCPU appliance snapshot (${boot_label})…` :
+    hosted_snapshot_capture ?
+        `Booting the accelerated snapshot checkpoint (${boot_label})…` :
+        hosted_snapshot_fallback_reason ?
+            `Hosted snapshot unavailable (${hosted_snapshot_fallback_reason}); cold booting (${boot_label})…` :
+            multi_core_accelerated ?
+                `Booting accelerated four-vCPU Alpine Ghostty (${boot_label})…` :
+                accelerated ?
+                    `Booting accelerated Alpine Openbox, Ghostty, and Codex (${boot_label})…` :
+                    benchmark_enabled ?
+                        `Booting the deterministic Ghostty benchmark (${boot_label})…` :
+                        resources ?
+                            `Booting the capset-7 llvmpipe/resource triangle (${boot_label})…` :
+                            shader ?
+                                `Booting the capset-7 version-2 guest shader (${boot_label})…` :
+                                triangle ?
+                                    `Booting the capset-7 reference triangle (${boot_label})…` :
+                                    `Booting Alpine Openbox, Ghostty, and Codex (${boot_label})…`;
 if(benchmark_runner)
 {
     benchmark_runner.run(emulator);
 }
+emulator.add_listener("emulator-loaded", () => {
+    if(!hosted_snapshot_restored)
+    {
+        return;
+    }
+    hosted_snapshot_state = null;
+    release_hosted_snapshot().catch(error => {
+        status.textContent = `Snapshot release failed: ${error_message(error)}`;
+        document.body.dataset.result = "fail";
+        console.error(error);
+    });
+});
+
+async function release_hosted_snapshot()
+{
+    if(!hosted_snapshot_restored &&
+       !window.applianceHostedSnapshot.checkpoint_ready)
+    {
+        throw new Error("The pre-Ghostty snapshot checkpoint is not ready");
+    }
+    emulator.serial0_send("touch /tmp/v86-appliance-snapshot-release\n");
+    window.applianceHostedSnapshot.release_sent = true;
+    if(!emulator.is_running())
+    {
+        await emulator.run();
+    }
+}
+
+async function capture_hosted_snapshot()
+{
+    if(!hosted_snapshot_capture ||
+       !window.applianceHostedSnapshot.checkpoint_ready)
+    {
+        throw new Error("The pre-Ghostty snapshot checkpoint is not ready");
+    }
+    const device = emulator.v86.cpu.devices.virtio_gpu;
+    const stats = device.get_performance_stats();
+    if(stats.live_3d_contexts !== 0 || stats.live_3d_resources !== 0 ||
+       stats.context_attachments !== 0)
+    {
+        throw new Error("The snapshot checkpoint still owns live 3D state");
+    }
+    const canvas = document.querySelector(".v86-virtio-gpu-canvas");
+    if(!canvas || canvas.hidden || getComputedStyle(canvas).display === "none")
+    {
+        throw new Error("The snapshot checkpoint has no visible scanout");
+    }
+    const was_running = emulator.is_running();
+    let state = null;
+    let completed = false;
+    try
+    {
+        if(was_running)
+        {
+            await emulator.stop();
+        }
+        state = await emulator.save_state();
+        const header = new DataView(state, 0, 16);
+        const metadata = {
+            fingerprint: hosted_snapshot_fingerprint,
+            raw_bytes: state.byteLength,
+            state_version: header.getInt32(4, true),
+            smp_mode: emulator.smp_mode,
+            gpu: {
+                live_3d_contexts: stats.live_3d_contexts,
+                live_3d_resources: stats.live_3d_resources,
+                context_attachments: stats.context_attachments,
+            },
+        };
+        const response = await fetch("/__v86_hosted_snapshot", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/octet-stream",
+                "X-V86-Snapshot-Metadata": JSON.stringify(metadata),
+            },
+            body: state,
+        });
+        if(!response.ok)
+        {
+            throw new Error(`Snapshot upload failed with HTTP ${response.status}`);
+        }
+        const result = await response.json();
+        window.applianceHostedSnapshot.capture_metadata = {
+            ...metadata,
+            ...result,
+        };
+        completed = true;
+        return window.applianceHostedSnapshot.capture_metadata;
+    }
+    finally
+    {
+        state = null;
+        if(was_running && !completed)
+        {
+            await emulator.run();
+        }
+    }
+}
+
 
 let serial_text = "";
 let serial_render_pending = false;
@@ -357,6 +584,10 @@ function update_readiness()
                     `Running the deterministic Ghostty benchmark (${renderer_label})…` :
                     `Ghostty is ready (${renderer_label}); run codex to start Codex.`;
         document.body.dataset.result = "pass";
+        document.body.dataset.snapshotRestore =
+            hosted_snapshot_restored ? "pass" : "none";
+        window.applianceHostedSnapshot.ready_ms =
+            Math.round(performance.now() - snapshot_started);
         clearInterval(readiness_timer);
     }
     else
@@ -381,6 +612,16 @@ emulator.add_listener("serial0-output-byte", byte => {
             serial_render_pending = false;
         });
     }
+    if(!window.applianceHostedSnapshot.checkpoint_ready &&
+       serial_text.includes("V86_APPLIANCE_SNAPSHOT_READY=PASS"))
+    {
+        window.applianceHostedSnapshot.checkpoint_ready = true;
+        if(hosted_snapshot_capture)
+        {
+            status.textContent =
+                "Accelerated pre-Ghostty checkpoint ready for local capture.";
+        }
+    }
     if(!guest_ready && serial_text.includes("V86_APPLIANCE_READY=PASS"))
     {
         guest_ready = true;
@@ -391,6 +632,22 @@ emulator.add_listener("serial0-output-byte", byte => {
         update_readiness();
     }
 });
+
+async function sha256_hex(value)
+{
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
+    let result = "";
+    for(const byte of digest)
+    {
+        result += byte.toString(16).padStart(2, "0");
+    }
+    return result;
+}
+
+function error_message(error)
+{
+    return error instanceof Error ? error.message : String(error);
+}
 
 window.addEventListener("unhandledrejection", event => {
     status.textContent = `Emulator failure: ${event.reason}`;

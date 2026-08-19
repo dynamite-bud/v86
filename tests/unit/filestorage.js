@@ -8,6 +8,7 @@ import {
     MemoryFileStorage,
     ServerFileStorageWrapper,
 } from "../../src/browser/filestorage.js";
+import { FS, STATUS_ON_STORAGE } from "../../lib/filesystem.js";
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "v86-filestorage-"));
 try
@@ -57,6 +58,18 @@ try
     assert.deepEqual(await lru.read("a", 0, 3), new Uint8Array([1, 2, 3]));
     lru.uncache("a");
     assert.equal(await lru.read("a", 0, 3), null, "uncache invalidates file data");
+
+    const shared_empty = new MemoryFileStorage();
+    await shared_empty.cache("empty", new Uint8Array());
+    const filesystem = new FS(shared_empty);
+    const inode_id = filesystem.CreateFile("resized", 0);
+    const inode = filesystem.GetInode(inode_id);
+    inode.status = STATUS_ON_STORAGE;
+    inode.sha256sum = "empty";
+    inode.size = 0;
+    await filesystem.ChangeSize(inode_id, 1);
+    assert.deepEqual(await shared_empty.read("empty", 0, 0), new Uint8Array(),
+        "resizing one inode retains shared immutable source data");
 
     const bounded = new MemoryFileStorage(2);
     await bounded.cache("oversized", new Uint8Array([1, 2, 3]));

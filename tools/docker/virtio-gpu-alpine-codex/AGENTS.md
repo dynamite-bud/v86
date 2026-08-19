@@ -29,6 +29,16 @@ mode requires `renderer=wgpu&accelerated=1`: `wgpu` is the browser-side
 Rust/Wasm backend and `accelerated=1` selects checksum-locked Mesa
 `webgpuvirt` inside the guest. Failure must not silently fall back.
 
+The opt-in hosted snapshot checkpoint is after Xorg and Openbox establish the
+1920x1080 mode but before Ghostty starts. It MUST own zero live VirtIO GPU 3D
+contexts, resources, or attachments. Capture uses the non-glamor
+`20-virtio-gpu-snapshot.conf`; restore releases that X server, removes the
+capture configuration, and starts the normal accelerated Xorg/Ghostty path.
+The page MUST validate state version, SHA-256, and the complete machine
+fingerprint before `initial_state`, and MUST cold boot with a visible reason on
+any mismatch. Snapshot artifacts remain ignored and MUST NOT contain model
+credentials or post-login workspace state.
+
 The pinned i386 Codex release has no `codex-code-mode-host`. The manual
 `codex-launcher` must keep these exact semantic settings:
 
@@ -92,6 +102,10 @@ V86_CODEX_BROWSER_PORT=8082 V86_CODEX_RELAY_URL=wss://relay.example.test/ \
 V86_CODEX_BROWSER_PORT=8082 V86_CODEX_RELAY_URL=wss://relay.example.test/ \
     make virtio-gpu-codex-accelerated-test
 make virtio-gpu-codex-benchmark-accelerated
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test
 ```
 
 Accelerated acceptance requires `webgpuvirt`, `SUBMIT_3D`, a uniform off-diagonal background, mixed cursor alpha, `V86_APPLIANCE_CODEX_AUTOSTART=DISABLED`, `V86_APPLIANCE_CODEX_FULL_ACCESS=PASS`, a successful Codex configuration write, and zero browser/WebGPU/backend errors. Performance claims require the fixed five-run workload, unchanged terminal SHA-256, raw results, and the documented 20% gain/5% non-regression gate.

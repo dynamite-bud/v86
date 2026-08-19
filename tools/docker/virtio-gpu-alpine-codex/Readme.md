@@ -56,6 +56,7 @@ v86 is a 32-bit x86 emulator and cannot run the upstream x86-64 Ghostty, Codex, 
 | `probe-packages.lock` | Complete sorted probe/triangle builder package closure; the build rejects drift. |
 | `xinitrc` | Openbox, selected renderer check, 1920x1080 mode, and Ghostty process startup. |
 | `20-virtio-gpu.conf` | Xorg modesetting, glamor, and DRI3 configuration for PCI `1af4:1050`; the session selects llvmpipe unless acceleration is explicit. |
+| `20-virtio-gpu-snapshot.conf` | Capture-only Xorg configuration that establishes the 1920x1080 Openbox checkpoint without glamor or live VirtIO GPU 3D state. |
 | `ghostty-config` | Undecorated maximized window, 16-point text tuned for responsive 1080p downscaling, and the interactive shell-session command. |
 | `ghostty-session` | Benchmark selection or a ready-marked, supervised interactive `/bin/sh` that restarts shell exits without tearing down the graphical session. |
 | `codex-launcher` | Manual `codex` command, exact full-access bypass, unsupported feature disablement, supported direct tools, and user-owned MCP configuration. |
@@ -179,6 +180,55 @@ Configure MCP servers manually in the writable guest home. Use a trusted relay
 for real credentials; a public relay is suitable only for disposable testing
 and can observe connection metadata even though application HTTPS remains
 encrypted.
+
+### Hosted pre-Ghostty snapshot
+
+The combined appliance has an opt-in hosted snapshot for fast local and
+deployed startup. Capture it from the exact browser build and guest image that
+will serve it:
+
+```sh
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot
+```
+
+The target owns port 8082 and writes two ignored artifacts:
+
+- `images/virtio-gpu-multi-core-alpine-codex-ready-state.json`
+- the content-addressed `.bin.zst` named by that JSON's `state.url`
+
+The checkpoint has four worker vCPUs and reaches Xorg, Openbox, and the
+1920x1080 mode, but deliberately stops before Ghostty creates live
+`webgpuvirt` contexts or resources. Restore validates the state version,
+SHA-256, and machine fingerprint before passing the state to `initial_state`.
+The guest then releases the checkpoint, restarts Xorg with the normal
+accelerated configuration, and launches Ghostty. A missing, corrupt, or
+incompatible artifact produces an explicit cold-boot fallback instead of
+restoring partial state.
+
+Verify the generated artifacts and a fresh relay connection:
+
+```sh
+V86_CODEX_RELAY_URL=wss://relay.example.test/ \
+    make virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test
+```
+
+Serve the JSON and its content-addressed state beside the matching browser,
+Wasm, image-contract, filesystem JSON, and flat-file image. The worker build
+still requires the COOP/COEP headers provided by `tools/coi-server.py`. Launch
+the hosted state explicitly:
+
+```text
+http://127.0.0.1:8082/examples/virtio_gpu_codex.html?snapshot=hosted&relay=wss%3A%2F%2Frelay.example.test%2F
+```
+
+The relay remains a runtime query option and model credentials are never part
+of the capture workflow. Do not commit or redistribute a state captured after
+interactive use. An Apple M4/Chrome 151 acceptance run produced a 197,546,168
+byte raw state and a 53,978,374 byte (51.5 MiB) zstd artifact. Complete
+readiness took 39,673-43,929 ms across two restores versus 105,083 ms for that
+capture's cold boot, a measured 2.39-2.65x speedup. Treat those values as
+one-host evidence, not a portable performance guarantee.
 
 ## Browser Display, Input, and Rootfs Cache
 

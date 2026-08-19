@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash as create_hash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -13,16 +15,29 @@ const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 3000
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
-const MULTICORE_ACCELERATED = SCENARIO === "multi-core-accelerated";
+const HOSTED_SNAPSHOT_MODE = process.env.V86_CODEX_HOSTED_SNAPSHOT || "";
+const HOSTED_SNAPSHOT_CAPTURE = HOSTED_SNAPSHOT_MODE === "capture";
+const HOSTED_SNAPSHOT_RESTORE = HOSTED_SNAPSHOT_MODE === "restore";
+const MULTICORE_ACCELERATED =
+    SCENARIO === "multi-core-accelerated" || HOSTED_SNAPSHOT_MODE !== "";
 const ACCELERATED = SCENARIO === "accelerated" || MULTICORE_ACCELERATED;
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
+const HOSTED_SNAPSHOT_PREFIX = "virtio-gpu-multi-core-alpine-codex-ready";
+const HOSTED_SNAPSHOT_RAW_PATH =
+    path.join(ROOT, "images", `${HOSTED_SNAPSHOT_PREFIX}.bin`);
+const HOSTED_SNAPSHOT_MANIFEST_PATH = path.join(
+    ROOT, "images", "virtio-gpu-multi-core-alpine-codex-ready-state.json");
 const LLVMPipe_BENCHMARK_PATH =
     path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
+let hosted_snapshot_upload = null;
+let hosted_snapshot_manifest = null;
 assert.ok(
     ["appliance", "accelerated", "multi-core-accelerated", "triangle", "shader",
         "resources", "mesa", "benchmark", "benchmark-accelerated"].includes(SCENARIO),
     `Invalid V86_CODEX_BROWSER_SCENARIO: ${SCENARIO}`);
+assert.ok(["", "capture", "restore"].includes(HOSTED_SNAPSHOT_MODE),
+    `Invalid V86_CODEX_HOSTED_SNAPSHOT: ${HOSTED_SNAPSHOT_MODE}`);
 const renderers = (process.env.V86_CODEX_BROWSER_RENDERERS ||
     (SCENARIO === "appliance" ? "webgpu-js,wgpu" : "wgpu"))
     .split(",")
@@ -33,6 +48,14 @@ for(const renderer of renderers)
 {
     assert.ok(renderer === "webgpu-js" || renderer === "wgpu",
         `Invalid renderer in V86_CODEX_BROWSER_RENDERERS: ${renderer}`);
+}
+if(HOSTED_SNAPSHOT_MODE)
+{
+    assert.deepEqual(renderers, ["wgpu"],
+        "Hosted snapshots require the Rust/Wasm wgpu renderer");
+    assert.equal(SCENARIO, "multi-core-accelerated",
+        "Hosted snapshots require the multi-core-accelerated scenario");
+    assert.ok(RELAY_URL, "Hosted snapshot capture and restore require V86_CODEX_RELAY_URL");
 }
 
 const required = [
@@ -45,6 +68,23 @@ const required = [
 if(MULTICORE_ACCELERATED)
 {
     required.push("build/gram.wasm", "build/gram-shared.wasm");
+}
+if(HOSTED_SNAPSHOT_RESTORE)
+{
+    if(!fs.existsSync(HOSTED_SNAPSHOT_MANIFEST_PATH))
+    {
+        throw new Error("Missing local hosted snapshot manifest; capture the snapshot first");
+    }
+    hosted_snapshot_manifest = JSON.parse(
+        fs.readFileSync(HOSTED_SNAPSHOT_MANIFEST_PATH, "utf8"));
+    assert.equal(hosted_snapshot_manifest.schema, 1);
+    assert.match(hosted_snapshot_manifest.fingerprint, /^[0-9a-f]{64}$/);
+    assert.equal(typeof hosted_snapshot_manifest.state?.url, "string");
+    const state_path = path.resolve(
+        ROOT, "examples", hosted_snapshot_manifest.state.url);
+    assert.ok(state_path.startsWith(path.join(ROOT, "images") + path.sep),
+        "Hosted snapshot state must remain under images/");
+    required.push(path.relative(ROOT, state_path));
 }
 for(const relative of required)
 {
@@ -59,6 +99,11 @@ if(renderers.includes("wgpu") &&
     throw new Error("Missing build/virtio-gpu-wgpu/virtio_gpu_wgpu.js; run make virtio-gpu-wgpu first");
 }
 
+if(HOSTED_SNAPSHOT_CAPTURE)
+{
+    fs.rmSync(HOSTED_SNAPSHOT_RAW_PATH, { force: true });
+    fs.rmSync(HOSTED_SNAPSHOT_RAW_PATH + ".tmp", { force: true });
+}
 async function main()
 {
     const server = http.createServer(serve_file);
@@ -74,7 +119,14 @@ async function main()
         {
             scenarios.push(await run_in_chrome(base_url, renderer));
         }
-        const result = { result: "pass", port: PORT, scenarios };
+        const snapshot = HOSTED_SNAPSHOT_CAPTURE ?
+            finalize_hosted_snapshot(scenarios[0]) : null;
+        const result = {
+            result: "pass",
+            port: PORT,
+            scenarios,
+            ...(snapshot ? { hosted_snapshot: snapshot } : {}),
+        };
         if(OUTPUT_PATH)
         {
             const output_file = path.resolve(ROOT, OUTPUT_PATH);
@@ -94,6 +146,27 @@ async function main()
 function serve_file(request, response)
 {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+    if(pathname === "/__v86_hosted_snapshot")
+    {
+        if(!HOSTED_SNAPSHOT_CAPTURE || request.method !== "POST")
+        {
+            response.writeHead(405).end();
+            return;
+        }
+        receive_hosted_snapshot(request, response).catch(error => {
+            fs.rmSync(HOSTED_SNAPSHOT_RAW_PATH + ".tmp", { force: true });
+            if(!response.headersSent)
+            {
+                response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+                response.end(error.message);
+            }
+            else
+            {
+                response.destroy(error);
+            }
+        });
+        return;
+    }
     if(pathname === "/favicon.ico")
     {
         response.writeHead(204).end();
@@ -120,6 +193,159 @@ function serve_file(request, response)
         stream.on("error", () => response.destroy());
         stream.pipe(response);
     });
+}
+
+async function receive_hosted_snapshot(request, response)
+{
+    if(hosted_snapshot_upload)
+    {
+        response.writeHead(409).end();
+        return;
+    }
+    const metadata_header = request.headers["x-v86-snapshot-metadata"];
+    if(typeof metadata_header !== "string")
+    {
+        response.writeHead(400).end();
+        return;
+    }
+    const metadata = JSON.parse(metadata_header);
+    assert.match(metadata.fingerprint, /^[0-9a-f]{64}$/);
+    assert.equal(metadata.state_version, 7);
+    assert.ok(Number.isSafeInteger(metadata.raw_bytes) && metadata.raw_bytes > 0);
+    assert.equal(metadata.smp_mode?.execution, "workers");
+    assert.equal(metadata.smp_mode?.topology, "percpu");
+    assert.equal(metadata.smp_mode?.cpus_effective, 4);
+    assert.deepEqual(metadata.gpu, {
+        live_3d_contexts: 0,
+        live_3d_resources: 0,
+        context_attachments: 0,
+    });
+
+    fs.mkdirSync(path.dirname(HOSTED_SNAPSHOT_RAW_PATH), { recursive: true });
+    const temporary = HOSTED_SNAPSHOT_RAW_PATH + ".tmp";
+    const output = fs.createWriteStream(temporary, { flags: "wx" });
+    let received_bytes = 0;
+    request.on("data", chunk => {
+        received_bytes += chunk.length;
+        if(received_bytes > metadata.raw_bytes)
+        {
+            request.destroy(new Error("Snapshot upload exceeded its declared size"));
+        }
+    });
+    await pipeline(request, output);
+    assert.equal(received_bytes, metadata.raw_bytes,
+        "Snapshot upload size did not match its metadata");
+    fs.renameSync(temporary, HOSTED_SNAPSHOT_RAW_PATH);
+    hosted_snapshot_upload = { metadata, received_bytes };
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ received_bytes }));
+}
+
+function finalize_hosted_snapshot(scenario)
+{
+    assert.ok(hosted_snapshot_upload, "The browser did not upload a snapshot");
+    assert.equal(scenario.hosted_snapshot_capture, true);
+    assert.equal(scenario.fingerprint,
+        hosted_snapshot_upload.metadata.fingerprint);
+    assert.equal(scenario.raw_bytes,
+        hosted_snapshot_upload.received_bytes);
+
+    const compressed_temporary = HOSTED_SNAPSHOT_RAW_PATH + ".zst.tmp";
+    fs.rmSync(compressed_temporary, { force: true });
+    const compression = spawnSync(process.env.ZSTD || "zstd", [
+        "-19",
+        "-T0",
+        "--no-progress",
+        "-f",
+        HOSTED_SNAPSHOT_RAW_PATH,
+        "-o",
+        compressed_temporary,
+    ], { stdio: "inherit" });
+    if(compression.error)
+    {
+        throw compression.error;
+    }
+    assert.equal(compression.status, 0, "zstd snapshot compression failed");
+
+    const compressed_sha256 = sha256_file(compressed_temporary);
+    const filename = `${HOSTED_SNAPSHOT_PREFIX}-${scenario.fingerprint.slice(0, 16)}-` +
+        `${compressed_sha256.slice(0, 16)}.bin.zst`;
+    const compressed_path = path.join(ROOT, "images", filename);
+    fs.renameSync(compressed_temporary, compressed_path);
+    const compressed_bytes = fs.statSync(compressed_path).size;
+    assert.ok(compressed_bytes > 0 && compressed_bytes < scenario.raw_bytes,
+        "Compressed snapshot must be smaller than its raw state");
+
+    const cold_ready_ms = scenario.ready_ms - scenario.capture_ms;
+    assert.ok(cold_ready_ms > scenario.checkpoint_ms,
+        "Cold readiness must follow the pre-Ghostty checkpoint");
+    const manifest = {
+        schema: 1,
+        protocol: "pre-ghostty-v1",
+        fingerprint: scenario.fingerprint,
+        created_at: new Date().toISOString(),
+        relay_state: "configured",
+        state: {
+            url: `../images/${filename}`,
+            sha256: compressed_sha256,
+            state_version: scenario.state_version,
+            raw_bytes: scenario.raw_bytes,
+            compressed_bytes,
+        },
+        capture: {
+            checkpoint_ms: scenario.checkpoint_ms,
+            capture_ms: scenario.capture_ms,
+            cold_ready_ms,
+            parallel_speedup: scenario.parallel_speedup,
+            smp_mode: scenario.smp_mode,
+            gpu: scenario.gpu,
+            preflight_markers: scenario.preflight_markers,
+        },
+    };
+    const manifest_temporary = HOSTED_SNAPSHOT_MANIFEST_PATH + ".tmp";
+    fs.writeFileSync(manifest_temporary, JSON.stringify(manifest, null, 2) + "\n");
+    fs.renameSync(manifest_temporary, HOSTED_SNAPSHOT_MANIFEST_PATH);
+    fs.rmSync(HOSTED_SNAPSHOT_RAW_PATH);
+
+    for(const entry of fs.readdirSync(path.join(ROOT, "images")))
+    {
+        if(entry.startsWith(HOSTED_SNAPSHOT_PREFIX + "-") &&
+           entry.endsWith(".bin.zst") && entry !== filename)
+        {
+            fs.rmSync(path.join(ROOT, "images", entry));
+        }
+    }
+    return {
+        manifest: path.relative(ROOT, HOSTED_SNAPSHOT_MANIFEST_PATH),
+        state: path.relative(ROOT, compressed_path),
+        fingerprint: scenario.fingerprint,
+        raw_bytes: scenario.raw_bytes,
+        compressed_bytes,
+        compression_ratio: compressed_bytes / scenario.raw_bytes,
+        checkpoint_ms: scenario.checkpoint_ms,
+        capture_ms: scenario.capture_ms,
+        cold_ready_ms,
+    };
+}
+
+function sha256_file(filename)
+{
+    const hash = create_hash("sha256");
+    const descriptor = fs.openSync(filename, "r");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    try
+    {
+        let bytes;
+        while((bytes = fs.readSync(descriptor, buffer)) !== 0)
+        {
+            hash.update(buffer.subarray(0, bytes));
+        }
+    }
+    finally
+    {
+        fs.closeSync(descriptor);
+    }
+    return hash.digest("hex");
 }
 
 async function run_in_chrome(base_url, renderer)
@@ -204,7 +430,125 @@ async function run_scenario(browser_ws, base_url, renderer)
             if(SCENARIO === "benchmark-accelerated") url.searchParams.set("accelerated", "1");
             if(BENCHMARK_MACHINE) url.searchParams.set("benchmark_machine", BENCHMARK_MACHINE);
         }
+        if(HOSTED_SNAPSHOT_CAPTURE) url.searchParams.set("snapshot", "capture");
+        else if(HOSTED_SNAPSHOT_RESTORE) url.searchParams.set("snapshot", "hosted");
         await cdp.call("Page.navigate", { url: url.href });
+        let hosted_snapshot_capture_result = null;
+        if(HOSTED_SNAPSHOT_CAPTURE)
+        {
+            let checkpoint;
+            const observed_preflight_markers = new Set();
+            await wait_for(async() => {
+                checkpoint = await evaluate(cdp, `(() => {
+                    const snapshot = window.applianceHostedSnapshot;
+                    const device = window.emulator?.v86?.cpu?.devices?.virtio_gpu;
+                    const canvas = device?.backend?.canvas;
+                    return {
+                        result: document.body?.dataset?.result || null,
+                        serial: window.applianceSerialText || "",
+                        snapshot: snapshot ? {
+                            mode: snapshot.mode,
+                            checkpoint_ready: snapshot.checkpoint_ready,
+                            fingerprint: snapshot.fingerprint,
+                        } : null,
+                        smp_mode: window.emulator?.smp_mode || null,
+                        gpu: device ? device.get_performance_stats() : null,
+                        canvas_visible: !!canvas && !canvas.hidden &&
+                            getComputedStyle(canvas).display !== "none",
+                    };
+                })()`);
+                for(const line of checkpoint.serial.split(/\r?\n/))
+                {
+                    const marker = /V86_APPLIANCE_[^\r\n]*/.exec(line)?.[0];
+                    if(marker)
+                    {
+                        observed_preflight_markers.add(marker);
+                    }
+                }
+                last_readiness_state = {
+                    serial: checkpoint.serial,
+                    gpu: checkpoint.gpu,
+                };
+                if(checkpoint.result === "fail")
+                {
+                    const error = new Error(
+                        `Snapshot checkpoint failed:\n${checkpoint.serial.slice(-12000)}`);
+                    error.terminal = true;
+                    throw error;
+                }
+                return checkpoint.snapshot?.checkpoint_ready;
+            }, READY_TIMEOUT_MS, "accelerated pre-Ghostty snapshot checkpoint");
+            const checkpoint_ms = performance.now() - started;
+            assert.equal(checkpoint.result, null);
+            assert.equal(checkpoint.snapshot.mode, "capture");
+            assert.match(checkpoint.snapshot.fingerprint, /^[0-9a-f]{64}$/);
+            assert.equal(checkpoint.canvas_visible, true);
+            assert.equal(checkpoint.smp_mode?.execution, "workers");
+            assert.equal(checkpoint.smp_mode?.topology, "percpu");
+            assert.equal(checkpoint.smp_mode?.cpus_effective, 4);
+            assert.deepEqual({
+                live_3d_contexts: checkpoint.gpu.live_3d_contexts,
+                live_3d_resources: checkpoint.gpu.live_3d_resources,
+                context_attachments: checkpoint.gpu.context_attachments,
+            }, {
+                live_3d_contexts: 0,
+                live_3d_resources: 0,
+                context_attachments: 0,
+            }, `Snapshot checkpoint owns live 3D state: ${JSON.stringify(checkpoint.gpu)}`);
+            assert.ok(checkpoint.serial.includes("V86_APPLIANCE_SNAPSHOT_XORG=PASS"));
+            assert.ok(checkpoint.serial.includes("V86_APPLIANCE_SNAPSHOT_OPENBOX=PASS"));
+            assert.ok(checkpoint.serial.includes("V86_APPLIANCE_SNAPSHOT_GHOSTTY=STOPPED"));
+            assert.ok(checkpoint.serial.includes("V86_APPLIANCE_SNAPSHOT_READY=PASS"));
+            assert.ok(!checkpoint.serial.includes("V86_APPLIANCE_GHOSTTY_PROCESS=PASS"));
+            assert.ok(!checkpoint.serial.includes("V86_APPLIANCE_READY=PASS"));
+            const preflight_markers = Array.from(observed_preflight_markers);
+            for(const marker of [
+                "V86_APPLIANCE_IMAGE=virtio-gpu-multi-core-alpine-codex",
+                "V86_APPLIANCE_CPUS=4",
+                "V86_APPLIANCE_CPUS_EXPECTED=4",
+            ])
+            {
+                assert.ok(preflight_markers.includes(marker),
+                    `Missing preflight marker: ${marker}`);
+            }
+            const preflight_contract = preflight_markers.join("\n");
+            const parallel_speedup = Number(
+                /V86_APPLIANCE_PARALLEL_SPEEDUP=([0-9.]+)/.exec(
+                    preflight_contract)?.[1]);
+            assert.ok(parallel_speedup >= 1.2,
+                `Parallel speedup ${parallel_speedup} is below the worker execution gate`);
+
+            const capture_started = performance.now();
+            const capture = await evaluate(
+                cdp, "window.applianceHostedSnapshot.capture()");
+            assert.ok(hosted_snapshot_upload);
+            assert.equal(capture.fingerprint, checkpoint.snapshot.fingerprint);
+            assert.equal(capture.raw_bytes, hosted_snapshot_upload.received_bytes);
+            assert.equal(capture.state_version, 7);
+            assert.deepEqual(capture.gpu, {
+                live_3d_contexts: 0,
+                live_3d_resources: 0,
+                context_attachments: 0,
+            });
+            assert.equal(failures.length, 0, failures.join(" | "));
+            hosted_snapshot_capture_result = {
+                hosted_snapshot_capture: true,
+                checkpoint_ms: Math.round(checkpoint_ms),
+                capture_ms: Math.round(performance.now() - capture_started),
+                fingerprint: capture.fingerprint,
+                raw_bytes: capture.raw_bytes,
+                state_version: capture.state_version,
+                smp_mode: capture.smp_mode,
+                gpu: capture.gpu,
+                parallel_speedup,
+                preflight_markers,
+            };
+            const release_sent = await evaluate(cdp, `(async() => {
+                await window.applianceHostedSnapshot.release();
+                return window.applianceHostedSnapshot.release_sent;
+            })()`);
+            assert.equal(release_sent, true);
+        }
         const renderer_stages = [];
         await wait_for(async() => {
             const state = await evaluate(cdp,
@@ -251,6 +595,60 @@ async function run_scenario(browser_ws, base_url, renderer)
             return state.result === "pass";
         }, READY_TIMEOUT_MS, `${renderer} appliance readiness`);
         const ready_ms = performance.now() - started;
+        let hosted_snapshot_restore = null;
+        if(HOSTED_SNAPSHOT_RESTORE)
+        {
+            const restored = await evaluate(cdp, `({
+                body_result: document.body?.dataset?.result || null,
+                dataset_restore: document.body?.dataset?.snapshotRestore || null,
+                serial: window.applianceSerialText || "",
+                snapshot: window.applianceHostedSnapshot || null,
+            })`);
+            assert.equal(restored.body_result, "pass");
+            assert.equal(restored.dataset_restore, "pass");
+            assert.equal(restored.snapshot.requested, true);
+            assert.equal(restored.snapshot.restored, true);
+            assert.equal(restored.snapshot.release_sent, true);
+            assert.equal(restored.snapshot.fallback_reason, null);
+            assert.equal(restored.snapshot.fingerprint,
+                hosted_snapshot_manifest.fingerprint);
+            assert.ok(restored.serial.includes("V86_APPLIANCE_SNAPSHOT_RELEASE=PASS"));
+            assert.ok(!restored.serial.includes("Linux version"));
+            assert.ok(!restored.serial.includes("Run /init as init process"));
+            assert.ok(!restored.serial.includes("OpenRC 0."));
+            const restore_speedup =
+                hosted_snapshot_manifest.capture.cold_ready_ms / ready_ms;
+            assert.ok(restore_speedup >= 1.2,
+                `Hosted restore speedup ${restore_speedup.toFixed(2)}x is below 1.2x ` +
+                `(${Math.round(ready_ms)} ms restored, ` +
+                `${hosted_snapshot_manifest.capture.cold_ready_ms} ms cold)`);
+
+            const network_command =
+                "wget -q -T 20 -O /dev/null https://example.com && " +
+                "printf 'V86_HOSTED_SNAPSHOT_NETWORK=PASS\\n' >/dev/ttyS0 || " +
+                "printf 'V86_HOSTED_SNAPSHOT_NETWORK=FAIL\\n' >/dev/ttyS0\n";
+            await evaluate(cdp,
+                `window.emulator.keyboard_send_text(${JSON.stringify(network_command)}, 1)`);
+            await wait_for(async() => {
+                const serial = await evaluate(cdp, "window.applianceSerialText || ''");
+                if(serial.includes("V86_HOSTED_SNAPSHOT_NETWORK=FAIL"))
+                {
+                    const error = new Error("Configured relay did not reconnect after restore");
+                    error.terminal = true;
+                    throw error;
+                }
+                return serial.includes("V86_HOSTED_SNAPSHOT_NETWORK=PASS");
+            }, 30000, "configured relay after hosted snapshot restore");
+            hosted_snapshot_restore = {
+                restored: true,
+                cold_boot_skipped: true,
+                release_sent: true,
+                network_reconnected: true,
+                ready_ms: Math.round(ready_ms),
+                cold_ready_ms: hosted_snapshot_manifest.capture.cold_ready_ms,
+                speedup: restore_speedup,
+            };
+        }
         if(SCENARIO === "appliance" || ACCELERATED)
         {
             await new Promise(resolve => setTimeout(resolve, 3000));
@@ -708,6 +1106,12 @@ async function run_scenario(browser_ws, base_url, renderer)
             await evaluate(cdp, "window.emulator.stop()");
             return benchmark;
         }
+        const preflight_markers = HOSTED_SNAPSHOT_RESTORE ?
+            hosted_snapshot_manifest.capture.preflight_markers : [];
+        assert.ok(Array.isArray(preflight_markers),
+            "Hosted snapshot manifest has no preflight marker contract");
+        const contract_serial =
+            `${preflight_markers.join("\n")}\n${state.serial}`;
         for(const marker of [
             "V86_APPLIANCE_ARCH=i686",
             "V86_APPLIANCE_UID=1000",
@@ -730,7 +1134,12 @@ async function run_scenario(browser_ws, base_url, renderer)
             "V86_APPLIANCE_READY=PASS",
         ])
         {
-            assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
+            assert.ok(contract_serial.includes(marker), `Missing guest marker: ${marker}`);
+        }
+        if(HOSTED_SNAPSHOT_CAPTURE || HOSTED_SNAPSHOT_RESTORE)
+        {
+            assert.ok(state.serial.includes(
+                "V86_APPLIANCE_SNAPSHOT_XORG_RESTART=PASS"));
         }
         let parallel_speedup = null;
         if(MULTICORE_ACCELERATED)
@@ -741,10 +1150,15 @@ async function run_scenario(browser_ws, base_url, renderer)
                 "V86_APPLIANCE_CPUS_EXPECTED=4",
             ])
             {
-                assert.ok(state.serial.includes(marker), `Missing guest marker: ${marker}`);
+                assert.ok(contract_serial.includes(marker), `Missing guest marker: ${marker}`);
             }
             parallel_speedup = Number(
-                /V86_APPLIANCE_PARALLEL_SPEEDUP=([0-9.]+)/.exec(state.serial)?.[1]);
+                /V86_APPLIANCE_PARALLEL_SPEEDUP=([0-9.]+)/.exec(contract_serial)?.[1]);
+            if(HOSTED_SNAPSHOT_RESTORE)
+            {
+                assert.equal(parallel_speedup,
+                    hosted_snapshot_manifest.capture.parallel_speedup);
+            }
             assert.ok(parallel_speedup >= 1.2,
                 `Parallel speedup ${parallel_speedup} is below the worker execution gate`);
             assert.equal(state.cross_origin_isolated, true);
@@ -759,8 +1173,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             /V86_APPLIANCE_RENDERER=.*webgpuvirt/i :
             /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
         assert.match(state.serial, /V86_APPLIANCE_OPENGL=4\.[1-9]/);
-        assert.match(state.serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
-        assert.ok(state.serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.147.0"));
+        assert.match(contract_serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
+        assert.ok(contract_serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.147.0"));
         assert.equal(state.memory_size, 2 * 1024 * 1024 * 1024 - 128 * 1024);
         assert.equal(state.storage_size, 2 * 1024 * 1024 * 1024);
         assert.equal(state.canvas_visible, true);
@@ -1023,6 +1437,7 @@ async function run_scenario(browser_ws, base_url, renderer)
         }
         return {
             renderer,
+            ...(hosted_snapshot_capture_result || {}),
             ready_ms: Math.round(ready_ms),
             architecture: "i686",
             uid: 1000,
@@ -1048,6 +1463,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             keyboard_input: true,
             clipboard_paste,
             shell_restart,
+            hosted_snapshot_restore,
             responsive_layout: true,
             accelerated_scanout_pixel: accelerated_screenshot?.nonblack || null,
             accelerated_background_probe: accelerated_screenshot?.background || null,
