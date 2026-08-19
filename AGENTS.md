@@ -15,7 +15,7 @@ XWAH means **Xorcist Web Agent Harness**. Use `XWAH-N` as the project work-item 
 - Treat `master`, `feature/virtio-gpu-2d`, and existing topic branches as historical or backport targets, not bases for new work.
 - Every GitHub work-item title MUST begin with `XWAH-N:`, for example `XWAH-2: Expand VirtIO GPU color-fidelity coverage`.
 - In branches, commits, plans, and human-readable references, use `XWAH-N`; NEVER create a new `issue-N` identifier. GitHub `#N` syntax MAY still be used where a native link or CLI command requires the immutable tracker number.
-- Every tracker-backed branch MUST use `feature/XWAH-N/<kebab-case-slug>`, for example `feature/XWAH-2/virtio-gpu-3d`.
+- Every tracker-backed branch MUST use `feature/XWAH-N/<kebab-case-slug>`, for example `feature/XWAH-2/virtio-gpu-3d`. **Exception:** the combined XWAH-9 SMP/VirtIO GPU integration line uses the root-level `multi-core-gpu` branch; do not recreate `feature/XWAH-9/multi-core-gpu`.
 - Open pull requests against `main`, or against `multi-core` for SMP work per the exception above. Keep unrelated XWAH work on separate branches and in separate worktrees.
 - Every commit MUST follow semantic Conventional Commit syntax with a nonempty lowercase scope: `<type>(<scope>): <imperative summary>`.
 - Prefer the narrow subsystem as the scope, such as `feat(codex): package i386 code mode host`, `feat(alpine): add cage kiosk image`, `fix(virtio-gpu): preserve scanout ordering`, or `docs(xwah): define branch workflow`.
