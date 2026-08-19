@@ -39,9 +39,9 @@ FileStorageInterface.prototype.release = function(sha256sum) {};
 /**
  * @constructor
  * @implements {FileStorageInterface}
- * @param {number=} max_bytes Maximum cached immutable data in bytes. Defaults to 256 MiB.
+ * @param {number=} max_bytes Maximum cached immutable data in bytes. Defaults to 512 MiB.
  */
-export function MemoryFileStorage(max_bytes = 256 * 1024 * 1024)
+export function MemoryFileStorage(max_bytes = 512 * 1024 * 1024)
 {
     if(!Number.isSafeInteger(max_bytes) || max_bytes < 0)
     {

@@ -19,6 +19,8 @@ try
 
     let decompressions = 0;
     const memory = new MemoryFileStorage();
+    assert.equal(memory.max_bytes, 512 * 1024 * 1024,
+        "the immutable file cache defaults to 512 MiB");
     const storage = new ServerFileStorageWrapper(
         memory, directory,
         async (decompressed_size, source) => {

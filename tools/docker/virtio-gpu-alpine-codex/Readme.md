@@ -224,11 +224,11 @@ http://127.0.0.1:8082/examples/virtio_gpu_codex.html?snapshot=hosted&relay=wss%3
 
 The relay remains a runtime query option and model credentials are never part
 of the capture workflow. Do not commit or redistribute a state captured after
-interactive use. An Apple M4/Chrome 151 acceptance run produced a 197,546,168
-byte raw state and a 53,978,374 byte (51.5 MiB) zstd artifact. Complete
-readiness took 39,673-43,929 ms across two restores versus 105,083 ms for that
-capture's cold boot, a measured 2.39-2.65x speedup. Treat those values as
-one-host evidence, not a portable performance guarantee.
+interactive use. An Apple M4/Chrome 151 acceptance run produced a 200,119,724
+byte raw state and a 53,726,075 byte (51.2 MiB) zstd artifact. Complete
+readiness took 41,252 ms after restore versus 97,129 ms for that capture's cold
+boot, a measured 2.35x speedup. Treat those values as one-host evidence, not a
+portable performance guarantee.
 
 ## Browser Display, Input, and Rootfs Cache
 
@@ -246,7 +246,15 @@ through the current canvas-to-scanout scale. This avoids the roughly 2x cursor
 acceleration seen on HiDPI hosts where `movementX` and `movementY` may use
 physical pixels. Pointer lock continues to consume unbounded movement deltas.
 
-The browser's in-memory immutable-file cache is a 256 MiB byte-bounded LRU.
+Clicking anywhere inside the emulator display focuses its clipboard target.
+Focused Cmd/Ctrl+V reads `text/plain` with `navigator.clipboard.readText()`
+while the trusted key event still owns browser user activation, so Chrome can
+show its clipboard permission prompt even though the non-editable canvas does
+not emit a native paste event. Native paste events remain supported and cancel
+the API fallback to prevent duplicate guest input. Permission denial is visible
+and non-fatal; **Paste** provides an explicit retry gesture.
+
+The browser's in-memory immutable-file cache is a 512 MiB byte-bounded LRU.
 Closing a guest file releases its active owner but retains recently used data
 until cache pressure evicts it; explicit invalidation still removes data
 immediately, and objects larger than the complete cache are not retained. This

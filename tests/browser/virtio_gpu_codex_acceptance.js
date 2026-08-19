@@ -692,6 +692,95 @@ async function run_scenario(browser_ws, base_url, renderer)
                 clipboard_serial.split("V86_CLIPBOARD_PASTE_LINE2=").length - 1,
                 1, "multiline display paste reached the guest more than once");
 
+            const shortcut_command =
+                "printf 'V86_CLIPBOARD_SHORTCUT=PASS\\n' >/dev/ttyS0\n";
+            for(const name of ["clipboard-read", "clipboard-write"])
+            {
+                await cdp.call("Browser.setPermission", {
+                    origin: base_url,
+                    permission: { name },
+                    setting: "granted",
+                });
+            }
+            await cdp.call("Page.bringToFront");
+            const focus_point = await evaluate(cdp, `(() => {
+                const display = document.getElementById("screen_container");
+                const rect = display.getBoundingClientRect();
+                return {
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2,
+                };
+            })()`);
+            await cdp.call("Input.dispatchMouseEvent", {
+                type: "mousePressed",
+                x: focus_point.x,
+                y: focus_point.y,
+                button: "left",
+                clickCount: 1,
+            });
+            await cdp.call("Input.dispatchMouseEvent", {
+                type: "mouseReleased",
+                x: focus_point.x,
+                y: focus_point.y,
+                button: "left",
+                clickCount: 1,
+            });
+            assert.equal(await evaluate(cdp,
+                `document.activeElement === document.getElementById("screen_container")`),
+            true, "clicking the emulator canvas did not focus the clipboard target");
+            await evaluate(cdp,
+                `navigator.clipboard.writeText(${JSON.stringify(shortcut_command)})`);
+            const shortcut_modifiers = process.platform === "darwin" ? 4 : 2;
+            const dispatch_shortcut = async() => {
+                await cdp.call("Input.dispatchKeyEvent", {
+                    type: "keyDown",
+                    key: "v",
+                    code: "KeyV",
+                    windowsVirtualKeyCode: 86,
+                    nativeVirtualKeyCode: 86,
+                    modifiers: shortcut_modifiers,
+                });
+                await cdp.call("Input.dispatchKeyEvent", {
+                    type: "keyUp",
+                    key: "v",
+                    code: "KeyV",
+                    windowsVirtualKeyCode: 86,
+                    nativeVirtualKeyCode: 86,
+                    modifiers: shortcut_modifiers,
+                });
+            };
+            await dispatch_shortcut();
+            await wait_for(async() => {
+                const serial = await evaluate(cdp, "window.applianceSerialText || ''");
+                return serial.includes("V86_CLIPBOARD_SHORTCUT=PASS");
+            }, 30000, "trusted display clipboard shortcut");
+            const shortcut_success_status = await evaluate(cdp,
+                `document.getElementById("clipboard-status").textContent`);
+            assert.match(shortcut_success_status,
+                /^Pasted [1-9][0-9]* characters with Cmd\/Ctrl\+V\.$/);
+
+            await cdp.call("Browser.setPermission", {
+                origin: base_url,
+                permission: { name: "clipboard-read" },
+                setting: "denied",
+            });
+            await dispatch_shortcut();
+            await wait_for(async() => {
+                const status = await evaluate(cdp,
+                    `document.getElementById("clipboard-status").textContent`);
+                return status.includes("Clipboard permission was denied");
+            }, 5000, "clipboard shortcut denial status");
+            const denied_shortcut_serial = await evaluate(cdp,
+                "window.applianceSerialText || ''");
+            assert.equal(
+                denied_shortcut_serial.split("V86_CLIPBOARD_SHORTCUT=PASS").length - 1,
+                1, "denied clipboard shortcut duplicated guest input");
+            await cdp.call("Browser.setPermission", {
+                origin: base_url,
+                permission: { name: "clipboard-read" },
+                setting: "granted",
+            });
+
             const button = await evaluate(cdp,
                 `(${run_clipboard_button_acceptance_in_page.toString()})()`);
             assert.equal(button.reads_before_click, 0,
@@ -710,6 +799,9 @@ async function run_scenario(browser_ws, base_url, renderer)
             clipboard_paste = {
                 guest_multiline: true,
                 display_event_once: true,
+                display_click_focus: true,
+                shortcut_user_gesture: true,
+                shortcut_denial_visible: true,
                 button_user_gesture: true,
                 denial_nonfatal: true,
             };
