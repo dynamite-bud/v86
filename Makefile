@@ -93,7 +93,7 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   virtio_gpu.js bus.js log.js cpu.js \
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js
-BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
+BROWSER_FILES=screen.js keyboard.js clipboard.js mouse.js speaker.js serial.js \
 	      network.js starter.js worker_bus.js dummy_screen.js ansi_screen.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
 	      print_stats.js filestorage.js modem.js virtio_gpu_backend.js virtio_gpu_wgpu_backend.js \
@@ -433,6 +433,9 @@ filesystem-unit-test:
 
 mouse-unit-test:
 	./tests/unit/mouse.js
+
+clipboard-unit-test:
+	./tests/unit/clipboard.js
 
 virtio-gpu-unit-test:
 	node tools/docker/virtio-gpu-color/generate-fixtures.js --check

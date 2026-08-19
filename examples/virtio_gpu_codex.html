@@ -46,7 +46,7 @@
         width: min(1920px, 100%);
         margin: 16px auto;
     }
-    #status, #network-status {
+    #status, #network-status, #clipboard-status {
         margin: 0 0 8px;
         color: #cbd1da;
         font: 13px ui-monospace, monospace;
@@ -56,6 +56,11 @@
         align-items: center;
         justify-content: space-between;
         margin-bottom: 10px;
+    }
+    #control-buttons {
+        display: flex;
+        gap: 8px;
+        align-items: center;
     }
     #screen_container {
         position: relative;
@@ -116,7 +121,11 @@
     <p id="status">Preparing emulator…</p>
     <div id="controls">
         <p id="network-status"></p>
-        <button id="reset-session" type="button">Reset fresh session</button>
+        <div id="control-buttons">
+            <span id="clipboard-status" role="status" aria-live="polite"></span>
+            <button id="paste-clipboard" type="button">Paste</button>
+            <button id="reset-session" type="button">Reset fresh session</button>
+        </div>
     </div>
     <div id="screen_container" tabindex="0" aria-label="Codex appliance display">
         <div></div>
@@ -160,7 +169,10 @@ const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScri
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
 const network_status = document.getElementById("network-status");
+const clipboard_status = document.getElementById("clipboard-status");
+const paste_button = document.getElementById("paste-clipboard");
 const reset_button = document.getElementById("reset-session");
+const screen_container = document.getElementById("screen_container");
 const renderer_link = document.getElementById(`${renderer}-link`);
 renderer_link.setAttribute("aria-current", "page");
 
@@ -185,6 +197,41 @@ for(const name of ["webgpu-js", "wgpu"])
 }
 
 reset_button.addEventListener("click", () => location.reload());
+const clipboard_text_limit = 64 * 1024;
+paste_button.addEventListener("click", async () => {
+    clipboard_status.textContent = "";
+    if(!navigator.clipboard || typeof navigator.clipboard.readText !== "function")
+    {
+        clipboard_status.textContent =
+            "Clipboard access is unavailable. Focus the display and use Cmd/Ctrl+V.";
+        return;
+    }
+
+    try
+    {
+        const text = await navigator.clipboard.readText();
+        if(!text)
+        {
+            clipboard_status.textContent = "Clipboard is empty.";
+            return;
+        }
+
+        const bounded_text = text.length > clipboard_text_limit ?
+            text.slice(0, clipboard_text_limit) : text;
+        await emulator.keyboard_send_text(bounded_text, 1);
+        screen_container.focus();
+        clipboard_status.textContent = text.length > clipboard_text_limit ?
+            `Pasted the first ${clipboard_text_limit} characters (clipboard text was truncated).` :
+            `Pasted ${bounded_text.length} character${bounded_text.length === 1 ? "" : "s"}.`;
+    }
+    catch(error)
+    {
+        const reason = error && error.name === "NotAllowedError" ?
+            "Clipboard permission was denied." : "Clipboard access failed.";
+        clipboard_status.textContent =
+            `${reason} Focus the display and use Cmd/Ctrl+V.`;
+    }
+});
 network_status.textContent = relay_url ?
     "VirtIO NIC relay: configured" :
     "VirtIO NIC relay: unconfigured";
@@ -228,7 +275,7 @@ const emulator = new V86({
         basefs: `../images/${filesystem_prefix}-fs.json`,
         total_size: filesystem_size,
     },
-    screen_container: document.getElementById("screen_container"),
+    screen_container,
     autostart: true,
     bzimage_initrd_from_filesystem: true,
     cmdline,

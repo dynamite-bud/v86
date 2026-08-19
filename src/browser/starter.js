@@ -12,6 +12,7 @@ import { NetworkAdapter } from "./network.js";
 import { FetchNetworkAdapter } from "./fetch_network.js";
 import { WispNetworkAdapter } from "./wisp_network.js";
 import { KeyboardAdapter } from "./keyboard.js";
+import { ClipboardAdapter } from "./clipboard.js";
 import { MouseAdapter } from "./mouse.js";
 import { ScreenAdapter } from "./screen.js";
 import { DummyScreenAdapter } from "./dummy_screen.js";
@@ -636,7 +637,16 @@ V86.prototype.continue_init = async function(emulator, options)
 
     if(!options.disable_keyboard)
     {
-        this.keyboard_adapter = new KeyboardAdapter(this.bus);
+        this.keyboard_adapter = new KeyboardAdapter(this.bus, screen_options.container);
+        if(screen_options.container)
+        {
+            this.clipboard_adapter = new ClipboardAdapter(
+                screen_options.container,
+                text => {
+                    this.keyboard_adapter.release_keys();
+                    return this.keyboard_send_text(text, 1);
+                });
+        }
     }
     if(!options.disable_mouse)
     {
@@ -1351,6 +1361,7 @@ V86.prototype.destroy = async function()
         await virtio_gpu.dispose();
     }
     this.v86.destroy();
+    this.clipboard_adapter && this.clipboard_adapter.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
     this.network_adapter && this.network_adapter.destroy();
     this.mouse_adapter && this.mouse_adapter.destroy();

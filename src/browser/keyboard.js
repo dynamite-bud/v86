@@ -10,8 +10,9 @@ const PLATFOM_WINDOWS = typeof window !== "undefined" && window.navigator.platfo
  * @constructor
  *
  * @param {BusConnector} bus
+ * @param {Element=} clipboard_target
  */
-export function KeyboardAdapter(bus)
+export function KeyboardAdapter(bus, clipboard_target)
 {
     var
         /**
@@ -30,6 +31,13 @@ export function KeyboardAdapter(bus)
          * @type {boolean}
          */
         deferred_keydown = false,
+
+        /**
+         * Whether a display-scoped clipboard shortcut has a pending KeyV
+         * release that must not reach the guest.
+         * @type {boolean}
+         */
+        clipboard_shortcut_v_down = false,
 
         /**
          * Timeout-ID returned by setTimeout() or 0 (Windows AltGr-Filter)
@@ -272,6 +280,16 @@ export function KeyboardAdapter(bus)
     };
     this.init();
 
+    this.release_keys = function()
+    {
+        if(deferred_event)
+        {
+            clearTimeout(deferred_timeout_id);
+            deferred_event = null;
+        }
+        blur_handler();
+    };
+
     this.simulate_press = function(code)
     {
         var ev = { keyCode: code };
@@ -340,6 +358,41 @@ export function KeyboardAdapter(bus)
         return charmap[e.keyCode];
     }
 
+    /**
+     * Let the browser produce a paste event for the focused emulator display
+     * instead of forwarding Ctrl/Cmd+V as guest key events.
+     *
+     * @param {KeyboardEvent|Object} e
+     * @param {boolean} keydown
+     * @returns {boolean}
+     */
+    function is_clipboard_paste_shortcut(e, keydown)
+    {
+        if(!clipboard_target || !e.target ||
+           e.target !== clipboard_target && !clipboard_target.contains(e.target))
+        {
+            return false;
+        }
+
+        const is_v = e.code === "KeyV" || e.keyCode === 86;
+        if(keydown && is_v && (e.ctrlKey || e.metaKey))
+        {
+            clipboard_shortcut_v_down = true;
+            if(deferred_event && deferred_event.code === "ControlLeft")
+            {
+                clearTimeout(deferred_timeout_id);
+                deferred_event = null;
+            }
+            return true;
+        }
+        if(!keydown && clipboard_shortcut_v_down && is_v)
+        {
+            clipboard_shortcut_v_down = false;
+            return true;
+        }
+        return false;
+    }
+
     function keyup_handler(e)
     {
         if(!e.altKey && keys_pressed[0x38])
@@ -362,7 +415,7 @@ export function KeyboardAdapter(bus)
         return handler(e, true);
     }
 
-    function blur_handler(e)
+    function blur_handler()
     {
         // trigger keyup for all pressed keys
         var keys = Object.keys(keys_pressed),
@@ -424,6 +477,11 @@ export function KeyboardAdapter(bus)
         }
 
         if(!may_handle(e))
+        {
+            return;
+        }
+
+        if(is_clipboard_paste_shortcut(e, keydown))
         {
             return;
         }

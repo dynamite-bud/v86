@@ -95,6 +95,20 @@ uses the pinned real binary and always passes
 Code Mode host and Codex Apps, keeps direct shell/unified execution enabled,
 and leaves every ordinary MCP server to user configuration.
 
+Host-to-guest clipboard input is available on the browser page. Focus the
+emulator display and press Cmd/Ctrl+V, or click **Paste** when the browser
+suppresses paste on the canvas. Both paths inject only `text/plain`, cap one
+paste at 65,536 UTF-16 code units, and pace keyboard delivery so multiline
+shell commands are not dropped. The button reads the host clipboard only from
+its click handler; unavailable access or permission denial is visible and
+non-fatal.
+
+This is not guest-to-host copy. Canvas pixels do not retain Ghostty's selected
+text, so [XWAH-38](https://github.com/dynamite-bud/v86/issues/38) deliberately
+does not use OCR or claim that selecting text in the guest can populate the
+host clipboard. Copy-out still requires a separately reviewed guest-to-host
+transport.
+
 The previous automatic `workspace-write` session caused model-spawned
 `codex mcp add` commands to see `/home/codex/.codex` as read-only. The manual
 full-access launcher removes that inner filesystem sandbox, so configuration
@@ -174,7 +188,9 @@ The acceptance harness verifies:
 - absence of XFCE, its panel/session/desktop, Thunar, `xfce4-terminal`,
   Tumbler, Garcon, and Exo;
 - unconfigured Codex login with no baked home credential;
-- browser keyboard delivery and responsive narrow layout;
+- browser keyboard delivery, display-scoped Cmd/Ctrl+V, the explicit Paste
+  button, exact-once multiline text with spaces and punctuation, non-fatal
+  clipboard denial, and responsive narrow layout;
 - a writable workspace and pristine fresh-session reset on the direct
   JavaScript backend;
 - manual launcher policy that disables Code Mode, its absent host, and

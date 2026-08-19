@@ -263,6 +263,60 @@ async function run_scenario(browser_ws, base_url, renderer)
                 "Appliance reported a post-readiness failure");
         }
 
+        let clipboard_paste = null;
+        if(SCENARIO === "appliance" || ACCELERATED)
+        {
+            const clipboard_commands = [
+                "printf 'V86_CLIPBOARD_PASTE_LINE1=spaces punctuation !@#^&*()[]{}:;,.?/-_+=\\n' >/dev/ttyS0",
+                "printf 'V86_CLIPBOARD_PASTE_LINE2=multiline-ok\\n' >/dev/ttyS0",
+            ].join("\n") + "\n";
+            const paste_event = await evaluate(cdp,
+                `(${dispatch_clipboard_paste_in_page.toString()})(${JSON.stringify(clipboard_commands)})`);
+            assert.equal(paste_event.focused, true,
+                "clipboard acceptance did not focus the emulator display");
+            assert.equal(paste_event.default_prevented, true,
+                "display paste did not consume plain text");
+            assert.equal(paste_event.outside_default_prevented, false,
+                "paste outside the emulator display was consumed");
+            assert.equal(paste_event.paste_button_visible, true,
+                "clipboard fallback button is not visible");
+
+            await wait_for(async() => {
+                const serial = await evaluate(cdp, "window.applianceSerialText || ''");
+                return serial.includes("V86_CLIPBOARD_PASTE_LINE1=spaces punctuation") &&
+                    serial.includes("V86_CLIPBOARD_PASTE_LINE2=multiline-ok");
+            }, 30000, "multiline clipboard paste in Ghostty");
+            const clipboard_serial = await evaluate(cdp, "window.applianceSerialText || ''");
+            assert.equal(
+                clipboard_serial.split("V86_CLIPBOARD_PASTE_LINE1=").length - 1,
+                1, "display paste reached the guest more than once");
+            assert.equal(
+                clipboard_serial.split("V86_CLIPBOARD_PASTE_LINE2=").length - 1,
+                1, "multiline display paste reached the guest more than once");
+
+            const button = await evaluate(cdp,
+                `(${run_clipboard_button_acceptance_in_page.toString()})()`);
+            assert.equal(button.reads_before_click, 0,
+                "Paste button read the clipboard before a click");
+            assert.equal(button.reads_after_success, 1);
+            assert.deepEqual(button.sent_text, [{
+                text: "button paste = value\nsecond line",
+                delay: 1,
+            }]);
+            assert.match(button.success_status, /^Pasted 32 characters\.$/);
+            assert.equal(button.reads_after_denial, 2);
+            assert.match(button.denial_status, /Clipboard permission was denied/);
+            assert.match(button.unavailable_status, /Clipboard access is unavailable/);
+            assert.equal(button.body_result, "pass",
+                "clipboard fallback failure changed appliance readiness");
+            clipboard_paste = {
+                guest_multiline: true,
+                display_event_once: true,
+                button_user_gesture: true,
+                denial_nonfatal: true,
+            };
+        }
+
 
         const state = await evaluate(cdp, `(() => {
             const serial = window.applianceSerialText || "";
@@ -962,6 +1016,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             desktop_exclusions: true,
             login_unconfigured: true,
             keyboard_input: true,
+            clipboard_paste,
             responsive_layout: true,
             accelerated_scanout_pixel: accelerated_screenshot?.nonblack || null,
             accelerated_background_probe: accelerated_screenshot?.background || null,
@@ -1678,6 +1733,111 @@ async function run_shader_work_timeout_in_page()
     function concat(...parts)
     {
         return parts.join("");
+    }
+}
+
+function dispatch_clipboard_paste_in_page(text)
+{
+    const display = document.getElementById("screen_container");
+    const outside_data = new globalThis.DataTransfer();
+    outside_data.setData("text/plain", "outside");
+    const outside_event = new globalThis.ClipboardEvent("paste", {
+        clipboardData: outside_data,
+        bubbles: true,
+        cancelable: true,
+    });
+    document.getElementById("status").dispatchEvent(outside_event);
+
+    const data = new globalThis.DataTransfer();
+    data.setData("text/plain", text);
+    const event = new globalThis.ClipboardEvent("paste", {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+    });
+    display.focus();
+    display.dispatchEvent(event);
+    return {
+        focused: document.activeElement === display,
+        default_prevented: event.defaultPrevented,
+        outside_default_prevented: outside_event.defaultPrevented,
+        paste_button_visible:
+            getComputedStyle(document.getElementById("paste-clipboard")).display !== "none",
+    };
+}
+
+async function run_clipboard_button_acceptance_in_page()
+{
+    const button = document.getElementById("paste-clipboard");
+    const status = document.getElementById("clipboard-status");
+    const original_clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const original_send_text = window.emulator.keyboard_send_text;
+    const sent_text = [];
+    let reads = 0;
+
+    const set_clipboard = value => {
+        Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value,
+        });
+    };
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+    try
+    {
+        set_clipboard({
+            readText: async () => {
+                reads++;
+                return "button paste = value\nsecond line";
+            },
+        });
+        window.emulator.keyboard_send_text = async (text, delay) => {
+            sent_text.push({ text, delay });
+        };
+        const reads_before_click = reads;
+        button.click();
+        await settle();
+        const reads_after_success = reads;
+        const success_status = status.textContent;
+
+        set_clipboard({
+            readText: async () => {
+                reads++;
+                throw new globalThis.DOMException("denied", "NotAllowedError");
+            },
+        });
+        button.click();
+        await settle();
+        const reads_after_denial = reads;
+        const denial_status = status.textContent;
+
+        set_clipboard(undefined);
+        button.click();
+        await settle();
+        const unavailable_status = status.textContent;
+
+        return {
+            reads_before_click,
+            reads_after_success,
+            reads_after_denial,
+            sent_text,
+            success_status,
+            denial_status,
+            unavailable_status,
+            body_result: document.body.dataset.result,
+        };
+    }
+    finally
+    {
+        window.emulator.keyboard_send_text = original_send_text;
+        if(original_clipboard)
+        {
+            Object.defineProperty(navigator, "clipboard", original_clipboard);
+        }
+        else
+        {
+            delete navigator.clipboard;
+        }
     }
 }
 
