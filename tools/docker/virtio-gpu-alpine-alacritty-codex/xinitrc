@@ -1,0 +1,43 @@
+#!/bin/sh
+
+openbox --sm-disable >/tmp/v86-alacritty-openbox.log 2>&1 &
+openbox_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+    pidof openbox >/dev/null && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+if glxinfo -B >/tmp/v86-alacritty-glxinfo.log 2>&1 &&
+    grep -qi llvmpipe /tmp/v86-alacritty-glxinfo.log; then
+    touch /tmp/v86-alacritty-gl-ready
+else
+    cat /tmp/v86-alacritty-openbox.log >>/tmp/v86-alacritty-appliance.log
+    kill "$openbox_pid" 2>/dev/null || true
+    exit 1
+fi
+
+xrandr --output Virtual-1 --mode 1024x768 >/tmp/v86-alacritty-xrandr.log 2>&1 || true
+alacritty --config-file /home/codex/.config/alacritty/alacritty.toml \
+    >/tmp/v86-alacritty.log 2>&1 &
+alacritty_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 1200 ]; do
+    kill -0 "$alacritty_pid" 2>/dev/null || break
+    if pidof codex >/dev/null; then
+        touch /tmp/v86-alacritty-ui-ready
+        wait "$alacritty_pid"
+        status=$?
+        kill "$openbox_pid" 2>/dev/null || true
+        exit "$status"
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+done
+
+cat /tmp/v86-alacritty.log >>/tmp/v86-alacritty-appliance.log
+kill "$openbox_pid" 2>/dev/null || true
+exit 1

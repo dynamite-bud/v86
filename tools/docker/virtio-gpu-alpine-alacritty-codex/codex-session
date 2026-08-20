@@ -1,0 +1,4 @@
+#!/bin/sh
+
+cd "$HOME/workspace" || exit 1
+exec /usr/local/bin/codex --sandbox workspace-write --ask-for-approval never

@@ -1,0 +1,45 @@
+#!/sbin/openrc-run
+
+description="Configure the v86 relay network before the unprivileged appliance session"
+
+start()
+{
+    ebegin "Preparing v86 appliance runtime"
+    if ! hostname v86-appliance ||
+        ! printf '%s\n' \
+            '127.0.0.1 localhost v86-appliance' \
+            '::1 localhost v86-appliance' > /etc/hosts
+    then
+        eend 1 "could not configure the appliance hostname"
+        return 1
+    fi
+    rm -f /run/v86-network-ready
+    install -d -m 0700 -o codex -g codex /run/user/1000
+    if grep -qw 'v86_relay=unconfigured' /proc/cmdline; then
+        eend 0 "relay unconfigured"
+        return 0
+    fi
+
+    attempt=0
+    while [ "$attempt" -lt 100 ] && [ ! -e /sys/class/net/eth0 ]; do
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+
+    if [ ! -e /sys/class/net/eth0 ]; then
+        eend 1 "eth0 is unavailable"
+        return 1
+    fi
+
+    ip link set eth0 up >/var/log/v86-networking.log 2>&1 &&
+        udhcpc -i eth0 -q -n -t 10 -T 1 >>/var/log/v86-networking.log 2>&1
+    status=$?
+    if [ "$status" -eq 0 ] && ip -4 addr show dev eth0 | grep -q 'inet '; then
+        touch /run/v86-network-ready
+    else
+        status=1
+    fi
+
+    eend "$status"
+    return "$status"
+}

@@ -509,6 +509,8 @@ virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test: build/libv86.mjs \
 		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
 		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=restore \
 		./tests/browser/virtio_gpu_codex_acceptance.js
+virtio-gpu-alacritty-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
+	./tests/browser/virtio_gpu_alacritty_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	V86_GPU_COLOR_PORT=8081 ./tests/browser/virtio_gpu_color.js
 
@@ -635,6 +637,8 @@ virtio-gpu-desktop-image:
 
 virtio-gpu-codex-image:
 	tools/docker/virtio-gpu-alpine-codex/build.sh
+virtio-gpu-alacritty-codex-image:
+	tools/docker/virtio-gpu-alpine-alacritty-codex/build.sh
 
 # Builds into images/multicore-ghostty-codex-* — a distinct prefix from
 # virtio-gpu-codex-image on purpose: images/ is a shared, gitignored
@@ -663,10 +667,12 @@ denodoc:
 	virtio-gpu-test virtio-gpu-test-release \
 	virtio-gpu-codex-browser-test virtio-gpu-codex-accelerated-test \
 	virtio-gpu-codex-benchmark virtio-gpu-codex-benchmark-accelerated \
+	virtio-gpu-alacritty-codex-browser-test \
 	virtio-gpu-3d-transport-test \
 	virtio-gpu-3d-triangle-test virtio-gpu-3d-shader-test \
 	virtio-gpu-webgpuvirt-triangle-test virtio-gpu-color-test \
 	virtio-gpu-kms-image virtio-gpu-desktop-image virtio-gpu-codex-image \
+	virtio-gpu-alacritty-codex-image \
 	multicore-ghostty-codex-image multicore-ghostty-codex-browser-test \
 	virtio-gpu-multi-core-alpine-codex-image \
 	virtio-gpu-multi-core-alpine-codex-browser-test \

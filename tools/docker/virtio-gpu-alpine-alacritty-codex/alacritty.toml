@@ -1,0 +1,23 @@
+[window]
+decorations = "None"
+startup_mode = "Maximized"
+dynamic_title = false
+title = "Alacritty Codex Appliance"
+
+[scrolling]
+history = 1000
+
+[font]
+size = 10.0
+
+[font.normal]
+family = "DejaVu Sans Mono"
+style = "Book"
+
+[cursor]
+style = { shape = "Block", blinking = "Never" }
+unfocused_hollow = false
+
+[terminal]
+shell = { program = "/usr/local/bin/v86-codex-session" }
+osc52 = "OnlyCopy"

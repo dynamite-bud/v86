@@ -1,0 +1,7 @@
+ALACRITTY_TAG=v0.17.0
+ALACRITTY_COMMIT=94e7c8874e526b1e67b349d9ba30ddf81669119e
+ALACRITTY_URL=https://github.com/alacritty/alacritty/archive/refs/tags/v0.17.0.tar.gz
+ALACRITTY_SHA256=38d6527d346cda5c6049332a1f3338a89ea66cd7981b54d4c3ce801b392496f8
+CODEX_TAG=rust-v0.147.0-i386.1
+CODEX_URL=https://github.com/dynamite-bud/codex/releases/download/rust-v0.147.0-i386.1/codex-rust-v0.147.0-i386-alpine-3.24.tar.gz
+CODEX_SHA256=e26bae168d40474d976eb272c48ef86b8acd86bfb3028e9e83060d8f18855438

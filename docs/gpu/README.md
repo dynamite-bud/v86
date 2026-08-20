@@ -119,6 +119,8 @@ http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=xorg&renderer=web
 http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=xorg&renderer=wgpu
 http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=wayland&renderer=webgpu-js
 http://127.0.0.1:8000/examples/virtio_gpu_desktop.html?desktop=wayland&renderer=wgpu
+http://127.0.0.1:8000/examples/virtio_gpu_alacritty_codex.html?renderer=webgpu-js
+http://127.0.0.1:8000/examples/virtio_gpu_alacritty_codex.html?renderer=wgpu
 ```
 
 Use one hostname and port consistently: persistent snapshots are origin-scoped. The first desktop boot lazily fetches content-addressed `.bin.zst` rootfs files over local HTTP; save a snapshot only after the complete desktop is visible.
@@ -128,6 +130,7 @@ Rebuild a guest only after changing its inputs:
 ```sh
 make virtio-gpu-kms-image
 make virtio-gpu-desktop-image
+make virtio-gpu-alacritty-codex-image
 ```
 
 Review the generated contract against the committed contract. Never commit the generated `images/` tree.
@@ -141,6 +144,7 @@ Review the generated contract against the committed contract. Never commit the g
 | Guest backing/file storage | `make filesystem-unit-test` |
 | Linux KMS path | `make virtio-gpu-test virtio-gpu-test-release` |
 | Capset transport, private submit, or pinned Linux/libdrm path | `make virtio-gpu-codex-image virtio-gpu-capset-probe-test virtio-gpu-3d-transport-test` |
+| Alacritty + Codex image or launcher | `make virtio-gpu-alacritty-codex-image virtio-gpu-alacritty-codex-browser-test` |
 | Reference triangle guest or browser acceptance | `make virtio-gpu-3d-triangle-test` |
 | Arbitrary WGSL validation, compilation, timeout, or recovery | `make virtio-gpu-3d-shader-test` |
 | Version-3 resources, SPIR-V, or bindings | `make virtio-gpu-webgpuvirt-triangle-test` |
@@ -209,5 +213,6 @@ Review the generated contract against the committed contract. Never commit the g
 - [XWAH-26](https://github.com/dynamite-bud/v86/issues/26): bounded renderer-object caching.
 - [XWAH-27](https://github.com/dynamite-bud/v86/issues/27): frame-fence and queue-notification batching.
 - [XWAH-28](https://github.com/dynamite-bud/v86/issues/28): separate host-rendered terminal transport investigation.
+- [`tools/docker/virtio-gpu-alpine-alacritty-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-alacritty-codex/Readme.md): independently reproducible i686 Alacritty source build, Openbox appliance, launch paths, readiness contract, and browser verification.
 
 Historical root-level Codex task/plan files were removed after their implemented 2D material and surviving 3D decisions were consolidated into the canonical architecture and this contributor guide.
