@@ -2,6 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>v86 Ghostty Codex appliance</title>
+<link rel="icon" href="data:,">
 <style>
     :root {
         color-scheme: dark;
@@ -142,7 +143,7 @@ import { create_ready_state_fingerprint } from "../src/browser/ready_state_snaps
 
 const params = new URLSearchParams(location.search);
 const preset = params.get("preset");
-const snapshot_mode = params.get("snapshot") || "off";
+const snapshot_mode = params.get("snapshot") || "hosted";
 const hosted_snapshot_requested = snapshot_mode === "hosted";
 const hosted_snapshot_capture = snapshot_mode === "capture";
 const hosted_snapshot_flow = hosted_snapshot_requested || hosted_snapshot_capture;
@@ -150,7 +151,8 @@ const multi_core_accelerated =
     preset === "multi-core-accelerated" || hosted_snapshot_flow;
 const renderer = multi_core_accelerated || params.get("renderer") === "wgpu" ?
     "wgpu" : "webgpu-js";
-const relay_url = params.get("relay");
+const relay_url = params.get("relay") ||
+    "wisps://clawdtalk.com/wisp/ba976e67b8543ce2a046aea5722ceb93d0f2d42414a43b23/";
 const shader = params.get("shader") === "1";
 const resources = params.get("resources") === "1";
 const mesa = params.get("mesa") === "1";
@@ -265,7 +267,7 @@ const width = 1920;
 const height = 1080;
 const relay_state = relay_url ? "configured" : "unconfigured";
 const filesystem_prefix = multi_core_accelerated ?
-    "virtio-gpu-multi-core-alpine-codex" : "alpine-virtio-gpu-codex";
+    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0" : "alpine-virtio-gpu-codex";
 const gpu_modes = [];
 if(benchmark_enabled) gpu_modes.push("v86_gpu_benchmark=1");
 if(accelerated) gpu_modes.push("v86_gpu_accelerated=1");
@@ -279,11 +281,11 @@ const cold_cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=
 const snapshot_cmdline = `${cold_cmdline} v86_snapshot_capture=1`;
 const hosted_snapshot_schema = 1;
 const hosted_snapshot_manifest_url =
-    "../images/virtio-gpu-multi-core-alpine-codex-ready-state.json";
+    "../images/virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready-state.json";
 const hosted_snapshot_configuration = {
     schema: hosted_snapshot_schema,
     protocol: "pre-ghostty-v1",
-    variant: "virtio-gpu-multi-core-alpine-codex",
+    variant: "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0",
     renderer,
     relay_state,
     memory_size,

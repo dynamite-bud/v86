@@ -23,11 +23,13 @@ const MULTICORE_ACCELERATED =
 const ACCELERATED = SCENARIO === "accelerated" || MULTICORE_ACCELERATED;
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
-const HOSTED_SNAPSHOT_PREFIX = "virtio-gpu-multi-core-alpine-codex-ready";
+const HOSTED_SNAPSHOT_PREFIX =
+    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready";
 const HOSTED_SNAPSHOT_RAW_PATH =
     path.join(ROOT, "images", `${HOSTED_SNAPSHOT_PREFIX}.bin`);
 const HOSTED_SNAPSHOT_MANIFEST_PATH = path.join(
-    ROOT, "images", "virtio-gpu-multi-core-alpine-codex-ready-state.json");
+    ROOT, "images",
+    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready-state.json");
 const LLVMPipe_BENCHMARK_PATH =
     path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
 let hosted_snapshot_upload = null;
@@ -62,7 +64,7 @@ const required = [
     "build/libv86.mjs",
     MULTICORE_ACCELERATED ? "build/v86-multimem.wasm" : "build/v86.wasm",
     MULTICORE_ACCELERATED ?
-        "images/virtio-gpu-multi-core-alpine-codex-fs.json" :
+        "images/virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-fs.json" :
         "images/alpine-virtio-gpu-codex-fs.json",
 ];
 if(MULTICORE_ACCELERATED)
@@ -1266,7 +1268,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
         assert.match(state.serial, /V86_APPLIANCE_OPENGL=4\.[1-9]/);
         assert.match(contract_serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
-        assert.ok(contract_serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.147.0"));
+        assert.ok(contract_serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.148.0"));
         assert.equal(state.memory_size, 2 * 1024 * 1024 * 1024 - 128 * 1024);
         assert.equal(state.storage_size, 2 * 1024 * 1024 * 1024);
         assert.equal(state.canvas_visible, true);
