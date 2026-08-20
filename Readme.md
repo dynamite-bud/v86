@@ -72,7 +72,8 @@ list of emulated hardware:
 [9p filesystem](docs/filesystem.md) —
 [Linux rootfs on 9p](docs/linux-9p-image.md) —
 [Profiling](docs/profiling.md) —
-[CPU Idling](docs/cpu-idling.md)
+[CPU Idling](docs/cpu-idling.md) —
+[Telnyx Experience appliance](docs/telnyx-experience.md)
 
 ## Compatibility
 

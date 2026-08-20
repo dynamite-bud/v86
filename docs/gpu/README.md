@@ -207,6 +207,7 @@ Review the generated contract against the committed contract. Never commit the g
 - [XWAH-5](https://github.com/dynamite-bud/v86/issues/5): targeted Mesa `webgpuvirt` and accelerated Ghostty implementation and performance gates.
 - [`docs/gpu/ghostty-codex-appliance.md`](ghostty-codex-appliance.md): XWAH-3 architecture decision, downstream i386 artifacts, image contract, networking, acceptance, and size evidence.
 - [`tools/docker/virtio-gpu-alpine-codex/Readme.md`](../../tools/docker/virtio-gpu-alpine-codex/Readme.md): reproducible Xorg/Openbox appliance implementation, file ownership, build and verification workflow, security limitations, troubleshooting, and Cage sibling handoff.
+- [`docs/telnyx-experience.md`](../telnyx-experience.md): Telnyx-branded four-worker-vCPU appliance architecture, image and snapshot ownership, initial setup, and deployment workflow.
 - [XWAH-23](https://github.com/dynamite-bud/v86/issues/23): fullscreen Ghostty direct-scanout eligibility.
 - [XWAH-24](https://github.com/dynamite-bud/v86/issues/24): resident BO dirty-range upload batching.
 - [XWAH-25](https://github.com/dynamite-bud/v86/issues/25): eliminate avoidable GPU readbacks.

@@ -1,0 +1,27 @@
+model = "moonshotai/Kimi-K2.6"
+model_provider = "telnyx"
+model_catalog_json = "/home/codex/.codex/model-catalogs/telnyx.json"
+web_search = "disabled"
+model_reasoning_effort = "none"
+
+[model_providers.telnyx]
+name = "Telnyx"
+base_url = "https://api.telnyx.com/v2/ai/openai"
+env_key = "TELNYX_API_KEY"
+wire_api = "responses"
+
+[features]
+apps = false
+browser_use = false
+computer_use = false
+image_generation = false
+multi_agent = false
+multi_agent_v2 = false
+
+[mcp_servers.telnyx]
+url = "https://api.telnyx.com/v2/mcp"
+bearer_token_env_var = "TELNYX_API_KEY"
+enabled = false
+
+[projects."/home/codex/workspace"]
+trust_level = "trusted"

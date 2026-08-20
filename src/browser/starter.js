@@ -644,7 +644,7 @@ V86.prototype.continue_init = async function(emulator, options)
                 screen_options.container,
                 text => {
                     this.keyboard_adapter.release_keys();
-                    return this.keyboard_send_text(text, 1);
+            return this.keyboard_send_text(text, 5);
                 });
         }
     }

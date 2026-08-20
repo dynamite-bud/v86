@@ -509,6 +509,37 @@ virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test: build/libv86.mjs \
 		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
 		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=restore \
 		./tests/browser/virtio_gpu_codex_acceptance.js
+
+TELNYX_RELAY_URL ?= wisps://clawdtalk.com/wisp/ba976e67b8543ce2a046aea5722ceb93d0f2d42414a43b23/
+TELNYX_APPLIANCE_PREFIX := virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0
+TELNYX_CODEX_VERSION := 0.148.0
+
+telnyx-experience-build: build/libv86.mjs build/v86-multimem.wasm \
+		build/gram.wasm build/gram-shared.wasm virtio-gpu-wgpu \
+		virtio-gpu-multi-core-alpine-codex-telnyx-image
+
+telnyx-experience-snapshot: telnyx-experience-build
+	V86_CODEX_RELAY_URL="$(TELNYX_RELAY_URL)" \
+		V86_CODEX_BROWSER_PAGE=/telnyx-experience/index.html \
+		V86_CODEX_APPLIANCE_PREFIX="$(TELNYX_APPLIANCE_PREFIX)" \
+		V86_CODEX_EXPECTED_VERSION="$(TELNYX_CODEX_VERSION)" \
+		V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
+		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=capture \
+		./tests/browser/virtio_gpu_codex_acceptance.js
+
+telnyx-experience-test: telnyx-experience-build
+	V86_CODEX_RELAY_URL="$(TELNYX_RELAY_URL)" \
+		V86_CODEX_BROWSER_PAGE=/telnyx-experience/index.html \
+		V86_CODEX_APPLIANCE_PREFIX="$(TELNYX_APPLIANCE_PREFIX)" \
+		V86_CODEX_EXPECTED_VERSION="$(TELNYX_CODEX_VERSION)" \
+		V86_CODEX_BROWSER_PORT=8082 V86_CODEX_BROWSER_TIMEOUT_MS=600000 \
+		V86_CODEX_BROWSER_SCENARIO=multi-core-accelerated \
+		V86_CODEX_BROWSER_RENDERERS=wgpu V86_CODEX_HOSTED_SNAPSHOT=restore \
+		./tests/browser/virtio_gpu_codex_acceptance.js
+
+telnyx-experience-serve:
+	python3 telnyx-experience/server.py --host 127.0.0.1 --port 8082
 virtio-gpu-alacritty-codex-browser-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
 	./tests/browser/virtio_gpu_alacritty_codex_acceptance.js
 virtio-gpu-color-test: build/libv86.mjs build/v86.wasm virtio-gpu-wgpu
@@ -650,6 +681,9 @@ multicore-ghostty-codex-image:
 virtio-gpu-multi-core-alpine-codex-image:
 	tools/docker/virtio-gpu-multi-core-alpine-codex/build.sh
 
+virtio-gpu-multi-core-alpine-codex-telnyx-image:
+	tools/docker/virtio-gpu-multi-core-alpine-codex/telnyx/build.sh
+
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
 	jq --arg version "$$(cat build/version)" '.version = $$version' package.json > package.json.tmp
@@ -677,4 +711,7 @@ denodoc:
 	virtio-gpu-multi-core-alpine-codex-image \
 	virtio-gpu-multi-core-alpine-codex-browser-test \
 	virtio-gpu-multi-core-alpine-codex-hosted-snapshot \
-	virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test
+	virtio-gpu-multi-core-alpine-codex-hosted-snapshot-test \
+	virtio-gpu-multi-core-alpine-codex-telnyx-image \
+	telnyx-experience-build telnyx-experience-snapshot \
+	telnyx-experience-test telnyx-experience-serve

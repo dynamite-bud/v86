@@ -1,83 +1,111 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>v86 Ghostty Codex appliance</title>
+<title>The Telnyx Experience</title>
 <link rel="icon" href="data:,">
 <style>
     :root {
         color-scheme: dark;
         font-family: system-ui, sans-serif;
     }
+    * {
+        box-sizing: border-box;
+    }
+    html, body {
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        margin: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background: #000;
+    }
     body {
-        margin: 0;
-        background: #17191d;
-        color: #f1f3f5;
+        position: fixed;
+        inset: 0;
     }
-    header {
-        display: flex;
-        gap: 16px;
-        align-items: center;
-        justify-content: space-between;
-        padding: 12px 16px;
-        background: #25282e;
-        border-bottom: 1px solid #3b3f47;
+    #boot-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        padding: 12px;
+        background: #000;
+        color: #00e3aa;
     }
-    h1 {
-        margin: 0;
-        font-size: 17px;
-        font-weight: 600;
+    #boot-overlay[data-state="fail"] {
+        color: #ff6b6b;
     }
-    nav {
-        display: flex;
-        gap: 8px;
+    #boot-terminal {
+        width: min(100%, 54ch);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: clamp(7px, min(2.8vw, 3.2vh), 14px);
+        line-height: 1;
     }
-    nav a, button {
-        padding: 6px 10px;
-        border: 1px solid #676e7a;
-        border-radius: 4px;
-        background: transparent;
+    #boot-logo {
+        margin: 0 0 2em;
         color: inherit;
-        text-decoration: none;
+        font: inherit;
+        white-space: pre;
     }
-    nav a[aria-current="page"] {
-        background: #3f6eb3;
-        border-color: #74a4eb;
+    #boot-progress {
+        display: block;
+        color: inherit;
+        white-space: pre;
     }
-    main {
-        width: min(1920px, 100%);
-        margin: 16px auto;
+    #boot-message {
+        min-height: 2em;
+        margin: 0.8em 0 0;
+        color: #c6fff0;
+        line-height: 1.35;
     }
-    #status, #network-status, #clipboard-status {
-        margin: 0 0 8px;
-        color: #cbd1da;
-        font: 13px ui-monospace, monospace;
+    #boot-message::after {
+        content: "_";
+        animation: boot-cursor 900ms steps(1, end) infinite;
     }
-    #controls {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 10px;
+    #boot-overlay[data-state="fail"] #boot-message {
+        color: inherit;
     }
-    #control-buttons {
-        display: flex;
-        gap: 8px;
-        align-items: center;
+    @keyframes boot-cursor {
+        50% {
+            opacity: 0;
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        #boot-overlay {
+            transition: none;
+        }
+        #boot-message::after {
+            animation: none;
+        }
+    }
+    #status {
+        display: none !important;
     }
     #screen_container {
-        position: relative;
-        width: 1920px;
-        height: auto;
-        aspect-ratio: 16 / 9;
-        max-width: 100%;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        width: 100dvw;
+        height: 100vh;
+        height: 100dvh;
         overflow: hidden;
+        outline: none;
         background: #000;
-        box-shadow: 0 8px 32px #0009;
         cursor: none !important;
+        touch-action: none;
     }
     #screen_container .v86-virtio-gpu-cursor {
         display: none !important;
     }
     #screen_container > div {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
         white-space: pre;
         font: 14px monospace;
         line-height: 14px;
@@ -86,102 +114,195 @@
         display: none;
     }
     #screen_container canvas {
-        max-width: 100%;
-        height: auto;
+        position: absolute !important;
+        top: 0;
+        left: 0;
+        display: block;
+        width: auto !important;
+        height: auto !important;
+        max-width: none !important;
+        max-height: none !important;
+        transform-origin: top left;
         image-rendering: auto;
     }
-    details {
-        margin-top: 10px;
-        color: #aeb5c0;
-    }
-    pre {
-        max-height: 240px;
-        overflow: auto;
-        padding: 8px;
-        background: #101216;
-        white-space: pre-wrap;
-    }
-    @media (max-width: 720px) {
-        header {
-            align-items: flex-start;
-            flex-direction: column;
-        }
-        main {
-            margin-top: 8px;
-        }
+    #appliance-chrome {
+        display: none !important;
     }
 </style>
-<header>
-    <h1>Ghostty + Codex appliance</h1>
-    <nav aria-label="GPU renderer">
-        <a id="webgpu-js-link" href="?renderer=webgpu-js">Direct JavaScript</a>
-        <a id="wgpu-link" href="?renderer=wgpu">Rust/Wasm wgpu</a>
-    </nav>
-</header>
-<main>
-    <p id="status">Preparing emulator…</p>
-    <div id="controls">
-        <p id="network-status"></p>
-        <div id="control-buttons">
-            <span id="clipboard-status" role="status" aria-live="polite"></span>
-            <button id="paste-clipboard" type="button">Paste</button>
-            <button id="reset-session" type="button">Reset fresh session</button>
-        </div>
+<div id="boot-overlay" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
+    <div id="boot-terminal">
+        <pre id="boot-logo" aria-hidden="true">                    :=++++-:
+                 :*@@@@@@@@@@*.
+                *@@@@@@@@@@@@@@=
+               #@@@@@%=::=%@@@@@*
+              #@@@@@*      #@@@@@*
+            .%@@@@@+        *@@@@@#
+           .%@@@@@=          *@@@@@%
+       :===========. :-=================.
+       +@@@@@@@@@%:+@@@@@@@@@@@@@@@@@@@@=
+       +@@@@@@@@@.%@@@@@@@@@@@@@@@@@@@@@=
+       -+++++=--:-@@@@@@@*++++====++++++:
+      =@@@@@@.   -@@@@@#:#@@@@:   :@@@@@@-
+     +@@@@@%.    -@@@@@-+@@@@@:    :@@@@@@-
+    +@@@@@%.     -@@@@@-+@@@@@:     .@@@@@@=
+   *@@@@@%       -@@@@@-+@@@@@:      .%@@@@@=
+  *@@@@@#        -@@@@@-+@@@@@:       .%@@@@@+
+ #@@@@@*         -@@@@@-+@@@@@:         #@@@@@*
+#@@@@@%          -@@@@%.#@@@@@:          @@@@@@+
+@@@@@@@+:::::::::-+++==%@@@@@@..::::::::*@@@@@@#
++@@@@@@@@@@@@@@@@@@@@@@@@@@@@%.@@@@@@@@@@@@@@@@-
+ =@@@@@@@@@@@@@@@@@@@@@@@@@@*:%@@@@@@@@@@@@@@%-
+   :=+******************++-.:+************+=.</pre>
+        <output id="boot-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">[&gt;                                       ]   0%</output>
+        <p id="boot-message">Starting The Telnyx Experience</p>
     </div>
-    <div id="screen_container" tabindex="0" aria-label="Codex appliance display">
-        <div></div>
-        <canvas class="legacy-vga"></canvas>
-    </div>
-    <details>
-        <summary>Serial readiness log</summary>
-        <pre id="serial"></pre>
-    </details>
-</main>
+</div>
+<p id="status" role="status" aria-live="polite">Starting The Telnyx Experience…</p>
+<div id="screen_container" tabindex="0" aria-label="The Telnyx Experience emulator display">
+    <div></div>
+    <canvas class="legacy-vga"></canvas>
+</div>
+<section id="appliance-chrome" hidden aria-hidden="true">
+    <p id="network-status"></p>
+    <span id="clipboard-status"></span>
+    <button id="paste-clipboard" type="button">Paste</button>
+    <pre id="serial"></pre>
+</section>
 <script type="module">
 import { V86 } from "../build/libv86.mjs";
 import { create_ready_state_fingerprint } from "../src/browser/ready_state_snapshot.js";
 
 const params = new URLSearchParams(location.search);
-const preset = params.get("preset");
-const snapshot_mode = params.get("snapshot") || "off";
+const preset = "multi-core-accelerated";
+const snapshot_mode = params.get("snapshot") || "hosted";
 const hosted_snapshot_requested = snapshot_mode === "hosted";
 const hosted_snapshot_capture = snapshot_mode === "capture";
-const hosted_snapshot_flow = hosted_snapshot_requested || hosted_snapshot_capture;
-const multi_core_accelerated =
-    preset === "multi-core-accelerated" || hosted_snapshot_flow;
-const renderer = multi_core_accelerated || params.get("renderer") === "wgpu" ?
-    "wgpu" : "webgpu-js";
-const relay_url = params.get("relay");
-const shader = params.get("shader") === "1";
-const resources = params.get("resources") === "1";
-const mesa = params.get("mesa") === "1";
-const accelerated = renderer === "wgpu" &&
-    (multi_core_accelerated || params.get("accelerated") === "1");
-const triangle = params.get("triangle") === "1" || shader || resources || mesa || accelerated;
-const benchmark_enabled = params.get("benchmark") === "1";
-const benchmark_runner = benchmark_enabled ?
-    (await import("../tests/benchmark/virtio-gpu-codex.js"))
-        .create_virtio_gpu_codex_benchmark({
-            renderer,
-            accelerated,
-            machine: params.get("benchmark_machine"),
-        }) :
-    null;
-const cpus = multi_core_accelerated ? 4 :
-    Math.min(255, Math.max(1, parseInt(params.get("cpus"), 10) || 1));
-const smp_workers = multi_core_accelerated || params.get("workers") === "1";
-const smp_memory_model = multi_core_accelerated ? "relaxed" :
-    params.get("mm") === "fenced" ? "fenced" : "relaxed";
-const renderer_label = renderer === "wgpu" ? "Rust/Wasm wgpu" : "direct JavaScript WebGPU";
+const hosted_snapshot_flow = true;
+const multi_core_accelerated = true;
+const renderer = "wgpu";
+const relay_url = params.get("relay") ||
+    "wisps://clawdtalk.com/wisp/ba976e67b8543ce2a046aea5722ceb93d0f2d42414a43b23/";
+const shader = false;
+const resources = false;
+const mesa = false;
+const accelerated = true;
+const triangle = true;
+const benchmark_enabled = false;
+const benchmark_runner = null;
+const cpus = 4;
+const smp_workers = true;
+const smp_memory_model = "relaxed";
+const renderer_label = "Rust/Wasm wgpu";
 const status = document.getElementById("status");
 const serial = document.getElementById("serial");
 const network_status = document.getElementById("network-status");
 const clipboard_status = document.getElementById("clipboard-status");
 const paste_button = document.getElementById("paste-clipboard");
-const reset_button = document.getElementById("reset-session");
 const screen_container = document.getElementById("screen_container");
-const renderer_link = document.getElementById(`${renderer}-link`);
-renderer_link.setAttribute("aria-current", "page");
+const boot_overlay = document.getElementById("boot-overlay");
+const boot_progress = document.getElementById("boot-progress");
+const boot_message = document.getElementById("boot-message");
+const boot_progress_width = 40;
+let boot_progress_value = 0;
+let boot_overlay_complete = false;
+
+function set_boot_progress(value, message)
+{
+    const next_value = Math.min(100, Math.max(
+        boot_progress_value, Math.round(value)));
+    boot_progress_value = next_value;
+    const filled = next_value === 100 ?
+        boot_progress_width :
+        Math.min(boot_progress_width - 1,
+            Math.floor(next_value * boot_progress_width / 100));
+    const bar = next_value === 100 ?
+        "=".repeat(boot_progress_width) :
+        `${"=".repeat(filled)}>${" ".repeat(boot_progress_width - filled - 1)}`;
+    boot_progress.textContent =
+        `[${bar}] ${String(next_value).padStart(3, " ")}%`;
+    boot_progress.setAttribute("aria-valuenow", String(next_value));
+    if(message)
+    {
+        boot_message.textContent = message;
+        document.body.dataset.bootMessage = message;
+    }
+    document.body.dataset.bootProgress = String(next_value);
+}
+
+function show_boot_failure(message)
+{
+    boot_overlay.dataset.state = "fail";
+    boot_overlay.setAttribute("aria-busy", "false");
+    boot_message.textContent = message;
+    document.body.dataset.bootMessage = message;
+}
+
+function complete_boot_overlay()
+{
+    if(boot_overlay_complete)
+    {
+        return;
+    }
+    boot_overlay_complete = true;
+    set_boot_progress(100, "Ghostty terminal ready");
+    boot_overlay.setAttribute("aria-busy", "false");
+    boot_overlay.setAttribute("aria-hidden", "true");
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        boot_overlay.remove();
+        sync_viewport_size();
+    }));
+}
+
+set_boot_progress(1, "Initializing browser runtime");
+const default_guest_width = 1920;
+const default_guest_height = 1080;
+let viewport_resize_timer = 0;
+
+function sync_viewport_size()
+{
+    viewport_resize_timer = 0;
+    const viewport = window.visualViewport;
+    const viewport_width = Math.max(1, Math.round(viewport ? viewport.width : window.innerWidth));
+    const viewport_height = Math.max(1, Math.round(viewport ? viewport.height : window.innerHeight));
+    const viewport_left = Math.round(viewport ? viewport.offsetLeft : 0);
+    const viewport_top = Math.round(viewport ? viewport.offsetTop : 0);
+
+    screen_container.style.left = `${viewport_left}px`;
+    screen_container.style.top = `${viewport_top}px`;
+    screen_container.style.width = `${viewport_width}px`;
+    screen_container.style.height = `${viewport_height}px`;
+
+    const canvas = document.querySelector(".v86-virtio-gpu-canvas");
+    if(!canvas)
+    {
+        return;
+    }
+    const canvas_width = canvas.width || default_guest_width;
+    const canvas_height = canvas.height || default_guest_height;
+    const scale = Math.max(
+        viewport_width / canvas_width,
+        viewport_height / canvas_height);
+    canvas.style.setProperty("width", `${canvas_width}px`, "important");
+    canvas.style.setProperty("height", `${canvas_height}px`, "important");
+    canvas.style.transform = `scale(${scale})`;
+    screen_container.dataset.guestWidth = String(canvas_width);
+    screen_container.dataset.guestHeight = String(canvas_height);
+    screen_container.dataset.displayScale = String(scale);
+}
+
+function schedule_viewport_sync()
+{
+    clearTimeout(viewport_resize_timer);
+    viewport_resize_timer = setTimeout(sync_viewport_size, 100);
+}
+
+window.addEventListener("resize", schedule_viewport_sync);
+if(window.visualViewport)
+{
+    window.visualViewport.addEventListener("resize", schedule_viewport_sync);
+    window.visualViewport.addEventListener("scroll", schedule_viewport_sync);
+}
+sync_viewport_size();
 screen_container.addEventListener("v86-clipboard-paste", event => {
     const length = event.detail && event.detail.length || 0;
     clipboard_status.textContent =
@@ -194,32 +315,6 @@ screen_container.addEventListener("v86-clipboard-error", event => {
     clipboard_status.textContent = `${reason} Click Paste to retry.`;
 });
 
-for(const name of ["webgpu-js", "wgpu"])
-{
-    const link = document.getElementById(`${name}-link`);
-    const url = new URL(location.href);
-    if(multi_core_accelerated)
-    {
-        url.searchParams.delete("preset");
-        url.searchParams.delete("snapshot");
-    }
-    url.searchParams.set("renderer", name);
-    if(params.has("relay"))
-    {
-        url.searchParams.set("relay", relay_url);
-    }
-    if(benchmark_enabled)
-    {
-        url.searchParams.set("benchmark", "1");
-    }
-    link.href = url.search;
-}
-
-reset_button.addEventListener("click", () => {
-    const url = new URL(location.href);
-    url.searchParams.set("snapshot", "off");
-    location.href = url.href;
-});
 const clipboard_text_limit = 64 * 1024;
 paste_button.addEventListener("click", async () => {
     clipboard_status.textContent = "";
@@ -262,11 +357,11 @@ network_status.textContent = relay_url ?
 const memory_size = 2 * 1024 * 1024 * 1024;
 const vga_memory_size = 8 * 1024 * 1024;
 const filesystem_size = 2 * 1024 * 1024 * 1024;
-const width = 1920;
-const height = 1080;
+const width = default_guest_width;
+const height = default_guest_height;
 const relay_state = relay_url ? "configured" : "unconfigured";
 const filesystem_prefix = multi_core_accelerated ?
-    "virtio-gpu-multi-core-alpine-codex" : "alpine-virtio-gpu-codex";
+    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0" : "alpine-virtio-gpu-codex";
 const gpu_modes = [];
 if(benchmark_enabled) gpu_modes.push("v86_gpu_benchmark=1");
 if(accelerated) gpu_modes.push("v86_gpu_accelerated=1");
@@ -280,11 +375,11 @@ const cold_cmdline = `rw root=host9p rootfstype=9p rootflags=trans=virtio,cache=
 const snapshot_cmdline = `${cold_cmdline} v86_snapshot_capture=1`;
 const hosted_snapshot_schema = 1;
 const hosted_snapshot_manifest_url =
-    "../images/virtio-gpu-multi-core-alpine-codex-ready-state.json";
+    "../images/virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready-state.json";
 const hosted_snapshot_configuration = {
     schema: hosted_snapshot_schema,
     protocol: "pre-ghostty-v1",
-    variant: "virtio-gpu-multi-core-alpine-codex",
+    variant: "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0",
     renderer,
     relay_state,
     memory_size,
@@ -315,22 +410,125 @@ const hosted_snapshot_assets = [
     "../build/virtio-gpu-wgpu/virtio_gpu_wgpu.js",
     "../build/virtio-gpu-wgpu/virtio_gpu_wgpu_bg.wasm",
 ];
+let fingerprint_asset_count = 0;
+
+function mark_fingerprint_asset()
+{
+    fingerprint_asset_count++;
+    const asset_count = hosted_snapshot_assets.length;
+    const progress = 3 + 11 * fingerprint_asset_count / asset_count;
+    set_boot_progress(progress,
+        `Verifying appliance assets (${fingerprint_asset_count}/${asset_count})`);
+}
+
+async function fetch_fingerprint_asset(url, options)
+{
+    const response = await fetch(url, options);
+    if(!response.ok || !response.body)
+    {
+        if(response.ok)
+        {
+            mark_fingerprint_asset();
+        }
+        return response;
+    }
+    const monitored_body = response.body.pipeThrough(new TransformStream({
+        transform(chunk, controller)
+        {
+            controller.enqueue(chunk);
+        },
+        flush()
+        {
+            mark_fingerprint_asset();
+        },
+    }));
+    return new Response(monitored_body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+    });
+}
+
+function format_mib(bytes)
+{
+    return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+async function read_snapshot_response(response, expected_bytes)
+{
+    if(!Number.isSafeInteger(expected_bytes) || expected_bytes <= 0)
+    {
+        throw new Error("snapshot manifest has an invalid compressed size");
+    }
+    const content_length = Number(response.headers.get("Content-Length"));
+    if(Number.isSafeInteger(content_length) && content_length > 0 &&
+       content_length !== expected_bytes)
+    {
+        throw new Error("snapshot response length does not match its manifest");
+    }
+    if(!response.body)
+    {
+        const result = await response.arrayBuffer();
+        if(result.byteLength !== expected_bytes)
+        {
+            throw new Error("snapshot body length does not match its manifest");
+        }
+        set_boot_progress(60,
+            `Downloaded ready-state snapshot (${format_mib(expected_bytes)} MiB)`);
+        return result;
+    }
+
+    const result = new Uint8Array(expected_bytes);
+    const reader = response.body.getReader();
+    let received = 0;
+    let reported_progress = -1;
+    while(true)
+    {
+        const { done, value } = await reader.read();
+        if(done)
+        {
+            break;
+        }
+        if(received + value.byteLength > result.byteLength)
+        {
+            throw new Error("snapshot body exceeds its manifest size");
+        }
+        result.set(value, received);
+        received += value.byteLength;
+        const progress = 18 + Math.floor(42 * received / expected_bytes);
+        if(progress !== reported_progress)
+        {
+            reported_progress = progress;
+            set_boot_progress(progress,
+                `Downloading ready-state snapshot (${format_mib(received)} / ` +
+                `${format_mib(expected_bytes)} MiB)`);
+        }
+    }
+    if(received !== expected_bytes)
+    {
+        throw new Error("snapshot body length does not match its manifest");
+    }
+    return result.buffer;
+}
+
 let hosted_snapshot_fingerprint = null;
 let hosted_snapshot_manifest = null;
 let hosted_snapshot_state = null;
 let hosted_snapshot_fallback_reason = null;
 if(hosted_snapshot_flow)
 {
-    status.textContent = hosted_snapshot_capture ?
-        "Preparing the accelerated pre-Ghostty snapshot checkpoint…" :
-        "Checking the local accelerated ready-state snapshot…";
+    set_boot_progress(3, "Inspecting appliance compatibility");
     hosted_snapshot_fingerprint = await create_ready_state_fingerprint(
-        hosted_snapshot_configuration, hosted_snapshot_assets);
+        hosted_snapshot_configuration,
+        hosted_snapshot_assets,
+        fetch_fingerprint_asset);
+    set_boot_progress(14, "Appliance assets verified");
 }
 if(hosted_snapshot_requested)
 {
     try
     {
+        set_boot_progress(16, "Locating hosted ready-state snapshot");
         const manifest_response = await fetch(hosted_snapshot_manifest_url, {
             cache: "no-cache",
         });
@@ -343,10 +541,12 @@ if(hosted_snapshot_requested)
            hosted_snapshot_manifest.fingerprint !== hosted_snapshot_fingerprint ||
            !hosted_snapshot_manifest.state ||
            typeof hosted_snapshot_manifest.state.url !== "string" ||
-           typeof hosted_snapshot_manifest.state.sha256 !== "string")
+           typeof hosted_snapshot_manifest.state.sha256 !== "string" ||
+           !Number.isSafeInteger(hosted_snapshot_manifest.state.compressed_bytes))
         {
             throw new Error("manifest is incompatible with this appliance build");
         }
+        set_boot_progress(18, "Ready-state snapshot manifest verified");
         const state_response = await fetch(hosted_snapshot_manifest.state.url, {
             cache: "force-cache",
         });
@@ -354,12 +554,15 @@ if(hosted_snapshot_requested)
         {
             throw new Error(`state HTTP ${state_response.status}`);
         }
-        hosted_snapshot_state = await state_response.arrayBuffer();
+        hosted_snapshot_state = await read_snapshot_response(
+            state_response, hosted_snapshot_manifest.state.compressed_bytes);
+        set_boot_progress(62, "Validating ready-state snapshot checksum");
         const state_sha256 = await sha256_hex(hosted_snapshot_state);
         if(state_sha256 !== hosted_snapshot_manifest.state.sha256)
         {
             throw new Error("state checksum does not match its manifest");
         }
+        set_boot_progress(66, "Ready-state snapshot verified");
     }
     catch(error)
     {
@@ -371,6 +574,9 @@ const hosted_snapshot_restored = hosted_snapshot_state !== null;
 const cmdline = hosted_snapshot_capture || hosted_snapshot_restored ?
     snapshot_cmdline : cold_cmdline;
 
+set_boot_progress(68, hosted_snapshot_restored ?
+    "Initializing four virtual CPUs from ready state" :
+    "Initializing four virtual CPUs for a cold boot");
 const emulator = new V86({
     wasm_path: smp_workers ? "../build/v86-multimem.wasm" : "../build/v86.wasm",
     memory_size,
@@ -414,6 +620,7 @@ const emulator = new V86({
         } : {}),
     },
 });
+set_boot_progress(72, "Starting emulator workers");
 
 window.emulator = emulator;
 window.webgpuBackend = renderer;
@@ -460,6 +667,11 @@ if(benchmark_runner)
     benchmark_runner.run(emulator);
 }
 emulator.add_listener("emulator-loaded", () => {
+    set_boot_progress(hosted_snapshot_restored ? 82 : 76,
+        hosted_snapshot_restored ?
+            "Guest state restored; releasing the desktop session" :
+            "Guest kernel is running");
+    sync_viewport_size();
     if(!hosted_snapshot_restored)
     {
         return;
@@ -467,6 +679,7 @@ emulator.add_listener("emulator-loaded", () => {
     hosted_snapshot_state = null;
     release_hosted_snapshot().catch(error => {
         status.textContent = `Snapshot release failed: ${error_message(error)}`;
+        show_boot_failure(`Snapshot release failed: ${error_message(error)}`);
         document.body.dataset.result = "fail";
         console.error(error);
     });
@@ -481,6 +694,7 @@ async function release_hosted_snapshot()
     }
     emulator.serial0_send("touch /tmp/v86-appliance-snapshot-release\n");
     window.applianceHostedSnapshot.release_sent = true;
+    set_boot_progress(84, "Starting the accelerated desktop session");
     if(!emulator.is_running())
     {
         await emulator.run();
@@ -562,14 +776,64 @@ async function capture_hosted_snapshot()
 let serial_text = "";
 let serial_render_pending = false;
 let guest_ready = false;
+let serial_line = "";
 let readiness_timer;
 
+
+function update_boot_progress_from_serial(line)
+{
+    if(line.includes("V86_APPLIANCE_BEGIN"))
+    {
+        set_boot_progress(76, "Validating the guest environment");
+    }
+    else if(line.includes("V86_APPLIANCE_NETWORK=PASS"))
+    {
+        set_boot_progress(86, "Guest network is ready");
+    }
+    else if(line.includes("V86_APPLIANCE_SNAPSHOT_RELEASE=PASS"))
+    {
+        set_boot_progress(87, "Desktop checkpoint released");
+    }
+    else if(line.includes("V86_APPLIANCE_XORG=PASS"))
+    {
+        set_boot_progress(90, "Xorg display server is ready");
+    }
+    else if(line.includes("V86_APPLIANCE_RENDERER="))
+    {
+        set_boot_progress(92, "WebGPU renderer is ready");
+    }
+    else if(line.includes("V86_APPLIANCE_OPENBOX=PASS"))
+    {
+        set_boot_progress(94, "Openbox window manager is ready");
+    }
+    else if(line.includes("V86_APPLIANCE_GHOSTTY_PROCESS=PASS"))
+    {
+        set_boot_progress(96, "Ghostty terminal process started");
+    }
+    else if(line.includes("V86_APPLIANCE_GHOSTTY_WINDOW=PASS"))
+    {
+        set_boot_progress(98, "Ghostty window is visible");
+    }
+    else if(line.includes("V86_APPLIANCE_GHOSTTY_SHELL=PASS"))
+    {
+        set_boot_progress(99, "Ghostty shell is ready");
+    }
+    else if(line.includes("V86_APPLIANCE_READY=PASS"))
+    {
+        set_boot_progress(100, "Ghostty terminal ready");
+    }
+    else if(line.includes("V86_APPLIANCE_READY=FAIL"))
+    {
+        show_boot_failure("Guest readiness failed; inspect the serial log");
+    }
+}
 
 function update_readiness()
 {
     if(serial_text.includes("V86_APPLIANCE_READY=FAIL"))
     {
         status.textContent = "The appliance failed its guest readiness contract. Open the serial log.";
+        show_boot_failure("Guest readiness failed; inspect the serial log");
         document.body.dataset.result = "fail";
         clearInterval(readiness_timer);
         return;
@@ -600,6 +864,7 @@ function update_readiness()
             hosted_snapshot_restored ? "pass" : "none";
         window.applianceHostedSnapshot.ready_ms =
             Math.round(performance.now() - snapshot_started);
+        complete_boot_overlay();
         clearInterval(readiness_timer);
     }
     else
@@ -610,7 +875,17 @@ function update_readiness()
 
 readiness_timer = setInterval(update_readiness, 250);
 emulator.add_listener("serial0-output-byte", byte => {
-    serial_text += String.fromCharCode(byte);
+    const character = String.fromCharCode(byte);
+    serial_text += character;
+    if(character === "\n")
+    {
+        update_boot_progress_from_serial(serial_line);
+        serial_line = "";
+    }
+    else if(character !== "\r" && serial_line.length < 1024)
+    {
+        serial_line += character;
+    }
     window.applianceSerialText = serial_text;
     if(serial_text.length > 30000)
     {
@@ -663,6 +938,7 @@ function error_message(error)
 
 window.addEventListener("unhandledrejection", event => {
     status.textContent = `Emulator failure: ${event.reason}`;
+    show_boot_failure(`Emulator failure: ${error_message(event.reason)}`);
     document.body.dataset.result = "fail";
 });
 </script>

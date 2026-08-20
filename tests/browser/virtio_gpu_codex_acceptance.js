@@ -13,7 +13,10 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const READY_TIMEOUT_MS = Number(process.env.V86_CODEX_BROWSER_TIMEOUT_MS || 300000);
 const PORT = Number(process.env.V86_CODEX_BROWSER_PORT || 8082);
+const KEYBOARD_TEXT_DELAY_MS = 5;
 const RELAY_URL = process.env.V86_CODEX_RELAY_URL || "";
+const PAGE_PATH = process.env.V86_CODEX_BROWSER_PAGE ||
+    "/examples/virtio_gpu_codex.html";
 const SCENARIO = process.env.V86_CODEX_BROWSER_SCENARIO || "appliance";
 const HOSTED_SNAPSHOT_MODE = process.env.V86_CODEX_HOSTED_SNAPSHOT || "";
 const HOSTED_SNAPSHOT_CAPTURE = HOSTED_SNAPSHOT_MODE === "capture";
@@ -23,13 +26,14 @@ const MULTICORE_ACCELERATED =
 const ACCELERATED = SCENARIO === "accelerated" || MULTICORE_ACCELERATED;
 const OUTPUT_PATH = process.env.V86_CODEX_BROWSER_OUTPUT || "";
 const BENCHMARK_MACHINE = process.env.V86_CODEX_BENCHMARK_MACHINE || "";
-const HOSTED_SNAPSHOT_PREFIX =
-    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready";
+const MULTICORE_APPLIANCE_PREFIX = process.env.V86_CODEX_APPLIANCE_PREFIX ||
+    "virtio-gpu-multi-core-alpine-codex";
+const EXPECTED_CODEX_VERSION = process.env.V86_CODEX_EXPECTED_VERSION || "0.147.0";
+const HOSTED_SNAPSHOT_PREFIX = `${MULTICORE_APPLIANCE_PREFIX}-ready`;
 const HOSTED_SNAPSHOT_RAW_PATH =
     path.join(ROOT, "images", `${HOSTED_SNAPSHOT_PREFIX}.bin`);
-const HOSTED_SNAPSHOT_MANIFEST_PATH = path.join(
-    ROOT, "images",
-    "virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-ready-state.json");
+const HOSTED_SNAPSHOT_MANIFEST_PATH =
+    path.join(ROOT, "images", `${HOSTED_SNAPSHOT_PREFIX}-state.json`);
 const LLVMPipe_BENCHMARK_PATH =
     path.join(ROOT, "tests/benchmark/baselines/ghostty-llvmpipe-wgpu-apple-m4.json");
 let hosted_snapshot_upload = null;
@@ -64,7 +68,7 @@ const required = [
     "build/libv86.mjs",
     MULTICORE_ACCELERATED ? "build/v86-multimem.wasm" : "build/v86.wasm",
     MULTICORE_ACCELERATED ?
-        "images/virtio-gpu-multi-core-alpine-codex-telnyx-v0.148.0-fs.json" :
+        `images/${MULTICORE_APPLIANCE_PREFIX}-fs.json` :
         "images/alpine-virtio-gpu-codex-fs.json",
 ];
 if(MULTICORE_ACCELERATED)
@@ -417,8 +421,9 @@ async function run_scenario(browser_ws, base_url, renderer)
     try
     {
         const started = performance.now();
-        const url = new URL(
-            `${base_url}/examples/virtio_gpu_codex.html?renderer=${renderer}&acceptance=${Date.now()}`);
+        const url = new URL(PAGE_PATH, base_url);
+        url.searchParams.set("renderer", renderer);
+        url.searchParams.set("acceptance", Date.now());
         if(MULTICORE_ACCELERATED) url.searchParams.set("preset", "multi-core-accelerated");
         if(RELAY_URL) url.searchParams.set("relay", RELAY_URL);
         if(SCENARIO === "shader") url.searchParams.set("shader", "1");
@@ -435,6 +440,7 @@ async function run_scenario(browser_ws, base_url, renderer)
         if(HOSTED_SNAPSHOT_CAPTURE) url.searchParams.set("snapshot", "capture");
         else if(HOSTED_SNAPSHOT_RESTORE) url.searchParams.set("snapshot", "hosted");
         await cdp.call("Page.navigate", { url: url.href });
+        await cdp.call("Page.bringToFront");
         let hosted_snapshot_capture_result = null;
         if(HOSTED_SNAPSHOT_CAPTURE)
         {
@@ -629,8 +635,7 @@ async function run_scenario(browser_ws, base_url, renderer)
                 "wget -q -T 20 -O /dev/null https://example.com && " +
                 "printf 'V86_HOSTED_SNAPSHOT_NETWORK=PASS\\n' >/dev/ttyS0 || " +
                 "printf 'V86_HOSTED_SNAPSHOT_NETWORK=FAIL\\n' >/dev/ttyS0\n";
-            await evaluate(cdp,
-                `window.emulator.keyboard_send_text(${JSON.stringify(network_command)}, 1)`);
+            await send_keyboard_text(cdp, network_command);
             await wait_for(async() => {
                 const serial = await evaluate(cdp, "window.applianceSerialText || ''");
                 if(serial.includes("V86_HOSTED_SNAPSHOT_NETWORK=FAIL"))
@@ -666,6 +671,7 @@ async function run_scenario(browser_ws, base_url, renderer)
         let clipboard_paste = null;
         if(SCENARIO === "appliance" || ACCELERATED)
         {
+            await cdp.call("Page.bringToFront");
             const clipboard_commands = [
                 "printf 'V86_CLIPBOARD_PASTE_LINE1=spaces punctuation !@#^&*()[]{}:;,.?/-_+=\\n' >/dev/ttyS0",
                 "printf 'V86_CLIPBOARD_PASTE_LINE2=multiline-ok\\n' >/dev/ttyS0",
@@ -790,7 +796,7 @@ async function run_scenario(browser_ws, base_url, renderer)
             assert.equal(button.reads_after_success, 1);
             assert.deepEqual(button.sent_text, [{
                 text: "button paste = value\nsecond line",
-                delay: 1,
+                delay: KEYBOARD_TEXT_DELAY_MS,
             }]);
             assert.match(button.success_status, /^Pasted 32 characters\.$/);
             assert.equal(button.reads_after_denial, 2);
@@ -812,16 +818,14 @@ async function run_scenario(browser_ws, base_url, renderer)
         let shell_restart = null;
         if(SCENARIO === "appliance" || ACCELERATED)
         {
-            await evaluate(cdp,
-                `window.emulator.keyboard_send_text(${JSON.stringify("exit\n")}, 1)`);
+            await send_keyboard_text(cdp, "exit\n");
             await wait_for(async() => {
                 const serial = await evaluate(cdp, "window.applianceSerialText || ''");
                 return serial.includes("V86_APPLIANCE_GHOSTTY_SHELL_RESTART=0");
             }, 30000, "Ghostty shell restart after a clean exit");
             const post_restart_command =
                 "printf 'V86_APPLIANCE_GHOSTTY_SHELL_RECOVERY=PASS\\n' >/dev/ttyS0\n";
-            await evaluate(cdp,
-                `window.emulator.keyboard_send_text(${JSON.stringify(post_restart_command)}, 1)`);
+            await send_keyboard_text(cdp, post_restart_command);
             await wait_for(async() => {
                 const serial = await evaluate(cdp, "window.applianceSerialText || ''");
                 return serial.includes("V86_APPLIANCE_GHOSTTY_SHELL_RECOVERY=PASS");
@@ -1268,7 +1272,8 @@ async function run_scenario(browser_ws, base_url, renderer)
             /V86_APPLIANCE_RENDERER=.*llvmpipe/i);
         assert.match(state.serial, /V86_APPLIANCE_OPENGL=4\.[1-9]/);
         assert.match(contract_serial, /V86_APPLIANCE_GHOSTTY=Ghostty 1\.3\.1/);
-        assert.ok(contract_serial.includes("V86_APPLIANCE_CODEX=codex-cli 0.148.0"));
+        assert.ok(contract_serial.includes(
+            `V86_APPLIANCE_CODEX=codex-cli ${EXPECTED_CODEX_VERSION}`));
         assert.equal(state.memory_size, 2 * 1024 * 1024 * 1024 - 128 * 1024);
         assert.equal(state.storage_size, 2 * 1024 * 1024 * 1024);
         assert.equal(state.canvas_visible, true);
@@ -1486,6 +1491,13 @@ async function run_scenario(browser_ws, base_url, renderer)
             deviceScaleFactor: 1,
             mobile: false,
         });
+        await wait_for(async() => {
+            const layout = await evaluate(cdp, `(() => {
+                const screen = document.getElementById("screen_container").getBoundingClientRect();
+                return { width: screen.width, viewport: innerWidth };
+            })()`);
+            return layout.width <= layout.viewport;
+        }, 1000, "responsive narrow layout");
         const narrow_layout = await evaluate(cdp, `(() => {
             const screen = document.getElementById("screen_container").getBoundingClientRect();
             return { width: screen.width, viewport: innerWidth };
@@ -2380,6 +2392,14 @@ async function run_clipboard_button_acceptance_in_page()
             delete navigator.clipboard;
         }
     }
+}
+
+async function send_keyboard_text(cdp, text)
+{
+    await cdp.call("Page.bringToFront");
+    await evaluate(cdp,
+        `window.emulator.keyboard_send_text(${JSON.stringify(text)}, ` +
+        `${KEYBOARD_TEXT_DELAY_MS})`);
 }
 
 async function evaluate(cdp, expression)
